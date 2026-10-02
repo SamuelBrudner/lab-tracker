@@ -23,6 +23,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from lab_tracker.auth import LPAT_TOKEN_PREFIX
 from lab_tracker.client_release import (
     ReleaseComparison,
+    ReleaseIdentity,
     installed_release,
     release_from_health,
     update_steps,
@@ -42,6 +43,7 @@ from lab_tracker.mcp_api_client import (
     MCPSettings,
     client_from_env,
     lab_tracker_api_error,
+    redact_auth_secrets,
 )
 from lab_tracker.mcp_tools import (
     register_hosted_write_tools,
@@ -104,6 +106,7 @@ from lab_tracker.mcp_tools.write import (
     lab_tracker_update_goal,
     lab_tracker_upload_visualization_file,
 )
+from lab_tracker_client.transport import HEALTH_PROBE_DEADLINE_SECONDS
 
 MCPTransport = Literal["stdio", "streamable-http"]
 _VALID_TRANSPORTS: set[str] = {"stdio", "streamable-http"}
@@ -115,6 +118,9 @@ ALLOWED_ORIGINS_ENV = "LAB_TRACKER_MCP_ALLOWED_ORIGINS"
 # tool's own shape.
 UPDATE_NOTICE_KEY = "_lab_tracker_update_notice"
 _RELEASE_PROBE_TIMEOUT_SECONDS = 2.0
+# Longest reason a skipped startup check writes to stderr, so a hostile or
+# verbose failure cannot flood the MCP host's log.
+_STARTUP_REASON_LIMIT = 300
 _TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_ENV_VALUES = frozenset({"", "0", "false", "no", "off"})
 _ALLOWED_HOST_PATTERN = (
@@ -282,25 +288,25 @@ class LabTrackerFastMCP(FastMCP):
 def probe_client_update_notice(api_settings: MCPSettings) -> str | None:
     """Return an agent-facing notice when an update is recommended for this client.
 
-    Only a newer server (MAJOR, MINOR) recommends one (``client_release``); a
-    PATCH-only gap stays quiet.
+    Any server release newer than this client's recommends one (``client_release``),
+    a PATCH release included; the same release at a different commit stays quiet.
 
-    One bounded, unauthenticated ``GET /health``. Any failure returns ``None``
-    so the session behaves exactly as it would without the check: a staleness
-    hint must never block or fail MCP startup.
+    One bounded, unauthenticated ``GET /health``. Any failure, including one
+    while building the HTTP client (httpx reads the proxy variables there), is
+    reported on stderr and returns ``None`` so the session behaves exactly as it
+    would without the check: a staleness hint must never block or fail MCP
+    startup.
     """
 
-    probe = LabTrackerAPIClient(
-        replace(api_settings, timeout_seconds=_RELEASE_PROBE_TIMEOUT_SECONDS)
-    )
     try:
-        health = probe.health()
-    except Exception:  # noqa: BLE001 - see docstring: the check is advisory only.
+        comparison = ReleaseComparison(
+            client=installed_release(), server=_probe_server_release(api_settings)
+        )
+        update_recommended = comparison.update_recommended
+    except Exception as exc:  # noqa: BLE001 - see docstring: the check is advisory only.
+        _warn_update_check_skipped(exc)
         return None
-    finally:
-        probe.close()
-    comparison = ReleaseComparison(client=installed_release(), server=release_from_health(health))
-    if not comparison.update_recommended:
+    if not update_recommended:
         return None
     return (
         f"UPDATE AVAILABLE: this Lab Tracker MCP client runs release "
@@ -308,6 +314,34 @@ def probe_client_update_notice(api_settings: MCPSettings) -> str | None:
         f"{comparison.server.version}. Tell the person that "
         f"{update_steps(comparison.server)}."
     )
+
+
+def _probe_server_release(api_settings: MCPSettings) -> ReleaseIdentity:
+    probe = LabTrackerAPIClient(
+        replace(api_settings, timeout_seconds=_RELEASE_PROBE_TIMEOUT_SECONDS)
+    )
+    try:
+        return release_from_health(probe.health(deadline_seconds=HEALTH_PROBE_DEADLINE_SECONDS))
+    finally:
+        probe.close()
+
+
+def _warn_update_check_skipped(exc: Exception) -> None:
+    print(
+        "NOTICE: could not check whether this Lab Tracker MCP client is behind its "
+        f"server ({_one_line_reason(exc)}); starting without the update check.",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _one_line_reason(exc: Exception) -> str:
+    """``Type: message`` on one redacted line of at most ``_STARTUP_REASON_LIMIT`` characters."""
+
+    reason = " ".join(redact_auth_secrets(f"{type(exc).__name__}: {exc}").split())
+    if len(reason) > _STARTUP_REASON_LIMIT:
+        reason = reason[: _STARTUP_REASON_LIMIT - 3] + "..."
+    return reason
 
 
 def build_server(
@@ -428,13 +462,21 @@ def _ensure_mcp_target_safe(
     Hosted (streamable-http) servers always probe and fail closed: they boot only
     once ``/readiness`` confirms ``auth.enabled``. Local stdio servers skip
     loopback targets and, for remote targets, stay fail-soft on probe errors (a
-    local agent proceeds without graph context) but warn loudly on stderr.
+    local agent proceeds without graph context) but warn loudly on stderr. That
+    includes a client that cannot be built at all, which httpx does when the
+    proxy variables name a SOCKS proxy and ``socksio`` is not installed.
     """
 
     settings = settings or MCPSettings.from_env()
     if not hosted and _is_loopback_url(settings.base_url):
         return
-    client = LabTrackerAPIClient(settings)
+    try:
+        client = LabTrackerAPIClient(settings)
+    except Exception as exc:  # noqa: BLE001 - stdio stays fail-soft, hosted re-raises.
+        if hosted:
+            raise
+        _warn_startup_probe_could_not_run(settings, exc)
+        return
     try:
         payload = client.readiness()
     except LabTrackerAPIError as exc:
@@ -519,6 +561,18 @@ def _warn_startup_target_probe_failed(
         "server is starting anyway; tools will report Lab Tracker as unavailable "
         "until the API answers. Relaunch the MCP server once the API is reachable so "
         "the probe can run.",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _warn_startup_probe_could_not_run(settings: MCPSettings, exc: Exception) -> None:
+    print(
+        "WARNING: Lab Tracker MCP startup safety probe could not run against "
+        f"{settings.base_url} ({_one_line_reason(exc)}), so it could not confirm that the "
+        "API enforces authentication. The server is starting anyway, but tool calls "
+        "that need the API are likely to fail the same way until this is fixed. Relaunch "
+        "the MCP server after fixing it so the probe can run.",
         file=sys.stderr,
         flush=True,
     )

@@ -309,8 +309,15 @@ class LabTrackerAPIClient:
             code=UNAVAILABLE_CODE,
         )
 
-    def health(self) -> JsonObject:
-        return self._request("GET", "/health", authenticated=False)
+    def health(self, *, deadline_seconds: float | None = None) -> JsonObject:
+        """``GET /health``; ``deadline_seconds`` also limits the whole response.
+
+        An expired deadline closes this client, so use a client made for the probe.
+        """
+
+        return self._request(
+            "GET", "/health", authenticated=False, deadline_seconds=deadline_seconds
+        )
 
     def readiness(self) -> JsonObject:
         return self._request("GET", "/readiness")
@@ -1446,6 +1453,7 @@ class LabTrackerAPIClient:
         files: dict[str, Any] | None = None,
         retry_on_unauthorized: bool = True,
         preserve_json_nulls: bool = False,
+        deadline_seconds: float | None = None,
     ) -> JsonObject:
         response = self._transport.request(
             method,
@@ -1456,6 +1464,7 @@ class LabTrackerAPIClient:
             files=files,
             retry_on_unauthorized=retry_on_unauthorized,
             preserve_json_nulls=preserve_json_nulls,
+            deadline_seconds=deadline_seconds,
         )
         if response.status_code >= 400:
             raise _api_error_from_response(response)

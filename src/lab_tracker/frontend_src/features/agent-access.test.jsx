@@ -12,6 +12,30 @@ import { AgentAccessPage } from "./agent-access.jsx";
 
 const TOKEN_ID = "22222222-2222-4222-8222-222222222222";
 const SOURCE_REVISION = "0123456789abcdef0123456789abcdef01234567";
+
+const CLIENT_DOCS_URL =
+  `https://github.com/SamuelBrudner/lab-tracker/blob/${SOURCE_REVISION}` +
+  "/docs/agent-setup.md#choose-your-client";
+
+// Both the token-issued and the auth-disabled views render the shared client list.
+function expectPerClientGuidance() {
+  const text = document.body.textContent;
+  expect(text).toContain("Claude Code (terminal, IDE, or the Claude Desktop Code tab)");
+  expect(text).toContain("Claude Desktop chat");
+  expect(text).toContain("manual registration only");
+  expect(text).toContain("Codex in the ChatGPT desktop app");
+  expect(text).toContain("Codex CLI (needs the codex command on your PATH)");
+  expect(text).toContain("command not found: codex");
+  const docsLinks = Array.from(document.querySelectorAll("a")).filter((node) =>
+    /per-client steps/.test(node.textContent)
+  );
+  expect(docsLinks).toHaveLength(1);
+  expect(docsLinks[0]).toHaveAttribute("href", CLIENT_DOCS_URL);
+  // The issued token lives only in this page's state, so the docs link must open a
+  // new tab: following it in this one would discard the once-shown secret.
+  expect(docsLinks[0]).toHaveAttribute("target", "_blank");
+  expect(docsLinks[0]).toHaveAttribute("rel", "noopener noreferrer");
+}
 const PROJECT = {
   name: "Deerhake lab",
   project_id: "11111111-1111-4111-8111-111111111111",
@@ -428,6 +452,7 @@ describe("AgentAccessPage", () => {
       `lt setup verify-mcp --expected-revision ${SOURCE_REVISION}`
     );
     expect(commandText).toContain("codex mcp list");
+    expectPerClientGuidance();
     const applyingBlocks = Array.from(commandBlocks).filter(
       (node) =>
         node.textContent.includes("lt setup init") ||
@@ -688,6 +713,7 @@ describe("AgentAccessPage", () => {
       `lt setup verify-mcp --expected-revision ${SOURCE_REVISION}`
     );
     expect(commandText).toContain("codex mcp list");
+    expectPerClientGuidance();
     expect(document.body.textContent).toContain(
       `uv tool install --force "lab-tracker @ git+https://github.com/` +
         `SamuelBrudner/lab-tracker.git@${SOURCE_REVISION}"`
@@ -718,5 +744,8 @@ describe("AgentAccessPage", () => {
     expect(commandText).not.toContain("lt hooks install");
     expect(commandText).not.toContain("codex mcp add");
     expect(commandText).not.toContain("claude mcp add");
+    expect(document.body.textContent).not.toContain("Claude Desktop chat");
+    expect(document.body.textContent).not.toContain("Codex in the ChatGPT desktop app");
+    expect(document.querySelector('a[href*="agent-setup.md"]')).toBeNull();
   });
 });

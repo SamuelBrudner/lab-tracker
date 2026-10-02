@@ -76,8 +76,21 @@ def setup_guide_markdown() -> str:
         "   integration files\n"
         "   (MCP config, prompt hooks, `lt_ids.json`). The MCP files use the\n"
         "   saved/env Lab Tracker URL when one exists, otherwise localhost;\n"
-        "   the setup skill is installed in both Claude and Codex user homes;\n"
-        "   `lt update` refreshes them after a package upgrade.\n"
+        "   `--install-skills` also installs the setup skill in both Claude and\n"
+        "   Codex user homes. After a package upgrade, `lt update` refreshes\n"
+        "   the repo's files only; `lt update --install-skills` refreshes the\n"
+        "   skill as well. To install or refresh only the setup skill (for\n"
+        "   example when `lt setup status` reports it missing or stale),\n"
+        "   `lt update --skills-only` works machine-wide and touches no repo or\n"
+        "   file in the current directory (`--dry-run` previews; it cannot be\n"
+        "   combined with `--yes` or `--target`); a relative\n"
+        "   `LAB_TRACKER_SKILLS_HOME` resolves against the current directory,\n"
+        "   so keep that override absolute. Claude Code reads the scaffolded\n"
+        "   `.mcp.json`, which carries no token, and asks the person to\n"
+        "   approve the server on first run. Claude Desktop chat, Codex in the\n"
+        "   ChatGPT desktop app, and the Codex CLI keep their MCP registration in\n"
+        "   user-level settings that setup never writes; `docs/agent-setup.md`\n"
+        "   in the Lab Tracker repository lists each client's registration.\n"
         "7. **Project binding** — `lt project bind --project-id <project-id>\n"
         "   --yes` verifies the selected project and records its exact id in\n"
         "   `lt_ids.json`.\n"
@@ -114,7 +127,11 @@ def setup_guide_markdown() -> str:
         "11. **MCP launch verification** — after client registration, `lt setup\n"
         "    verify-mcp --expected-revision <revision>` launches `lt-mcp` over\n"
         "    stdio, initializes the protocol, calls health, and performs an\n"
-        "    authenticated project read through the saved profile.\n"
+        "    authenticated project read through the saved profile. It uses the\n"
+        "    terminal's environment, so for a desktop app it takes `--command\n"
+        "    <absolute path>` naming the `lt-mcp` that app registered, and the\n"
+        "    in-client check is asking the assistant to call\n"
+        "    `lab_tracker_list_projects` with limit 1.\n"
         "12. **Agent session capture (optional)** — `lt setup agent-hooks\n"
         "    --dry-run` previews two Claude Code hooks for the person's own\n"
         "    `.claude/settings.local.json`: when a session ends, `lt agent\n"
@@ -156,14 +173,21 @@ def setup_guide_markdown() -> str:
         "graph automatically. Server-side AI drafting uses the operator's\n"
         "configured provider credential; no local OpenAI key is needed for Lab\n"
         "Tracker. `lt doctor` and `lt setup status` surface drift after package\n"
-        "upgrades and confirm that `lt-mcp` can start, and `lt update` is the\n"
-        "refresh path. When the server moves to a newer MAJOR.MINOR release\n"
-        "(docs/versioning.md), `lt setup status`, `lt-mcp` notices, and the\n"
-        "Daily review name each client that should update; a PATCH-only gap is\n"
-        "reported, never suggested. The `uv tool` install updates with the\n"
-        "Setup page's server-pinned install, then `lt update` refreshes each\n"
-        "repo; an analysis repo updates by rerunning its pinned `uv add`\n"
-        "(step 5), which `lt update` does not change.\n"
+        "upgrades and confirm that `lt-mcp` can start, and both compare this\n"
+        "client's release with the server's (`lt doctor` only warns when the\n"
+        "server cannot be reached). `lt update` is the refresh path for a repo\n"
+        "(`lt update --skills-only` is the one for the setup skill alone). When\n"
+        "the server runs a newer release, a PATCH release included\n"
+        "(docs/versioning.md), `lt setup status`, `lt doctor`, `lt-mcp` notices,\n"
+        "and the Daily review name the clients that should update (each is\n"
+        "judged by its captures: `lt watch`, `lt run`, `lt pipeline`, `lt hpc`,\n"
+        "the repo hooks, agent sessions, notebook saves, and figure saves record\n"
+        "their client's release, notes made by hand or import do not); the same\n"
+        "release at a different commit is reported, never suggested. The\n"
+        "`uv tool` install updates with the Setup page's server-pinned install,\n"
+        "then `lt update` refreshes each repo; an analysis repo updates by\n"
+        "rerunning its pinned `uv add` (step 5), which `lt update` does not\n"
+        "change.\n"
     )
 
 
@@ -236,7 +260,8 @@ _SKILL_CONVERSATION = """\
 4. Commit hooks are per-repo consent: name the repo, show the preview, and
    let the user apply `lt hooks install --yes` themselves when in doubt.
 5. Close by re-running `lt setup status` and reflecting the healthy state
-   back; mention that `lt update` refreshes everything after upgrades.
+   back; mention that after upgrades `lt update` refreshes a repo's files
+   and `lt update --skills-only` refreshes this skill.
 
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.

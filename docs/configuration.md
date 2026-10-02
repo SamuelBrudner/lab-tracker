@@ -1120,7 +1120,8 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
   queueing into the checkout's watch outbox when the server is unreachable;
   the save then reports the failure instead (default: on)
 - `LAB_TRACKER_SKILLS_HOME`: install the generated setup skill into this one
-  directory instead of both `~/.claude/skills` and `~/.agents/skills`
+  directory instead of both `~/.claude/skills` and `~/.agents/skills`; use an
+  absolute path, because a relative one resolves against the current directory
 
 #### Git, repo, HPC, and watch capture
 

@@ -4,13 +4,21 @@ drift semantics, status suggestions/--brief, and the SessionStart hook."""
 from __future__ import annotations
 
 import json
-import logging
+import os
+import re
+import shlex
 from pathlib import Path
 
 import httpx
 import pytest
 
-from lab_tracker.cli import _doctor, init_consumer_repo, update_consumer_repo
+from lab_tracker.cli import (
+    InitResult,
+    _doctor,
+    init_consumer_repo,
+    refresh_setup_skills,
+    update_consumer_repo,
+)
 from lab_tracker.decision_context_constants import (
     MCP_SERVER_INSTRUCTIONS,
     code_conventions_version_line,
@@ -25,6 +33,7 @@ from lab_tracker.setup_guide import (
     setup_skill_markdown,
 )
 from lab_tracker_client import cli as lt_cli
+from lab_tracker_client import registry as repo_registry
 from lab_tracker_client import setup as setup_helpers
 
 
@@ -88,6 +97,21 @@ def test_setup_guide_states_consent_rules_non_imperatively() -> None:
     lowered = guide.lower()
     for forbidden in ("pip install", "subprocess", "curl "):
         assert forbidden not in lowered
+
+
+def test_setup_guide_names_the_clients_that_setup_never_registers() -> None:
+    guide = " ".join(setup_guide_markdown().split())
+    # Claude Code is the only client whose config the scaffold writes; the rest
+    # register in user-level settings, and the per-client steps live in the docs.
+    assert "asks the person to approve the server on first run" in guide
+    for client in ("Claude Desktop chat", "Codex in the ChatGPT desktop app", "Codex CLI"):
+        assert client in guide, client
+    assert "setup never writes" in guide
+    assert "docs/agent-setup.md" in guide
+    # A GUI client needs the absolute lt-mcp path, and only an in-client read
+    # proves what that client launched.
+    assert "--command <absolute path>" in guide
+    assert "lab_tracker_list_projects" in guide
 
 
 def test_mcp_surface_points_at_setup_guide() -> None:
@@ -334,6 +358,170 @@ def test_setup_status_exposes_and_checks_each_default_skill_target(
     )
 
 
+def _default_skill_paths(agent_home: Path) -> dict[str, Path]:
+    return {
+        "claude": agent_home / ".claude" / "skills" / "lab-tracker-setup" / "SKILL.md",
+        "codex": agent_home / ".agents" / "skills" / "lab-tracker-setup" / "SKILL.md",
+    }
+
+
+def _write_skill(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _suggestion_containing(suggestions: list[str], marker: str) -> str:
+    return next(item for item in suggestions if marker in item)
+
+
+def _assert_skills_only_suggestion(suggestion: str) -> None:
+    assert "`lt update --skills-only`" in suggestion
+    assert "leaves this repository's files alone" in suggestion
+    # The pre-fix commands also scaffolded ten files into the working directory.
+    assert "--install-skills" not in suggestion
+    assert "lt setup init" not in suggestion
+
+
+def test_skill_suggestions_name_the_skills_only_command(
+    default_agent_home,
+    monkeypatch,
+) -> None:
+    repo = default_agent_home.parent / "repo-skill-suggestions"
+    repo.mkdir()
+    monkeypatch.setattr(
+        setup_helpers, "probe_health_diagnostics", lambda _url: {"reachable": True}
+    )
+    paths = _default_skill_paths(default_agent_home)
+    _write_skill(paths["claude"], setup_skill_markdown())
+
+    missing = _suggestion_containing(
+        setup_helpers.setup_status(repo)["suggestions"], "missing from: codex"
+    )
+    _assert_skills_only_suggestion(missing)
+
+    _write_skill(paths["codex"], "custom stale skill")
+    stale_status = setup_helpers.setup_status(repo)
+    stale = _suggestion_containing(stale_status["suggestions"], "skills are stale")
+    _assert_skills_only_suggestion(stale)
+
+    # Status payloads that predate the per-agent target list take the legacy branch.
+    legacy_status = {**stale_status, "skills": {"installed": True, "up_to_date": False}}
+    legacy = _suggestion_containing(
+        setup_helpers._suggestions(legacy_status), "skill is stale"
+    )
+    _assert_skills_only_suggestion(legacy)
+
+
+@pytest.mark.parametrize("state", ["stale", "missing"])
+def test_suggested_skill_fix_command_runs_verbatim_and_leaves_cwd_untouched(
+    default_agent_home,
+    monkeypatch,
+    state: str,
+) -> None:
+    scratch = default_agent_home.parent / "not-a-consumer-repo"
+    scratch.mkdir()
+    monkeypatch.chdir(scratch)
+    monkeypatch.setattr(
+        setup_helpers, "probe_health_diagnostics", lambda _url: {"reachable": True}
+    )
+    paths = _default_skill_paths(default_agent_home)
+    if state == "stale":
+        for name, path in paths.items():
+            _write_skill(path, f"{name} customised skill")
+        marker = "skills are stale"
+    else:
+        _write_skill(paths["claude"], setup_skill_markdown())
+        marker = "missing from: codex"
+
+    suggestion = _suggestion_containing(
+        setup_helpers.setup_status(scratch)["suggestions"], marker
+    )
+    command = re.search(r"`(lt [^`]+)`", suggestion)
+    assert command is not None, suggestion
+    argv = shlex.split(command.group(1))
+    assert argv[0] == "lt"
+
+    lt_cli.main(argv[1:])
+
+    for path in paths.values():
+        assert path.read_text(encoding="utf-8") == setup_skill_markdown()
+    if state == "stale":
+        for name, path in paths.items():
+            backup = path.with_name(path.name + ".bak-lt-update")
+            assert backup.read_text(encoding="utf-8") == f"{name} customised skill"
+    # The whole point of the fix: nothing lands in the directory it ran from.
+    assert list(scratch.iterdir()) == []
+    assert not repo_registry.registry_path().exists()
+    healthy = setup_helpers.setup_status(scratch)
+    assert healthy["skills"]["all_up_to_date"] is True
+    assert not any(
+        "lab-tracker-setup skill" in item for item in healthy["suggestions"]
+    )
+
+
+def test_refresh_setup_skills_touches_nothing_but_the_skill_homes(
+    default_agent_home,
+    monkeypatch,
+) -> None:
+    scratch = default_agent_home.parent / "scratch-cwd"
+    scratch.mkdir()
+    monkeypatch.chdir(scratch)
+    paths = _default_skill_paths(default_agent_home)
+
+    created = refresh_setup_skills()
+    assert set(created.created) == set(paths.values())
+    for path in paths.values():
+        assert path.read_text(encoding="utf-8") == setup_skill_markdown()
+
+    # Each customised target gets its own refresh backup.
+    for name, path in paths.items():
+        path.write_text(f"{name} customised skill", encoding="utf-8")
+    refreshed = refresh_setup_skills()
+    assert set(refreshed.overwritten) == set(paths.values())
+    for name, path in paths.items():
+        backup = path.with_name(path.name + ".bak-lt-update")
+        assert path.read_text(encoding="utf-8") == setup_skill_markdown()
+        assert backup.read_text(encoding="utf-8") == f"{name} customised skill"
+        assert refreshed.backups[path] == backup
+
+    assert set(refresh_setup_skills().up_to_date) == set(paths.values())
+    assert set(refreshed.as_dict()) == set(InitResult().as_dict())
+    assert refreshed.offers == []
+    assert refreshed.warnings == []
+    assert list(scratch.iterdir()) == []
+    assert not repo_registry.registry_path().exists()
+    assert sorted(item.name for item in default_agent_home.iterdir()) == [
+        ".agents",
+        ".claude",
+    ]
+
+
+def test_refresh_setup_skills_dry_run_writes_nothing(
+    default_agent_home,
+    monkeypatch,
+) -> None:
+    scratch = default_agent_home.parent / "scratch-cwd-dry"
+    scratch.mkdir()
+    monkeypatch.chdir(scratch)
+    paths = _default_skill_paths(default_agent_home)
+    _write_skill(paths["claude"], "stale claude skill")
+
+    result = refresh_setup_skills(dry_run=True)
+
+    assert set(result.diffs) == set(paths.values())
+    assert paths["claude"].read_text(encoding="utf-8") == "stale claude skill"
+    assert not paths["claude"].with_name("SKILL.md.bak-lt-update").exists()
+    assert paths["claude"] in result.backups
+    assert not (default_agent_home / ".agents").exists()
+    assert list(scratch.iterdir()) == []
+
+
+def test_setup_guide_documents_skills_only() -> None:
+    guide = " ".join(setup_guide_markdown().split())
+    assert "`lt update --skills-only`" in guide
+    assert "current directory" in guide
+
+
 def test_doctor_content_only_drift(tmp_path) -> None:
     repo = tmp_path / "repo"
     init_consumer_repo(repo, yes=True)
@@ -429,7 +617,9 @@ def broken_mcp_install(tmp_path, monkeypatch):
         "from mcp.server.fastmcp_removed_upstream import FastMCP  # noqa: F401\n",
         encoding="utf-8",
     )
-    monkeypatch.syspath_prepend(str(site))
+    # The check imports in a child interpreter, which sees only PYTHONPATH.
+    python_path = [str(site), *filter(None, [os.environ.get("PYTHONPATH")])]
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(python_path))
     monkeypatch.setattr(setup_helpers, "_MCP_SERVER_MODULE", "broken_lt_mcp_server")
 
 
@@ -454,6 +644,7 @@ def _server_reports_release(monkeypatch, version: str, revision: str = SERVER_RE
     )
 
 
+@pytest.mark.usefixtures("offline_server")
 def test_doctor_reports_that_lt_mcp_can_start(tmp_path, capsys) -> None:
     repo = tmp_path / "repo"
     init_consumer_repo(repo, yes=True)
@@ -466,6 +657,7 @@ def test_doctor_reports_that_lt_mcp_can_start(tmp_path, capsys) -> None:
     assert "error" not in payload["lt_mcp"]
 
 
+@pytest.mark.usefixtures("offline_server")
 def test_doctor_fails_loudly_when_lt_mcp_cannot_import(
     tmp_path, broken_mcp_install, capsys
 ) -> None:
@@ -491,25 +683,7 @@ def test_doctor_fails_loudly_when_lt_mcp_cannot_import(
     assert capsys.readouterr().out == ""
 
 
-def test_lt_mcp_check_keeps_server_logging_setup_out_of_lt(tmp_path, monkeypatch) -> None:
-    # FastMCP's constructor calls logging.basicConfig at import time; without
-    # containment every later INFO log (alembic, httpx) leaks onto lt's stderr.
-    site = tmp_path / "logging-site"
-    site.mkdir()
-    (site / "logging_lt_mcp_server.py").write_text(
-        "import logging\nlogging.basicConfig(level=logging.DEBUG, force=True)\n",
-        encoding="utf-8",
-    )
-    monkeypatch.syspath_prepend(str(site))
-    monkeypatch.setattr(setup_helpers, "_MCP_SERVER_MODULE", "logging_lt_mcp_server")
-    root = logging.getLogger()
-    handlers, level = list(root.handlers), root.level
-
-    assert setup_helpers.mcp_startup_check()["importable"] is True
-    assert root.handlers == handlers
-    assert root.level == level
-
-
+@pytest.mark.usefixtures("offline_server")
 def test_doctor_all_checks_the_install_once_per_sweep(broken_mcp_install, capsys) -> None:
     with pytest.raises(SystemExit):
         lt_cli.main(["doctor", "--all"])
@@ -518,6 +692,178 @@ def test_doctor_all_checks_the_install_once_per_sweep(broken_mcp_install, capsys
     assert payload["command"] == "doctor-all"
     assert payload["repos"] == []
     assert payload["lt_mcp"]["importable"] is False
+
+
+def _installed_release(monkeypatch, version: str) -> None:
+    monkeypatch.setattr(
+        setup_helpers,
+        "installed_release",
+        lambda: setup_helpers.ReleaseIdentity(version=version, revision="a" * 40),
+    )
+
+
+def _doctor_payload(repo, capsys, *extra: str) -> dict:
+    lt_cli.main(["doctor", "--target", str(repo), *extra])
+    return json.loads(capsys.readouterr().out)
+
+
+def test_doctor_warns_when_the_client_is_a_patch_release_behind(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    repo = tmp_path / "repo"
+    init_consumer_repo(repo, yes=True)
+    _installed_release(monkeypatch, "0.4.0")
+    _server_reports_release(monkeypatch, "0.4.1")
+
+    payload = _doctor_payload(repo, capsys)  # a warning must not raise SystemExit
+
+    assert payload["server"]["reachable"] is True
+    assert payload["client"]["status"] == "behind"
+    assert payload["client"]["update_recommended"] is True
+    [warning] = payload["warnings"]
+    assert "(release 0.4.0) is behind its server (release 0.4.1)" in warning
+    assert f"lab-tracker.git@{SERVER_REVISION}" in warning
+    assert not any(target["drifted"] for target in payload["targets"])
+
+
+def test_doctor_is_quiet_when_the_client_is_current(tmp_path, monkeypatch, capsys) -> None:
+    repo = tmp_path / "repo"
+    init_consumer_repo(repo, yes=True)
+    _installed_release(monkeypatch, "0.4.0")
+    _server_reports_release(monkeypatch, "0.4.0", revision="c" * 40)  # same release, new commit
+
+    payload = _doctor_payload(repo, capsys)
+
+    assert payload["client"]["status"] == "current"
+    assert payload["warnings"] == []
+
+
+def test_doctor_tries_the_server_but_only_warns_when_it_cannot_connect(
+    tmp_path, offline_server, capsys
+) -> None:
+    repo = tmp_path / "repo"
+    init_consumer_repo(repo, yes=True)
+
+    payload = _doctor_payload(repo, capsys)  # no SystemExit: an unreachable server is soft
+
+    assert payload["server"]["reachable"] is False
+    assert payload["client"]["status"] == "unknown"
+    assert payload["client"]["update_recommended"] is False
+    [warning] = payload["warnings"]
+    assert payload["server"]["base_url"] in warning
+    assert "tcp_connection_failed" in warning
+    assert "release check was skipped" in warning
+    assert "Check the server address and port." in warning
+    # The warning is data, so prompt hooks that keep drift output still get it.
+    assert _doctor_payload(repo, capsys, "--fail-silent")["warnings"] == payload["warnings"]
+
+
+def test_doctor_reports_an_http_error_from_the_server_as_a_warning(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    repo = tmp_path / "repo"
+    init_consumer_repo(repo, yes=True)
+    monkeypatch.setattr(
+        setup_helpers,
+        "probe_health_diagnostics",
+        lambda _url: {
+            "reachable": True,
+            "diagnosis": "http_error",
+            "status_code": 404,
+            "detail": "HTTP connection succeeded; server returned HTTP 404.",
+            "next_step": "Check the URL, access requirements, and application or proxy logs.",
+        },
+    )
+
+    [warning] = _doctor_payload(repo, capsys)["warnings"]
+
+    assert "http_error" in warning
+    assert "server returned HTTP 404" in warning
+
+
+def test_doctor_warns_when_the_releases_cannot_be_compared(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    repo = tmp_path / "repo"
+    init_consumer_repo(repo, yes=True)
+    _installed_release(monkeypatch, "0.4.0")
+    monkeypatch.setattr(setup_helpers, "probe_health_diagnostics", lambda _url: {"reachable": True})
+
+    payload = _doctor_payload(repo, capsys)
+
+    assert payload["client"]["status"] == "unknown"
+    [warning] = payload["warnings"]
+    assert "release (0.4.0) with the server's (unknown)" in warning
+
+
+def test_doctor_survives_a_malformed_server_address(tmp_path, monkeypatch, capsys) -> None:
+    repo = tmp_path / "repo"
+    init_consumer_repo(repo, yes=True)
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", "not a url")
+
+    payload = _doctor_payload(repo, capsys)
+
+    assert payload["server"]["base_url"] is None
+    assert payload["server"]["diagnosis"] == "server_check_failed"
+    [warning] = payload["warnings"]
+    assert "server_check_failed" in warning
+    assert "LAB_TRACKER_BASE_URL" in warning
+
+
+def test_doctor_survives_a_probe_that_raises(tmp_path, monkeypatch, capsys) -> None:
+    repo = tmp_path / "repo"
+    init_consumer_repo(repo, yes=True)
+
+    def explode(_url: str) -> dict:
+        raise RuntimeError("probe exploded")
+
+    monkeypatch.setattr(setup_helpers, "probe_health_diagnostics", explode)
+
+    [warning] = _doctor_payload(repo, capsys)["warnings"]
+
+    assert "server_check_failed" in warning
+    assert "RuntimeError: probe exploded" in warning
+
+
+def test_doctor_exit_code_ignores_warnings_but_not_a_broken_install(
+    tmp_path, broken_mcp_install, offline_server, capsys
+) -> None:
+    repo = tmp_path / "repo"
+    init_consumer_repo(repo, yes=True)
+
+    with pytest.raises(SystemExit) as excinfo:
+        lt_cli.main(["doctor", "--target", str(repo)])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert excinfo.value.code == 1  # the install decides the exit code...
+    assert payload["lt_mcp"]["importable"] is False
+    assert payload["warnings"]  # ...and the soft warning is still reported
+
+
+def test_doctor_all_checks_the_server_once_per_sweep(tmp_path, monkeypatch, capsys) -> None:
+    repos = [tmp_path / "one", tmp_path / "two"]
+    for repo in repos:
+        init_consumer_repo(repo, yes=True)
+    monkeypatch.setattr(
+        repo_registry, "list_repos", lambda: [{"root": str(r), "actions": []} for r in repos]
+    )
+    _installed_release(monkeypatch, "0.4.0")
+    probes: list[str] = []
+
+    def probe(url: str) -> dict:
+        probes.append(url)
+        return {"reachable": True, "release": {"version": "0.4.2", "revision": SERVER_REVISION}}
+
+    monkeypatch.setattr(setup_helpers, "probe_health_diagnostics", probe)
+
+    lt_cli.main(["doctor", "--all"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["command"] == "doctor-all"
+    assert len(payload["repos"]) == 2
+    assert len(probes) == 1
+    assert payload["client"]["update_recommended"] is True
+    assert len(payload["warnings"]) == 1
 
 
 def test_status_suggests_reinstalling_a_broken_lt_mcp_first(
@@ -571,8 +917,38 @@ def test_status_stays_quiet_without_a_newer_server_release(
     assert payload["suggestions"] == []
 
 
-def test_status_reports_a_patch_release_gap_without_nagging(isolated_homes, monkeypatch) -> None:
-    # docs/versioning.md: a PATCH release is a backward-compatible fix.
+@pytest.mark.parametrize("unreadable_side", ["server", "client"])
+def test_status_treats_an_oversized_release_as_unreadable(
+    isolated_homes, monkeypatch, capsys, unreadable_side
+) -> None:
+    # A version past CPython's integer-string limit (4300 digits) made int()
+    # raise, and --fail-silent then dropped the whole status.
+    oversized = "9" * 5000
+    repo = _healthy_status_repo(isolated_homes, monkeypatch, "consumer-oversized")
+    client_version = oversized if unreadable_side == "client" else "0.4.0"
+    monkeypatch.setattr(
+        setup_helpers,
+        "installed_release",
+        lambda: setup_helpers.ReleaseIdentity(version=client_version, revision="a" * 40),
+    )
+    _server_reports_release(monkeypatch, oversized if unreadable_side == "server" else "99.0.0")
+    capsys.readouterr()
+
+    payload = setup_helpers.setup_status(repo)
+
+    assert payload["client"]["status"] == "unknown"
+    assert payload["client"]["client_behind_server"] is False
+    assert payload["client"]["update_recommended"] is False
+    assert payload["suggestions"] == []
+    # --fail-silent turns any crash into empty output, so a printed line proves
+    # the hook's status survived.
+    lt_cli.main(["setup", "status", "--target", str(repo), "--brief", "--fail-silent"])
+    brief = json.loads(capsys.readouterr().out)
+    assert brief["brief"] == "lab-tracker: capture is configured; server reachable."
+
+
+def test_status_suggests_the_update_for_a_patch_release_gap(isolated_homes, monkeypatch) -> None:
+    # A PATCH release is where a fix for a broken install lands (docs/versioning.md).
     repo = _healthy_status_repo(isolated_homes, monkeypatch, "consumer-patch")
     monkeypatch.setattr(
         setup_helpers,
@@ -585,8 +961,9 @@ def test_status_reports_a_patch_release_gap_without_nagging(isolated_homes, monk
 
     assert payload["client"]["status"] == "behind"
     assert payload["client"]["client_behind_server"] is True
-    assert payload["client"]["update_recommended"] is False
-    assert payload["suggestions"] == []
+    assert payload["client"]["update_recommended"] is True
+    [suggestion] = payload["suggestions"]
+    assert "(release 0.4.0) is behind its server (release 0.4.3)" in suggestion
 
 
 def test_status_compares_the_release_the_health_probe_reads(
@@ -599,12 +976,14 @@ def test_status_compares_the_release_the_health_probe_reads(
         lambda: setup_helpers.ReleaseIdentity(version="0.4.0", revision="a" * 40),
     )
 
-    def get(_self, _url, **_kwargs):
+    def send(_self, request, **_kwargs):
         return httpx.Response(
-            200, json={"app": {"version": "0.5.0", "source_revision": SERVER_REVISION}}
+            200,
+            json={"app": {"version": "0.5.0", "source_revision": SERVER_REVISION}},
+            request=request,
         )
 
-    monkeypatch.setattr(httpx.Client, "get", get)
+    monkeypatch.setattr(httpx.Client, "send", send)
 
     payload = setup_helpers.setup_status(repo)
 

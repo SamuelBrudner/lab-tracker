@@ -590,6 +590,62 @@ def test_stdio_target_guard_warns_loudly_when_probe_fails(
     assert "could not confirm" in err
 
 
+SOCKS_WITHOUT_SOCKSIO = (
+    "Using SOCKS proxy, but the 'socksio' package is not installed. "
+    "Make sure to install httpx using `pip install httpx[socks]`."
+)
+
+
+def _unbuildable_client(_settings: mcp_server.MCPSettings) -> None:
+    # httpx reads the proxy variables when it builds a client, so ALL_PROXY=socks5://...
+    # without the optional socksio package fails right there.
+    raise ImportError(SOCKS_WITHOUT_SOCKSIO)
+
+
+def test_stdio_target_guard_warns_and_boots_when_the_client_cannot_be_built(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(mcp_server, "LabTrackerAPIClient", _unbuildable_client)
+
+    mcp_server._ensure_mcp_target_safe(mcp_server.MCPSettings(base_url="http://lab.example.test"))
+
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert "http://lab.example.test" in err
+    assert "ImportError" in err
+    assert "socksio" in err
+    assert "starting anyway" in err
+
+
+def test_stdio_target_guard_warning_for_an_unbuildable_client_is_one_redacted_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def unbuildable(_settings: mcp_server.MCPSettings) -> None:
+        raise RuntimeError("first line\nsecond Bearer sekrit-token " + "x" * 5000)
+
+    monkeypatch.setattr(mcp_server, "LabTrackerAPIClient", unbuildable)
+
+    mcp_server._ensure_mcp_target_safe(mcp_server.MCPSettings(base_url="http://lab.example.test"))
+
+    lines = capsys.readouterr().err.splitlines()
+    assert len(lines) == 1
+    assert "first line second" in lines[0]
+    assert "sekrit-token" not in lines[0]
+    assert len(lines[0]) < 1000
+
+
+@pytest.mark.parametrize(
+    "base_url", ["http://app:8000", "http://127.0.0.1:8000"], ids=["remote", "loopback"]
+)
+def test_hosted_target_guard_still_fails_loudly_when_the_client_cannot_be_built(
+    monkeypatch: pytest.MonkeyPatch, base_url: str
+) -> None:
+    monkeypatch.setattr(mcp_server, "LabTrackerAPIClient", _unbuildable_client)
+
+    with pytest.raises(ImportError, match="socksio"):
+        mcp_server._ensure_mcp_target_safe(mcp_server.MCPSettings(base_url=base_url), hosted=True)
+
+
 # --- M34: configurable DNS-rebinding Host/Origin allowlist -------------------
 
 

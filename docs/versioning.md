@@ -54,6 +54,15 @@ When a release contains several kinds of change, use the largest required bump.
 A released version is immutable; corrections get a new PATCH release rather
 than a moved or rebuilt tag.
 
+Clients are told about every release, not only feature releases: a client whose
+release is older than its server's, a PATCH release included, gets an update
+notice from `lt setup status`, `lt doctor`, `lt-mcp` and the coverage read. Cut
+a PATCH release for a fix that consumers should take, such as a dependency
+bound that breaks `lt-mcp`, and a MINOR release for features. The same release
+at a different commit is reported but never suggested, so unreleased commits
+notify nobody. See
+[setup.md](setup.md#know-when-a-client-install-is-broken-or-behind-its-server).
+
 ## Preparing and publishing a release
 
 1. Start from a clean branch based on `main`, with CI green. Review merged work

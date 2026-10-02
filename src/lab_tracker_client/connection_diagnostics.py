@@ -78,7 +78,9 @@ class ConnectionTrace:
                     next_step = (
                         "On the Lab Tracker host, check `tailscale funnel status` and confirm the "
                         "service is listening on the proxied port. Funnel clients do not need to "
-                        "join the tailnet."
+                        "join the tailnet. Also check that the node is connected with "
+                        "`tailscale status`; see \"Publishing Through Tailscale Funnel\" in "
+                        "the self-hosted operations guide in the Lab Tracker repository."
                     )
             else:
                 diagnosis = "tls_handshake_failed"

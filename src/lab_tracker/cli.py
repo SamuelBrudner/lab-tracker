@@ -241,7 +241,9 @@ def _skills_homes() -> tuple[tuple[str, Path], ...]:
 
     The explicit environment override predates Codex support and remains a
     single-target escape hatch for custom installs and isolated tests. Without
-    it, install the generated setup skill for both supported agent homes.
+    it, install the generated setup skill for both supported agent homes. A
+    relative override is taken as written and so resolves against the current
+    directory; it should be an absolute path.
     """
 
     override = os.getenv("LAB_TRACKER_SKILLS_HOME")
@@ -368,6 +370,8 @@ def _uninstall_setup_skill_at_path(
 
 
 _UPDATE_BACKUP_SUFFIX = ".bak-lt-update"
+# The name the docs give this command, whichever installed script name ran it.
+_DOCUMENTED_PROG = "lab-tracker"
 
 # One activation block per agent instruction file, kept byte-identical so
 # Claude Code (CLAUDE.md), Codex CLI and other AGENTS.md readers, and
@@ -467,6 +471,51 @@ def update_consumer_repo(
         _record_enrolled_repo(root, "update")
     result.warnings.extend(_hook_environment_warnings())
     return result
+
+
+def refresh_setup_skills(*, dry_run: bool = False) -> InitResult:
+    """Install or refresh only the ``lab-tracker-setup`` skill, machine-wide.
+
+    This is the skills half of ``update_consumer_repo(install_skills=True)`` on
+    its own. It takes no target, so it cannot scaffold: it writes no repo file,
+    enrolls no repo in the applied-repos registry, and does not resolve the MCP
+    URL. It writes only the skill files and their skill directories, so a
+    missing skill home is created. A customised skill is backed up to
+    ``SKILL.md.bak-lt-update`` before it is refreshed, and ``dry_run`` only
+    records the diffs. With the default homes or an absolute
+    ``LAB_TRACKER_SKILLS_HOME`` that leaves the current directory and every
+    repository alone; a relative override resolves against the current
+    directory (see :func:`_skills_homes`), so set it to an absolute path.
+    """
+
+    result = InitResult()
+    _install_setup_skill(result=result, dry_run=dry_run)
+    return result
+
+
+def reject_skills_only_conflicts(prog: str, *, yes: bool, target: str | None) -> None:
+    """Fail loudly when ``update --skills-only`` is mixed with repo-scoped flags.
+
+    ``--skills-only`` never reads or writes a repository, so ``--yes`` (consent
+    for a repo's conventions blocks) and an explicit ``--target`` would be
+    silently ignored, misleading the caller about what was changed. ``target``
+    is ``None`` when the flag was not passed. Exits 1 (not argparse's 2, which
+    is reserved for unrecognized arguments), before anything is written.
+    """
+
+    given = [
+        flag
+        for flag, present in (("--yes", yes), ("--target", target is not None))
+        if present
+    ]
+    if given:
+        flags = " and ".join(given)
+        raise SystemExit(
+            f"{prog} update --skills-only refreshes only the lab-tracker-setup skill "
+            "machine-wide and never touches a repository, so it cannot be combined "
+            f"with {flags}. Drop {flags}, or drop --skills-only to update the "
+            "repository."
+        )
 
 
 def _update_scaffold_file(
@@ -711,7 +760,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     update_parser.add_argument(
         "--target",
-        default=".",
+        default=None,
         help="Consumer repo path to update. Defaults to the current directory.",
     )
     update_parser.add_argument(
@@ -727,7 +776,22 @@ def main(argv: list[str] | None = None) -> None:
     update_parser.add_argument(
         "--install-skills",
         action="store_true",
-        help="Also refresh the lab-tracker-setup skill in the Claude and Codex homes.",
+        help=(
+            "Also refresh the lab-tracker-setup skill in the Claude and Codex "
+            "homes, in addition to updating the repo (use --skills-only to leave "
+            "the repo alone)."
+        ),
+    )
+    update_parser.add_argument(
+        "--skills-only",
+        action="store_true",
+        help=(
+            "Install or refresh only the lab-tracker-setup skill in the Claude and "
+            "Codex homes, machine-wide; implies --install-skills and touches no "
+            "repo or file in the current directory, unless LAB_TRACKER_SKILLS_HOME "
+            "is a relative path (use an absolute one). Cannot be combined with "
+            "--yes or --target; --dry-run previews."
+        ),
     )
     serve_parser = subcommands.add_parser(
         "serve",
@@ -853,16 +917,22 @@ def main(argv: list[str] | None = None) -> None:
         print(json.dumps(result.as_dict(), indent=2))
         _print_init_warnings(result)
     elif args.command == "update":
-        from lab_tracker_client.setup import resolved_base_url_for_setup
+        if args.skills_only:
+            # Before resolving the MCP URL: skills-only never uses it, so a
+            # malformed LAB_TRACKER_BASE_URL must not break the command.
+            reject_skills_only_conflicts(_DOCUMENTED_PROG, yes=args.yes, target=args.target)
+            result = refresh_setup_skills(dry_run=args.dry_run)
+        else:
+            from lab_tracker_client.setup import resolved_base_url_for_setup
 
-        mcp_base_url, _ = resolved_base_url_for_setup()
-        result = update_consumer_repo(
-            args.target,
-            mcp_base_url=mcp_base_url,
-            yes=args.yes,
-            dry_run=args.dry_run,
-            install_skills=args.install_skills,
-        )
+            mcp_base_url, _ = resolved_base_url_for_setup()
+            result = update_consumer_repo(
+                args.target or ".",
+                mcp_base_url=mcp_base_url,
+                yes=args.yes,
+                dry_run=args.dry_run,
+                install_skills=args.install_skills,
+            )
         print(json.dumps(result.as_dict(), indent=2))
         _print_init_warnings(result)
     elif args.command == "serve":

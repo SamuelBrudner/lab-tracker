@@ -62,6 +62,8 @@ from lab_tracker_client.hpc import sync_outbox_path as hpc_sync_outbox_path
 JsonObject = dict[str, Any]
 # Every adapter outbox under <repo>/.lab-tracker/outbox, in reporting order.
 OUTBOX_ADAPTERS = ("watch", "repo", "hpc")
+# Probe fields `lt setup connect` surfaces as `server_diagnostic`.
+_SERVER_DIAGNOSTIC_KEYS = ("diagnosis", "detail", "next_step", "status_code")
 SKIP_NOTICE = (
     "lab-tracker: skipped commit {sha} ({reason}); {total} commit(s) skipped in this "
     "repo so far. 'lt outbox status' shows the count; 'lt repo report --force-capture' "
@@ -130,7 +132,12 @@ def _build_parser() -> argparse.ArgumentParser:
     doctor_parser = subcommands.add_parser(
         "doctor",
         aliases=["check-idioms"],
-        help="Check managed Lab Tracker code-facing idiom blocks.",
+        help=(
+            "Check managed Lab Tracker code-facing idiom blocks, that lt-mcp "
+            "can start (a bounded import check in a child interpreter), and "
+            "whether this client is behind its server (one bounded /health "
+            "request; an unreachable server is a warning, not a failure)."
+        ),
     )
     doctor_parser.add_argument(
         "--target",
@@ -163,7 +170,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     update_parser.add_argument(
         "--target",
-        default=".",
+        default=None,
         help="Consumer repo path to update. Defaults to the current directory.",
     )
     update_parser.add_argument(
@@ -179,7 +186,22 @@ def _build_parser() -> argparse.ArgumentParser:
     update_parser.add_argument(
         "--install-skills",
         action="store_true",
-        help="Also refresh the lab-tracker-setup skill in the Claude and Codex homes.",
+        help=(
+            "Also refresh the lab-tracker-setup skill in the Claude and Codex "
+            "homes, in addition to updating the repo (use --skills-only to leave "
+            "the repo alone)."
+        ),
+    )
+    update_parser.add_argument(
+        "--skills-only",
+        action="store_true",
+        help=(
+            "Install or refresh only the lab-tracker-setup skill in the Claude and "
+            "Codex homes, machine-wide; implies --install-skills and touches no "
+            "repo or file in the current directory, unless LAB_TRACKER_SKILLS_HOME "
+            "is a relative path (use an absolute one). Cannot be combined with "
+            "--yes or --target; --dry-run previews."
+        ),
     )
     update_parser.set_defaults(func=_cmd_update, needs_client=False)
 
@@ -467,7 +489,10 @@ def _add_setup_parsers(subcommands: argparse._SubParsersAction) -> None:
     verify_mcp_parser.add_argument(
         "--command",
         default="lt-mcp",
-        help="MCP executable to launch. Defaults to lt-mcp on PATH.",
+        help=(
+            "MCP executable to launch. Defaults to the lt-mcp installed beside "
+            "this lt, else lt-mcp on PATH."
+        ),
     )
     verify_mcp_parser.add_argument(
         "--timeout",
@@ -1083,7 +1108,9 @@ def _add_auth_parsers(subcommands: argparse._SubParsersAction) -> None:
         "doctor",
         help=(
             "Enumerate every lab-tracker MCP registration and flag deprecated "
-            "username/password auth (drift that causes silent 401s)."
+            "username/password auth (drift that causes silent 401s). For a Claude "
+            "Desktop entry, also report its command and warn when an absolute "
+            "command path is not an existing file."
         ),
     )
     doctor_parser.add_argument(
@@ -1631,8 +1658,20 @@ def _cmd_setup_connect(args: argparse.Namespace) -> Any:
     except setup_helpers.ConnectionProfileSecurityError as exc:
         raise SystemExit(str(exc)) from None
     if args.base_url:
-        payload["server_reachable"] = setup_helpers.probe_health(args.base_url)
+        payload.update(_server_probe_fields(args.base_url))
     return payload
+
+
+def _server_probe_fields(base_url: str) -> JsonObject:
+    """`server_reachable` plus, only when the probe explains a failure, `server_diagnostic`."""
+
+    probe = setup_helpers.probe_health_diagnostics(base_url)
+    fields: JsonObject = {"server_reachable": probe["reachable"]}
+    if "diagnosis" in probe:
+        fields["server_diagnostic"] = {
+            key: probe[key] for key in _SERVER_DIAGNOSTIC_KEYS if key in probe
+        }
+    return fields
 
 
 def _cmd_setup_verify_client(args: argparse.Namespace) -> Any:
@@ -2509,6 +2548,7 @@ def _cmd_doctor(args: argparse.Namespace) -> Any:
     if not getattr(args, "all", False):
         payload = _doctor(args.target)
         payload["lt_mcp"] = setup_helpers.mcp_startup_check()
+        payload.update(setup_helpers.doctor_release_check())
         return payload
     repos = []
     pruned = []
@@ -2545,6 +2585,7 @@ def _cmd_doctor(args: argparse.Namespace) -> Any:
         "repos": repos,
         # One install serves every registered repo, so check it once per sweep.
         "lt_mcp": setup_helpers.mcp_startup_check(),
+        **setup_helpers.doctor_release_check(),
     }
     if pruned:
         result["pruned"] = pruned
@@ -2552,11 +2593,20 @@ def _cmd_doctor(args: argparse.Namespace) -> Any:
 
 
 def _cmd_update(args: argparse.Namespace) -> Any:
-    from lab_tracker.cli import update_consumer_repo
+    from lab_tracker.cli import (
+        refresh_setup_skills,
+        reject_skills_only_conflicts,
+        update_consumer_repo,
+    )
 
+    if args.skills_only:
+        # Before resolving the MCP URL: skills-only never uses it, so a
+        # malformed LAB_TRACKER_BASE_URL must not break the command.
+        reject_skills_only_conflicts("lt", yes=args.yes, target=args.target)
+        return refresh_setup_skills(dry_run=args.dry_run).as_dict()
     mcp_base_url, _ = setup_helpers.resolved_base_url_for_setup()
     result = update_consumer_repo(
-        args.target,
+        args.target or ".",
         mcp_base_url=mcp_base_url,
         yes=args.yes,
         dry_run=args.dry_run,

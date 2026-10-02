@@ -162,6 +162,26 @@ content differs is first preserved next to itself as `*.bak-lt-update`, and
 `.claude/settings.json` rather than dropped; the personal
 `.claude/settings.local.json` is never touched.
 
+`lt update --skills-only` (equivalently `lab-tracker update --skills-only`) is
+the machine-wide counterpart for the setup skill. It installs or refreshes only
+the `lab-tracker-setup` skill in the Claude and Codex skill homes
+(`~/.claude/skills` and `~/.agents/skills`, or the single home named by
+`LAB_TRACKER_SKILLS_HOME`). It writes only the skill files and their skill
+directories (a missing skill home is created), and it touches no repository
+and not the applied-repos registry. With the default homes or an absolute
+`LAB_TRACKER_SKILLS_HOME` it touches no file in the current directory either,
+so it runs from anywhere and needs no repo. The applied-repos registry is the
+list of repositories that setup commands such as `lt setup init` and `lt update`
+recorded on this machine, in `~/.lab-tracker/applied-repos.json` (in
+`LAB_TRACKER_CONFIG_DIR` when that is set); `lt doctor --all` sweeps it. Set
+`LAB_TRACKER_SKILLS_HOME` to an absolute path: a relative
+`LAB_TRACKER_SKILLS_HOME` resolves against the current directory, which then
+receives the skill. A customised skill is preserved next to itself as
+`SKILL.md.bak-lt-update`, and `--dry-run` previews. `lt setup status` suggests
+it when a skill is missing or stale. Because it never reads a repo, it refuses
+`--yes` and `--target`. Bare `lt update` refreshes the repo's files only;
+`lt update --install-skills` refreshes the skill in addition to the repo.
+
 ### Know when a client install is broken or behind its server
 
 A release is the `[project].version` in `pyproject.toml`, versioned by
@@ -169,31 +189,76 @@ A release is the `[project].version` in `pyproject.toml`, versioned by
 for features and any incompatibility, PATCH only for backward-compatible
 fixes). The server reports it as `app.version` on `GET /health`, next to
 `app.source_revision`. The release status is truthful: a client on any older
-release is *behind*. One rule decides whether that is worth a nag: an update is
-*recommended* (`update_recommended`) only when the client's `MAJOR.MINOR` is
-older than the server's. Every notice below keys on that rule, so a PATCH-only
-gap is reported as information and never suggested. Revision drift within one
-release is reported (`same_revision`) but never suggested either, since most
-commits are not consumer-relevant.
+release is *behind*, and an update is *recommended* (`update_recommended`)
+exactly then: any server release newer than the client's, a PATCH release
+included, because a PATCH release is where a fix for a broken install lands.
+Every notice below keys on that rule. Revision drift within one release is
+reported (`same_revision`) but never suggested, since most commits are not
+consumer-relevant and a release is the unit a maintainer chose to cut.
 
 - `lt doctor` (and `lt doctor --all`, once per sweep) imports the MCP server
-  in-process and reports `lt_mcp.importable`, with the error, traceback, and
-  next step when it fails. A failure exits `1` like drift; `--fail-silent`
-  keeps prompt hooks quiet. There is no network I/O; `lt setup verify-mcp`
-  remains the deeper connectivity check.
+  module in a child interpreter, the same Python `lt` runs from, and reports
+  `lt_mcp.importable`, with the error, a bounded traceback tail, and next step
+  when it fails. The child has a 15-second limit, and a timeout, a non-zero
+  exit (a `sys.exit` or a crash while importing), and an import error each
+  report `importable: false`, so a hung or crashing import can neither hang
+  nor end `lt`. A failure exits `1` like drift; `--fail-silent` keeps prompt
+  hooks quiet. `lt doctor` also tries to reach the server: one `GET /health`,
+  the bounded probe described under `lt setup status` below, compared with this
+  client's release and reported as `server`, `client` and `warnings`. It fails
+  soft. A server that cannot be reached or read is a warning carrying the probe's
+  diagnosis, and an address that does not parse is a warning with the diagnosis
+  `server_check_failed`; either way the release check is skipped. A client behind
+  its server is a warning that names the update steps. Warnings never change the
+  exit code, which stays decided by drift and the `lt-mcp` check.
+  `lt setup verify-mcp` remains the deeper connectivity check.
 - `lt setup status` reports the same `lt_mcp` check plus a `client` release
   comparison built from its existing `/health` probe (`status`,
   `client_behind_server`, `update_recommended`), and suggests the update only
   when one is recommended, so the SessionStart hook's `--brief` line names it.
-- `lt-mcp` over stdio makes one unauthenticated `GET /health` at startup
-  (2-second timeout, advisory only: any failure leaves the session unchanged).
+  The probe has 2-second connect and read timeouts and a 4-second deadline on
+  the whole response, headers included, so a server that trickles its headers
+  or its body is cut at the deadline (give or take one read) and cannot hold
+  the hook open. Getting connected is outside that deadline: name resolution
+  takes as long as the system resolver takes, and the connect timeout applies
+  to each address a name resolves to, so a host with several unreachable
+  addresses takes several times the connect timeout to fail.
+- `lt-mcp` over stdio makes one unauthenticated `GET /health` at startup with
+  the same 2-second timeouts and 4-second response deadline, and the same
+  caveat about connecting. It is advisory only: any failure, including one
+  while building the HTTP client, is written to stderr and leaves the session
+  unchanged. `lt-mcp` runs a separate startup safety probe (`GET /readiness`)
+  before that check. Over stdio it probes only a remote API target, not a
+  loopback one, and refuses to start only when the probe confirms that the API
+  has authentication disabled. If the probe fails, it writes a stderr warning
+  and the server still starts. The server also still starts when the HTTP client
+  cannot be built (for example `ALL_PROXY=socks5://...` without the optional
+  `socksio` package): each probe that needs the client writes its own stderr
+  line, so a remote target shows both the safety probe's warning and the
+  update check's notice. A hosted
+  (streamable-http) `lt-mcp` is stricter: it always probes, including a
+  loopback target, and also refuses to start when it cannot confirm that the
+  API has authentication enabled.
   When an update is recommended, the MCP `instructions` start with an
   `UPDATE AVAILABLE` notice and every tool result carries the same notice in
   `_lab_tracker_update_notice`. A hosted endpoint skips the check; it ships
   with its server.
-- Captures always record `capture_client_version` (`0.0.0+unknown` when the
-  client cannot read its own release) and, when known, `capture_client_revision`
-  next to the host identity. The coverage read
+- A capture queued through the watch outbox (`lt watch`, including
+  `lt watch touch`; `lt run`; `lt pipeline` with `report`, `nextflow`, or `dvc`,
+  and the Snakemake and Kedro hooks, which build the same event;
+  `lt agent session-end`; the Jupyter save hook; and `lt git snapshot`) or made
+  by `lt hpc`, the repo hooks (`lt repo report`), or figure capture
+  (`lt capture file`, which the R package's autotrack runs, and in-script
+  saves) always records `capture_client_version` (`0.0.0+unknown` when the
+  client cannot read its own release) and, when known,
+  `capture_client_revision`, next to the host identity and its install id. A
+  note made by hand or import (`lt note`, `lt quick`, `lt import-folder`, and
+  the SDK's `upsert_note`, `quick_capture`, and `upload_note_file`) and the
+  MATLAB package record neither an install id nor a client release themselves,
+  so they name no client and produce no update notice, unless a caller puts a
+  `capture_install_id` in a note's metadata by hand: the coverage read judges
+  any note that carries an install id as a capture from that install. The
+  coverage read
   (`GET /projects/{project_id}/coverage`) judges each capture source on its
   own: it reports the release the source's newest capture was made with, its
   `release_status` against the server's, and `update_recommended`, and writes
@@ -213,18 +278,26 @@ commits are not consumer-relevant.
 One install id covers every Python environment on a machine, and the notice's
 fix depends on which environment made the capture:
 
-- **Tool environment** (`lt watch`, `lt-hpc`, the repo and git hooks,
-  `lt import-folder`, and anything else launched from the `uv tool` install):
-  install the server's release with the Agents page's install command
+- **Tool environment** (`lt watch`, `lt run`, `lt pipeline`, `lt hpc`,
+  `lt git snapshot`, the repo hook, and the agent-session hook): install the
+  server's release with the Agents page's install command
   (`uv tool install --force "lab-tracker @ git+https://github.com/SamuelBrudner/lab-tracker.git@<revision>"`),
   then run `lt update` in each consumer repo and restart the MCP host so it
   launches the new `lt-mcp`.
 - **Analysis repo** (in-script captures such as `savefig` from
-  `lab_tracker_client`, adapter `lab-tracker-client-figure`, or captures that
-  carry `run_*` metadata): in that repo, rerun the Setup page's pinned project
+  `lab_tracker_client`, adapter `lab-tracker-client-figure`, the Jupyter save
+  hook, adapter `lab-tracker-client-notebook`, or captures that carry `run_*`
+  metadata under an adapter that is not an `lt-` command, since an `lt-`
+  adapter such as `lt run` always counts as the tool environment): in that
+  repo, rerun the Setup page's pinned project
   dependency (`uv add "lab-tracker @ git+https://github.com/SamuelBrudner/lab-tracker.git@<revision>"`,
   guided setup step 5). `lt update` refreshes integration files only and does
   not change that pin.
+
+`lt capture file`, and the R package's autotrack that runs it, is a
+special case: it is filed with the analysis-repo captures because it writes a
+`lab-tracker-client-*` adapter, but the release it records is that of the `lt`
+executable that ran it, so update that install.
 
 ## Multi-client Postgres runtime
 
@@ -409,3 +482,12 @@ Alternatively, set `LAB_TRACKER_DEBUG=1` in the client environment. Debug mode
 does not override an explicit `--fail-silent` hook invocation. Invalid command
 arguments retain argparse's exit code 2; unexpected programming errors still
 surface normally.
+
+The error names the failing connection stage where it can be observed.
+`lt setup status` (`server`) and `lt setup connect --base-url <url> --dry-run`
+(`server_diagnostic`) return the same `diagnosis`, `detail`, and `next_step`
+fields; see
+[Diagnose an unavailable connection](agent-setup.md#diagnose-an-unavailable-connection).
+If the server is published through a public Tailscale Funnel, the host-side
+checklist is
+[Publishing Through Tailscale Funnel](self-hosted-operations.md#publishing-through-tailscale-funnel).

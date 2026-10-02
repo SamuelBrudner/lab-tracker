@@ -1,23 +1,34 @@
 """Which capture sources were made by a lab-tracker client behind this server.
 
-Every capture carries the capturing client's release next to the host identity
-(``capture_client_version`` and ``capture_client_revision``, written by
-``lab_tracker_client.client.capture_host_metadata``). The coverage read compares
-the release of each capture source's newest capture with this server's release,
-so a client that is behind can be named by what it captures instead of only
-being discovered by someone running a check on that machine.
+A capture queued through the watch outbox (``lt watch``, ``lt run``,
+``lt pipeline``, coding-agent session, notebook and git capture), by ``lt hpc``,
+by the repo hooks (``lt repo report``), or by figure capture carries the
+capturing client's release next to the host identity (``capture_client_version``
+and ``capture_client_revision``, written by
+``lab_tracker_client.client.capture_host_metadata``, which ``watch.make_event``,
+``hpc.make_event``, ``repo.make_event`` and figure capture call). A note made by
+hand or import (``lt note``, ``lt quick``, ``lt import-folder``, the SDK's
+``upsert_note``, ``quick_capture`` and ``upload_note_file``) and the MATLAB
+package record no install id or client release themselves, so they produce no
+notice, unless a caller writes a ``capture_install_id`` into a note's metadata
+by hand. The coverage read compares the release of each capture source's newest
+capture with this server's release, so a client that is behind can be named by
+what it captures instead of only being discovered by someone running a check on
+that machine.
 
 Each source is judged on its own. One install id (``~/.lab-tracker/install-id``)
 spans every Python environment on a machine: the ``uv tool`` install that runs
-``lt watch``, ``lt-hpc``, the repo hooks, and ``lt import-folder``, and each
-analysis repo's own pinned dependency that saves figures in-script. Those
-environments run releases of their own, so neither can speak for the other,
-and each is updated differently: the tool environment by reinstalling the
-server's release, an analysis repo by repinning its dependency.
+the ``lt`` commands (``lt watch``, ``lt run``, ``lt pipeline``, ``lt hpc``, and
+the repo hooks), and each analysis repo's own pinned dependency that saves
+figures or notebooks in-script. Those environments run releases of their own, so
+neither can speak for the other, and each is updated differently: the tool
+environment by reinstalling the server's release, an analysis repo by repinning
+its dependency.
 
-A notice is written only when an update is recommended (the client's
-(MAJOR, MINOR) is older than the server's, see ``lab_tracker.client_release``
-and ``docs/versioning.md``), the source carries an install id, and it captured
+A notice is written only when an update is recommended (the client's release
+is older than the server's, a PATCH gap included, see
+``lab_tracker.client_release`` and ``docs/versioning.md``), the source carries
+an install id, and it captured
 within ``UPDATE_NOTICE_WINDOW_DAYS`` (the coverage read's quiet window,
 ``QUIET_CAPTURE_WINDOW_DAYS``).
 """
@@ -60,7 +71,8 @@ WATCH_ADAPTER_PREFIX = "lt-watch"
 TOOL_ADAPTER_PREFIX = "lt-"
 # `lab_tracker_client` captures made inside an analysis script (savefig).
 IN_SCRIPT_ADAPTER_PREFIX = "lab-tracker-client-"
-# `lab_tracker_client.run_context` metadata, written only in-script.
+# `run_*` metadata: written in-script by `lab_tracker_client.run_context` and
+# also by `lt run`, whose `lt-` adapter is judged first (see capture_environment).
 RUN_METADATA_PREFIX = "run_"
 # A source that has not captured for this long is not addressed: the notice
 # is for clients people are still using. It is the coverage read's quiet
@@ -113,10 +125,12 @@ def predates_release_reporting(
 ) -> bool:
     """An install-stamped capture with no client release, judged against a known server.
 
-    Every current capture path stamps ``capture_client_version`` whenever it
+    ``capture_host_metadata`` stamps ``capture_client_version`` whenever it
     stamps ``capture_install_id`` (``lab_tracker._version.UNKNOWN_VERSION`` when
     the client cannot read its own release), so an install id alone means the
     client predates release reporting and is behind any server that reads it.
+    A note made by hand or import carries no install id of its own, so it is
+    not judged unless its metadata was written by hand to include one.
     """
 
     return (
@@ -149,10 +163,14 @@ def watched_folder(metadata: Mapping[str, NoteMetadataScalar]) -> str | None:
 def capture_environment(metadata: Mapping[str, NoteMetadataScalar]) -> CaptureEnvironment:
     """The environment that made a capture: an `lt` command, or an analysis script.
 
-    `lt` adapters run from the tool install; a ``lab-tracker-client-*`` adapter
-    or ``run_*`` metadata marks a capture made in-script from an analysis
-    repo's own environment. Anything else was launched from the tool install
-    (for example ``lt import-folder --adapter <name>``).
+    The adapter is judged first: an ``lt-*`` adapter ran from the tool install,
+    ``lt run`` included although it also writes ``run_*`` metadata. Otherwise a
+    ``lab-tracker-client-*`` adapter or ``run_*`` metadata marks a capture made
+    in-script from an analysis repo's own environment, and any other adapter is
+    treated as launched from the tool install. ``lt capture file`` (which the R
+    package runs) also writes a
+    ``lab-tracker-client-*`` adapter, so it is filed with the in-script captures
+    although an ``lt`` executable made it.
     """
 
     adapter = metadata.get(EVIDENCE_ADAPTER_KEY)

@@ -294,6 +294,7 @@ def test_init_and_watch_add_record_repos(home, monkeypatch, capsys) -> None:
     assert len(list_repos()) == before
 
 
+@pytest.mark.usefixtures("offline_server")
 def test_doctor_all_sweeps_registry(home, monkeypatch, capsys) -> None:
     clean = home / "clean-repo"
     init_consumer_repo(clean, yes=True)
