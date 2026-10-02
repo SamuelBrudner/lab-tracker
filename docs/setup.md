@@ -156,7 +156,8 @@ integration files — the `.claude/settings.json` prompt hook, `.mcp.json`,
 `.cursor/mcp.json`, `.gemini/settings.json`, the `scripts/lt.py` shim, and
 `AGENTS.lt.md` — are rewritten to the current canonical text. A file whose
 content differs is first preserved next to itself as `*.bak-lt-update`, and
-`lt_ids.json` is never touched. `--dry-run` previews the changes; run
+an existing `lt_ids.json` is never touched (a missing one gets an empty
+placeholder). `--dry-run` previews the changes; run
 `lt doctor` afterwards to confirm the repo is in sync. Hook entries that
 `lt setup agent-hooks --shared` added are carried forward into the refreshed
 `.claude/settings.json` rather than dropped; the personal
@@ -181,6 +182,71 @@ receives the skill. A customised skill is preserved next to itself as
 it when a skill is missing or stale. Because it never reads a repo, it refuses
 `--yes` and `--target`. Bare `lt update` refreshes the repo's files only;
 `lt update --install-skills` refreshes the skill in addition to the repo.
+
+### Maintain a set of repos with one command
+
+`lt maintain` runs the check and repair flow as a job that returns one JSON
+report. Choose repos with repeated `--repo` paths, or use `--all` to read the
+existing applied-repos registry. No repo is selected by default.
+
+Preview the job, then apply it:
+
+```bash
+lt maintain --all --upgrade-client --dry-run
+lt maintain --all --upgrade-client --yes
+```
+
+For a smaller set:
+
+```bash
+lt maintain --repo /path/to/veritas --repo /path/to/flyvis --upgrade-client --yes
+```
+
+With `--upgrade-client`, the job compares the installed Git commit with GitHub
+`main`, even when both packages have the same version number. If they differ,
+it installs the exact commit it found and checks the install metadata again.
+This upgrade supports a `uv tool` install from the Lab Tracker GitHub repo.
+Other installs return a clear error rather than replacing another environment.
+The upgrade is opt-in: omit `--upgrade-client` to use the existing client, or
+add `--revision <full-git-sha>` to target a fixed commit, such as the one your
+server runs. `--lt-path /path/to/lt` selects an install when PATH has more than
+one. An analysis repo's Python dependency is a separate install and is not
+changed by this job.
+
+The job runs each doctor check and update in a fresh process using that install.
+For each repo it checks doctor, previews `lt update --yes --dry-run`, applies
+that update when `--yes` was given, and checks doctor again. The update can
+also add missing integration files. The preview is the default; only `--yes`
+applies writes. Add `--refresh-skills` to preview or refresh the machine's setup
+skills once as part of the same job.
+
+The report includes the client commit, each repo's before and after checks,
+the files to update, and any failures. It lists the command for inspecting the
+full file diff locally; raw diffs and child error output are left out of the
+aggregate report because old config files can contain credentials. A missing
+repo is reported and the job continues with the others. A failed client
+upgrade stops the job before any repo writes. Repeated runs skip repairs when
+the files already match.
+
+Exit status `0` means the selected repos have current instruction blocks, a
+working MCP import, and a local project binding. Status `1` means repairs are
+planned, a check failed, or a project binding still needs attention. Server
+connection and release-comparison warnings stay visible but do not change the
+exit status. The job does not choose or create projects, add watch folders,
+enroll commit capture, or commit or push Git changes.
+
+For an older installed `lt` that does not yet have `maintain`, the same job can
+run from a current Lab Tracker checkout using only Python's standard library:
+
+```bash
+python3 scripts/maintain_lab_tracker.py --all --upgrade-client --dry-run
+python3 scripts/maintain_lab_tracker.py --all --upgrade-client --yes
+```
+
+This bootstrap can update an older or broken client before running its checks.
+In a dry run that finds a pending client upgrade, repo previews use the current
+install and the report says so. The apply run upgrades first, then makes new
+previews with the updated client.
 
 ### Know when a client install is broken or behind its server
 

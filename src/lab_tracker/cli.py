@@ -64,6 +64,7 @@ class InitResult:
     offers: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     _preview_contents: dict[Path, str] = field(default_factory=dict, repr=False)
+    _preview_original_contents: dict[Path, str] = field(default_factory=dict, repr=False)
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -1257,8 +1258,13 @@ def _record_dry_run_change(
     content: str,
     result: InitResult,
 ) -> None:
+    original = result._preview_original_contents.setdefault(path, existing)
     result._preview_contents[path] = content
-    result.diffs[path] = _text_diff(path, existing, content)
+    diff = _text_diff(path, original, content)
+    if diff:
+        result.diffs[path] = diff
+    else:
+        result.diffs.pop(path, None)
 
 
 def _text_diff(path: Path, existing: str, content: str) -> str:
