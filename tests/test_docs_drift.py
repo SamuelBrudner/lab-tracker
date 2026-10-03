@@ -12,6 +12,7 @@ import ast
 import inspect
 import json
 import re
+import shlex
 from pathlib import Path
 
 import httpx
@@ -29,6 +30,7 @@ from lab_tracker.capture_client_release import (
     CaptureEnvironment,
     capture_environment,
 )
+from lab_tracker.capture_setup_catalog import CAPTURE_SETUP_GUIDES
 from lab_tracker.cli import _skills_homes, init_consumer_repo, update_consumer_repo
 from lab_tracker.cli import main as lab_tracker_main
 from lab_tracker.config import Settings
@@ -1014,3 +1016,79 @@ def test_no_doc_still_states_the_retired_major_minor_only_update_rule() -> None:
         if phrase in " ".join(path.read_text(encoding="utf-8").split())
     ]
     assert not stale, f"docs still state the retired MAJOR.MINOR-only rule: {stale}"
+
+
+# Capture-setup tips (src/lab_tracker/capture_setup_catalog.py) quote doc
+# anchors, `lt` commands, and UI labels to a person; each must stay real.
+_FRONTEND_SRC = _REPO_ROOT / "src" / "lab_tracker" / "frontend_src"
+_BACKTICKED_LT_COMMAND = re.compile(r"`(lt [^`]+)`")
+_LT_COMMAND_PLACEHOLDERS = (
+    ("LT-<code>", "LT-" + "A" * 26),
+    ("<folder>", "acq"),
+    ("<uuid>", "00000000-0000-4000-8000-000000000000"),
+)
+
+
+def _capture_setup_lt_commands() -> list[tuple[str, str]]:
+    """``(gap, command)`` for every backticked `lt` command and every guide command."""
+
+    commands: list[tuple[str, str]] = []
+    for gap, guide in CAPTURE_SETUP_GUIDES.items():
+        for text in (guide.title, *guide.steps):
+            commands.extend((gap.value, found) for found in _BACKTICKED_LT_COMMAND.findall(text))
+        if guide.command is not None:
+            commands.append((gap.value, guide.command))
+    return commands
+
+
+def _component_shows(label: str, source: str) -> bool:
+    """True when ``label`` is a JSX text node or a whole string literal in ``source``."""
+
+    escaped = re.escape(label)
+    return re.search(rf">\s*{escaped}\s*<|\"{escaped}\"", source) is not None
+
+
+def test_capture_setup_guides_link_existing_doc_headings() -> None:
+    broken: list[str] = []
+    for gap, guide in CAPTURE_SETUP_GUIDES.items():
+        path, _, anchor = guide.doc.partition("#")
+        doc = _REPO_ROOT / path
+        headings = re.findall(r"(?m)^#{1,6} (.+)$", _read(doc)) if doc.is_file() else []
+        if anchor not in {_github_anchor(heading) for heading in headings}:
+            broken.append(f"{gap.value}: {guide.doc}")
+    assert not broken, f"capture-setup guides link missing doc headings: {broken}"
+
+
+def test_capture_setup_guide_lt_commands_parse() -> None:
+    commands = _capture_setup_lt_commands()
+    assert commands, "the catalog names no `lt` command, so this check checks nothing"
+    parser = lt_cli._build_parser()
+    rejected: list[str] = []
+    for gap, command in commands:
+        concrete = command
+        for placeholder, value in _LT_COMMAND_PLACEHOLDERS:
+            concrete = concrete.replace(placeholder, value)
+        argv = shlex.split(concrete)
+        if "<" in concrete or argv[:1] != ["lt"]:
+            rejected.append(f"{gap}: {command} (unfilled placeholder or not `lt`)")
+            continue
+        try:
+            parser.parse_args(argv[1:])
+        except SystemExit:
+            rejected.append(f"{gap}: {command}")
+    assert not rejected, f"capture-setup `lt` commands the parser rejects: {rejected}"
+
+
+def test_capture_setup_guide_ui_labels_exist_in_their_components() -> None:
+    pinned = [
+        (gap.value, label, _FRONTEND_SRC / component)
+        for gap, guide in CAPTURE_SETUP_GUIDES.items()
+        for label, component in guide.ui_labels
+    ]
+    assert pinned, "the catalog pins no UI label, so this check checks nothing"
+    missing = [
+        f"{gap}: {label!r} in {path.relative_to(_FRONTEND_SRC)}"
+        for gap, label, path in pinned
+        if not path.is_file() or not _component_shows(label, _read(path))
+    ]
+    assert not missing, f"capture-setup UI labels absent from their components: {missing}"
