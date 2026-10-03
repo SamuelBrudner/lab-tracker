@@ -161,6 +161,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     doctor_parser.set_defaults(func=_cmd_doctor, needs_client=False)
 
+    from lab_tracker_client.maintenance import add_parser_options, maintain
+
+    maintain_parser = subcommands.add_parser(
+        "maintain",
+        help="Preview or apply a client upgrade, repo updates, and fresh doctor checks.",
+    )
+    add_parser_options(maintain_parser)
+    maintain_parser.set_defaults(func=maintain, needs_client=False)
+
     update_parser = subcommands.add_parser(
         "update",
         help=(
@@ -2660,6 +2669,8 @@ def _jsonable(value: Any) -> Any:
 
 
 def _payload_exit_code(payload: Any) -> int:
+    if isinstance(payload, dict) and payload.get("command") == "maintain":
+        return 0 if payload.get("ok") is True else 1
     if (
         isinstance(payload, dict)
         and payload.get("command") == "import-folder"
