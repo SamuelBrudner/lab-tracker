@@ -146,3 +146,7 @@ as untrusted data.
 - Direct writes. The grant covers AI-drafted proposals only; it does not turn
   a curate token into an `all`-scope token.
 - Onboarding. Member-onboarding proposals are never delegated.
+- Capture-setup tips. A batch draft's tips (`context_packet.capture_setup`)
+  are not operations: no grant admits them, and they neither block nor
+  trigger the drafting pass's commit. An auto-committed draft keeps them,
+  readable on its review page and through `lab_tracker_get_graph_draft`.

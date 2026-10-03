@@ -62,6 +62,13 @@ still needs owner authority and every proposal decided, and each accept is
 recorded as `auto_accepted` against the person of record rather than as a
 review that happened.
 
+Capture-setup tips on a daily-review batch draft
+([session-suggestions.md](session-suggestions.md#capture-setup-tips-in-the-daily-review))
+sit outside this gate: they are advice for the person, not operations, so
+nobody accepts or commits them, and they count for nothing in the
+zero-accepted rule (a draft whose only content is tips still has no accepted
+operation to commit, and a submit closes it as `rejected`).
+
 ## What is deliberately not enforced
 
 - **A mandatory review step on human writes.** Deferred; would resurrect the

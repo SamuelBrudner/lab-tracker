@@ -24,7 +24,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - exercised by Python 3.10 CI
     import tomli as tomllib
 
-from lab_tracker import graph_drafting, mcp_server
+from lab_tracker import capture_setup_catalog, graph_drafting, mcp_server
 from lab_tracker.capture_client_release import (
     EVIDENCE_ADAPTER_KEY,
     CaptureEnvironment,
@@ -34,6 +34,7 @@ from lab_tracker.capture_setup_catalog import (
     CAPTURE_SETUP_GUIDES,
     SESSION_ID_PLACEHOLDER,
     CaptureSetupGap,
+    CaptureSetupKind,
 )
 from lab_tracker.cli import _skills_homes, init_consumer_repo, update_consumer_repo
 from lab_tracker.cli import main as lab_tracker_main
@@ -1186,3 +1187,38 @@ def test_static_demo_capture_setup_tip_quotes_the_catalog() -> None:
         if text not in source
     ]
     assert not stale, f"static demo capture-setup copy differs from the catalog: {stale}"
+
+
+_SESSION_SUGGESTIONS_DOC = _DOCS / "session-suggestions.md"
+_CAPTURE_SETUP_DOC_CONSTANTS = (
+    "MAX_CANDIDATES",
+    "MAX_DEBRIEF_SESSIONS",
+    "MAX_NOTE_IDS",
+    "MAX_RECOMMENDATIONS",
+    "EXPLANATION_MAX_CHARS",
+    "THIN_CAPTURE_MAX_CHARS",
+    "COOLDOWN_DAYS",
+)
+
+
+def test_capture_setup_doc_names_every_kind_and_gap() -> None:
+    text = _read(_SESSION_SUGGESTIONS_DOC)
+    missing = [
+        member.value
+        for member in (*CaptureSetupKind, *CaptureSetupGap)
+        if f"`{member.value}`" not in text
+    ]
+    assert not missing, f"docs/session-suggestions.md omits capture-setup kinds or gaps: {missing}"
+
+
+def test_capture_setup_doc_states_the_catalog_bounds() -> None:
+    # Each bound is written "<value> ... (`NAME`)", e.g. "at most 6 tips (`MAX_RECOMMENDATIONS`)".
+    text = " ".join(_read(_SESSION_SUGGESTIONS_DOC).split())
+    stale = [
+        f"{name}={getattr(capture_setup_catalog, name)}"
+        for name in _CAPTURE_SETUP_DOC_CONSTANTS
+        if not re.search(
+            rf"\b{getattr(capture_setup_catalog, name)}\b[^().`]*\(`{name}`\)", text
+        )
+    ]
+    assert not stale, f"docs/session-suggestions.md states other capture-setup bounds: {stale}"
