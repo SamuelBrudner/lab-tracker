@@ -30,7 +30,11 @@ from lab_tracker.capture_client_release import (
     CaptureEnvironment,
     capture_environment,
 )
-from lab_tracker.capture_setup_catalog import CAPTURE_SETUP_GUIDES
+from lab_tracker.capture_setup_catalog import (
+    CAPTURE_SETUP_GUIDES,
+    SESSION_ID_PLACEHOLDER,
+    CaptureSetupGap,
+)
 from lab_tracker.cli import _skills_homes, init_consumer_repo, update_consumer_repo
 from lab_tracker.cli import main as lab_tracker_main
 from lab_tracker.config import Settings
@@ -1154,3 +1158,31 @@ def test_capture_setup_guide_ui_labels_exist_in_their_components() -> None:
         if not path.is_file() or not _component_shows(label, _read(path))
     ]
     assert not missing, f"capture-setup UI labels absent from their components: {missing}"
+
+
+_STATIC_DEMO_API = _FRONTEND_SRC / "shared" / "static-demo-api.js"
+
+
+def _catalog_copy(gap: CaptureSetupGap) -> list[str]:
+    """The guide copy a recorded tip for ``gap`` snapshots, as the demo spells it."""
+
+    guide = CAPTURE_SETUP_GUIDES[gap]
+    texts = [f'kind: "{guide.kind.value}"', guide.title, *guide.steps, guide.doc]
+    if guide.app_path is not None and SESSION_ID_PLACEHOLDER not in guide.app_path:
+        texts.append(f'app_path: "{guide.app_path}"')
+    return texts
+
+
+def test_static_demo_capture_setup_tip_quotes_the_catalog() -> None:
+    # The Pages demo shows a sample tip without a server; its copy must be the
+    # catalog's, so the demo never shows setup advice Lab Tracker would not give.
+    source = _read(_STATIC_DEMO_API).replace('\\"', '"')
+    gaps = [gap for gap in CAPTURE_SETUP_GUIDES if f'gap: "{gap.value}"' in source]
+    assert gaps, "the static demo carries no capture-setup tip, so this check checks nothing"
+    stale = [
+        f"{gap.value}: {text!r}"
+        for gap in gaps
+        for text in _catalog_copy(gap)
+        if text not in source
+    ]
+    assert not stale, f"static demo capture-setup copy differs from the catalog: {stale}"
