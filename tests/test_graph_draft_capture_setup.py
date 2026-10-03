@@ -27,6 +27,7 @@ from lab_tracker.capture_setup_catalog import (
     trusted_candidates,
 )
 from lab_tracker.models import (
+    EntityOrigin,
     EntityRef,
     EntityType,
     GraphChangeSet,
@@ -116,6 +117,16 @@ def _photo() -> NoteRawAsset:
         size_bytes=10,
         checksum="0" * 64,
     )
+
+
+def _naming(note: Note, *sessions: Session) -> Note:
+    """``note`` with session targets on each of ``sessions``."""
+
+    targets = [
+        EntityRef(entity_type=EntityType.SESSION, entity_id=session.session_id)
+        for session in sessions
+    ]
+    return note.model_copy(update={"targets": targets})
 
 
 def _at(minutes: int) -> datetime:
@@ -233,6 +244,48 @@ def test_typed_notes_without_a_capture_source_are_not_app_captures() -> None:
     assert _detect([_note(_at(minute)) for minute in (0, 5, 10)]) == []
 
 
+# Ways a capture can name a session that placement still cannot settle: each
+# capture below is unplaced, yet it named a session, so no "named no session"
+# gap may cite it. Only the sessionless check keeps these out.
+NAMED_BUT_UNPLACED = (
+    "decoded link code of another project",
+    "session id from another project",
+    "target to a session from another project",
+    "targets to two sessions",
+)
+
+
+def _named_but_unplaced(how: str, metadata: dict[str, str]) -> tuple[list[Note], list[Session]]:
+    """Three captures named as ``how`` says, outside every session, and the sessions."""
+
+    first, second = _session(_at(-600), _at(-500)), _session(_at(-400), _at(-300))
+    elsewhere = _session(_at(-600), _at(-500)).model_copy(update={"project_id": uuid4()})
+    hints = {
+        "decoded link code of another project": {"decoded_session_link_code": "LT-ABCDEFGH"},
+        "session id from another project": {"capture_session_id": str(elsewhere.session_id)},
+    }
+    notes = [_note(_at(minute), {**metadata, **hints.get(how, {})}) for minute in (0, 5, 10)]
+    if how == "target to a session from another project":
+        notes = [_naming(note, elsewhere) for note in notes]
+    elif how == "targets to two sessions":
+        notes = [_naming(note, first, second) for note in notes]
+    return notes, [first, second]
+
+
+@pytest.mark.parametrize("how", NAMED_BUT_UNPLACED)
+def test_app_captures_that_named_a_session_are_not_sessionless_even_unplaced(how: str) -> None:
+    notes, sessions = _named_but_unplaced(how, APP)
+    assert _detect(notes, sessions) == []
+
+
+@pytest.mark.parametrize("origin", [EntityOrigin.AI_SUGGESTED, EntityOrigin.USER_REVISED])
+def test_notes_the_review_path_made_are_not_captures(origin: EntityOrigin) -> None:
+    notes = [_note(_at(minute), APP).model_copy(update={"origin": origin}) for minute in (0, 5)]
+    shortcut = _note(_at(6), SHORTCUT).model_copy(update={"origin": origin})
+    watched = _note(_at(7), WATCH).model_copy(update={"origin": origin})
+    assert _detect([*notes, shortcut, watched]) == []
+
+
 # --- Detection: the hands-free shortcut ---------------------------------------
 
 
@@ -256,6 +309,18 @@ def test_shortcut_memos_that_reached_a_session_give_nothing(resolution: str) -> 
     session = _session(_at(-60))
     note = _note(_at(0), {**SHORTCUT, "capture_session_resolution": resolution}, session=session)
     assert _detect([note], [session]) == []
+
+
+@pytest.mark.parametrize("resolution", ["none_active", ""])
+@pytest.mark.parametrize("how", NAMED_BUT_UNPLACED)
+def test_shortcut_memos_later_named_a_session_give_nothing_even_unplaced(
+    how: str, resolution: str
+) -> None:
+    # A memo that reached no session can be given session targets later by a
+    # note update; it then names a session, and the shortcut tips say it named none.
+    metadata = {**SHORTCUT, "capture_session_resolution": resolution} if resolution else SHORTCUT
+    notes, sessions = _named_but_unplaced(how, metadata)
+    assert _detect(notes, sessions) == []
 
 
 # --- Detection: lt watch -------------------------------------------------------
@@ -317,10 +382,18 @@ def test_watch_gap_adapters_are_the_ones_lt_watch_files_mode_writes(
     assert (adapter in graph_draft_capture_setup.FOLDER_WATCH_ADAPTERS) is files_mode
 
 
-def test_a_watch_file_with_a_session_target_is_not_sessionless() -> None:
-    session = _session(_at(-600), _at(-500))
-    note = _note(_at(0), {**WATCH, "watch_session_source": "path"}, session=session)
-    assert _detect([note], [session]) == []
+@pytest.mark.parametrize("how", NAMED_BUT_UNPLACED)
+def test_watch_files_that_named_a_session_are_not_sessionless_even_unplaced(how: str) -> None:
+    notes, sessions = _named_but_unplaced(how, WATCH)
+    assert _detect(notes, sessions) == []
+
+
+def test_watch_files_whose_session_id_is_outside_the_project_are_not_sessionless() -> None:
+    # The watch named a session (--session, or a folder's LT- code) that this
+    # project does not have, so it stays plain metadata and places nothing.
+    metadata = {**WATCH, "watch_session_id": str(uuid4())}
+    notes = [_note(_at(minute), metadata, text="IMG_0001.tif") for minute in (0, 5, 10)]
+    assert _detect(notes, [_session(_at(-600), _at(-500))]) == []
 
 
 def test_a_watch_file_whose_session_came_from_the_checkout_is_offered_not_detected() -> None:
