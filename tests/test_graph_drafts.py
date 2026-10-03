@@ -537,6 +537,93 @@ def test_openai_graph_draft_client_drafts_from_batch_sends_packet() -> None:
     client.close()
 
 
+_EMPTY_PATCH_TEXT = json.dumps(
+    {"summary": "ok", "uncertain_fields": [], "clarification_requests": [], "operations": []}
+)
+_SCHEMA_PREFIX = "Return only valid JSON matching this schema: "
+_BATCH_CONTEXT = {"mode": "graph_batch", "batch_notes": [{"id": "note-1"}]}
+_NOTE_ARTIFACTS = [{"type": "text", "raw_content_preview": "fly 12"}]
+
+
+def _schema_in_system_text(system: str) -> dict[str, Any]:
+    return json.loads(system.split(_SCHEMA_PREFIX, 1)[1])
+
+
+def test_openai_requires_capture_setup_tips_only_on_batch_requests() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(200, json={"output_text": _EMPTY_PATCH_TEXT})
+
+    client = OpenAIGraphDraftClient(
+        api_key="test-key", model="gpt-test", transport=httpx.MockTransport(handler)
+    )
+
+    client.draft_from_batch(batch_context=dict(_BATCH_CONTEXT))
+    client.draft_from_note(graph_context={}, source_artifacts=_NOTE_ARTIFACTS)
+    client.draft_from_analysis_evidence(evidence_text="method_hash=abc", project_context={})
+
+    batch_request, *scoped_requests = requests
+    batch_format = batch_request["text"]["format"]
+    assert batch_format["strict"] is True
+    assert "capture_setup_recommendations" in batch_format["schema"]["required"]
+    assert "capture_setup_recommendations" in batch_format["schema"]["properties"]
+    assert "capture_setup_recommendations" in batch_request["instructions"]
+    for scoped in scoped_requests:
+        schema = scoped["text"]["format"]["schema"]
+        assert "capture_setup_recommendations" not in schema["properties"]
+        assert "capture_setup_recommendations" not in schema["required"]
+        assert "capture_setup_recommendations" not in scoped["instructions"]
+    client.close()
+
+
+def test_anthropic_and_google_append_the_tip_schema_only_to_batch_requests() -> None:
+    anthropic_requests: list[dict[str, Any]] = []
+    google_requests: list[dict[str, Any]] = []
+
+    def anthropic_handler(request: httpx.Request) -> httpx.Response:
+        anthropic_requests.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(200, json={"content": [{"type": "text", "text": _EMPTY_PATCH_TEXT}]})
+
+    def google_handler(request: httpx.Request) -> httpx.Response:
+        google_requests.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(
+            200, json={"candidates": [{"content": {"parts": [{"text": _EMPTY_PATCH_TEXT}]}}]}
+        )
+
+    anthropic = AnthropicGraphDraftClient(
+        api_key="anthropic-key",
+        model="claude-test",
+        transport=httpx.MockTransport(anthropic_handler),
+    )
+    google = GoogleGraphDraftClient(
+        api_key="google-key", model="gemini-test", transport=httpx.MockTransport(google_handler)
+    )
+    for client in (anthropic, google):
+        client.draft_from_batch(batch_context=dict(_BATCH_CONTEXT))
+        client.draft_from_note(graph_context={}, source_artifacts=_NOTE_ARTIFACTS)
+        client.draft_from_analysis_evidence(evidence_text="method_hash=abc", project_context={})
+
+    systems = {
+        "anthropic": [request["system"] for request in anthropic_requests],
+        "google": [
+            request["systemInstruction"]["parts"][0]["text"] for request in google_requests
+        ],
+    }
+    for batch_system, note_system, analysis_system in systems.values():
+        batch_schema = _schema_in_system_text(batch_system)
+        assert "capture_setup_recommendations" in batch_schema["properties"]
+        assert "capture_setup_recommendations" in batch_schema["required"]
+        for scoped in (note_system, analysis_system):
+            assert "capture_setup_recommendations" not in scoped
+            assert "capture_setup_recommendations" not in _schema_in_system_text(scoped)[
+                "properties"
+            ]
+    anthropic.close()
+    google.close()
+
+
 def test_openai_graph_draft_client_draft_from_batch_requires_notes() -> None:
     client = OpenAIGraphDraftClient(
         api_key="test-key",
