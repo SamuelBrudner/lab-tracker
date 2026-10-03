@@ -1041,11 +1041,41 @@ def _capture_setup_lt_commands() -> list[tuple[str, str]]:
     return commands
 
 
-def _component_shows(label: str, source: str) -> bool:
-    """True when ``label`` is a JSX text node or a whole string literal in ``source``."""
+# A double-quoted or template string (kept, so "https://" or "image/*" is not
+# read as a comment), else a block comment, else a line comment (dropped).
+# Single quotes are not strings here: JSX text uses them as apostrophes.
+_JS_STRING_OR_COMMENT = re.compile(
+    r'(?P<string>"(?:\\.|[^"\\\n])*"|`(?:\\.|[^`\\])*`)|/\*.*?\*/|(?<![:\w])//[^\n]*',
+    re.DOTALL,
+)
+# Where a component renders a label: the whole text of a JSX element, a
+# branch of a conditional inside a JSX expression ({done ? "Done" : "Skip"}),
+# or the label of an app nav link (["home", "/app", "Home"] in shared/ui.jsx).
+_RENDERED_LABEL_FORMS = (
+    r">\s*{label}\s*<",
+    r'\?\s*(?:"[^"\n]*"|\w+)\s*:\s*"{label}"\s*\}}',
+    r'\?\s*"{label}"\s*:',
+    r'\[\s*"\w+",\s*"/app[^"\n]*",\s*"{label}"\s*\]',
+)
 
+
+def _without_js_comments(source: str) -> str:
+    return _JS_STRING_OR_COMMENT.sub(lambda match: match["string"] or "", source)
+
+
+def _component_shows(label: str, source: str) -> bool:
+    """True when ``source`` renders ``label`` itself, not just names it.
+
+    Comments are dropped first, and a string literal counts only in a
+    rendered position (:data:`_RENDERED_LABEL_FORMS`), so a doc comment or an
+    unrelated constant that quotes the label cannot keep a renamed label green.
+    """
+
+    code = _without_js_comments(source)
     escaped = re.escape(label)
-    return re.search(rf">\s*{escaped}\s*<|\"{escaped}\"", source) is not None
+    return any(
+        re.search(form.format(label=escaped), code) is not None for form in _RENDERED_LABEL_FORMS
+    )
 
 
 def test_capture_setup_guides_link_existing_doc_headings() -> None:
@@ -1077,6 +1107,38 @@ def test_capture_setup_guide_lt_commands_parse() -> None:
         except SystemExit:
             rejected.append(f"{gap}: {command}")
     assert not rejected, f"capture-setup `lt` commands the parser rejects: {rejected}"
+
+
+@pytest.mark.parametrize(
+    ("label", "source"),
+    [
+        ("Capture into this session", '<h3 id="title">Capture into this session</h3>'),
+        ("Write NFC tag", "<button>\n  Write NFC tag\n</button>"),
+        ("Open bench kiosk", '<a href="https://kiosk.example/s">Open bench kiosk</a>'),
+        ("Skip", '<button>{finished ? "Done" : "Skip"}</button>'),
+        ("Skip", '<button>{recording ? "Skip" : "Done"}</button>'),
+        ("Home", 'const LINKS = [\n  ["home", "/app", "Home"],\n];'),
+    ],
+)
+def test_capture_setup_label_check_accepts_rendered_text(label: str, source: str) -> None:
+    assert _component_shows(label, source)
+
+
+@pytest.mark.parametrize(
+    ("label", "source"),
+    [
+        ("Capture into this session", '// "Capture into this session": a QR\n<h3>QR</h3>'),
+        ("Write NFC tag", '/**\n * "Write NFC tag": an NFC sticker\n */\n<button>Tag</button>'),
+        ("Write NFC tag", "<div>{/* <b>Write NFC tag</b> */}</div>"),
+        ("Hands-free shortcut", 'const DEFAULT_LABEL = "Hands-free shortcut";'),
+        ("Hands-free shortcut", 'save({ title: "Hands-free shortcut" });'),
+        ("Debrief", "<p>Use Debrief after a session.</p>"),
+    ],
+)
+def test_capture_setup_label_check_ignores_comments_and_unrendered_strings(
+    label: str, source: str
+) -> None:
+    assert not _component_shows(label, source)
 
 
 def test_capture_setup_guide_ui_labels_exist_in_their_components() -> None:
