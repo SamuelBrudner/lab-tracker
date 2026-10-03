@@ -244,9 +244,11 @@ CAPTURE_SETUP_GUIDES: Final[Mapping[CaptureSetupGap, CaptureSetupGuide]] = Mappi
                 ("Debrief", "features/sessions/SessionDetailCard.jsx"),
                 ("Skip", "features/bench-capture/SessionDebrief.jsx"),
             ),
+            # Shown for every offered session: thin captures are only what
+            # detected=true means, and only this batch is checked for a debrief.
             server_explanation=(
-                "Bench captures from this session ({count}) carry little context of their own, "
-                "and the session has no debrief."
+                "Bench captures from this session ({count}) came in without a debrief for the "
+                "session in this review."
             ),
         ),
         CaptureSetupGap.NWB_HEADERS_UNREAD: CaptureSetupGuide(
@@ -288,8 +290,9 @@ _KIND_PROMPT_DESCRIPTIONS: Final[Mapping[CaptureSetupKind, str]] = MappingProxyT
             "(watch_session_from_checkout)."
         ),
         CaptureSetupKind.SESSION_DEBRIEF: (
-            "a closed session the person ran whose bench captures carry little context and that "
-            "has no debrief recording (closed_without_debrief)."
+            "a closed session the person ran that has bench captures but no debrief recording "
+            "in this batch (closed_without_debrief); detected=true means several of those "
+            f"captures carry at most {THIN_CAPTURE_MAX_CHARS} characters of their own text."
         ),
         CaptureSetupKind.NWB_H5PY: (
             "NWB files whose headers (start time, identifier, subject) were not read on the "

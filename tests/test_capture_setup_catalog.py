@@ -199,6 +199,16 @@ def test_prompt_lines_describe_each_kind_and_its_gaps_without_steps() -> None:
         assert "`" not in line and "://" not in line
 
 
+def test_the_debrief_prompt_line_claims_thin_captures_only_for_detected_candidates() -> None:
+    # Every closed session with bench captures and no debrief in the batch is
+    # offered; only detected=true says Lab Tracker found its captures thin.
+    lines = dict(zip(CaptureSetupKind, capture_setup_prompt_lines(), strict=True))
+    line = lines[CaptureSetupKind.SESSION_DEBRIEF]
+    assert "little context" not in line
+    claim = f"detected=true means several of those captures carry at most {THIN_CAPTURE_MAX_CHARS}"
+    assert claim in line
+
+
 def test_trusted_candidates_keep_server_values_in_a_fixed_shape() -> None:
     session_id = uuid4()
     app = _candidate(extra="dropped", note_text="never trusted")

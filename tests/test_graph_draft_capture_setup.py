@@ -786,6 +786,28 @@ def test_unsafe_or_empty_explanations_fall_back_to_the_server_sentence(
     assert tip["explanation_source"] == "server"
 
 
+@pytest.mark.parametrize("explanation", ["", "Run lt session clear after closing."])
+def test_the_debrief_server_sentence_holds_for_a_session_with_full_captures(
+    explanation: str,
+) -> None:
+    # Lab Tracker's own check found these captures full, not thin, and it sees
+    # only this batch's debriefs (one recorded before the batch is not in it),
+    # so the sentence shown as Lab Tracker's check may claim neither.
+    session, notes = _closed_session_with_captures([LONG_TEXT] * 4)
+    [candidate] = _detect(notes, [session])
+    assert candidate["detected"] is False
+    result = resolve_capture_setup(
+        [candidate], [_pick(candidate["candidate_id"], candidate["note_ids"], explanation)]
+    )
+    assert result is not None
+    [tip] = result["recommendations"]
+    assert tip["explanation_source"] == "server"
+    assert tip["explanation"] == (
+        "Bench captures from this session (4) came in without a debrief for the session in "
+        "this review."
+    )
+
+
 def test_explanations_are_cut_to_the_cap() -> None:
     candidates, app_notes, _session = _offered()
     long = "The photos named no session. " * 20
