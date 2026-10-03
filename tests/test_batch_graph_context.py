@@ -3,17 +3,36 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from uuid import UUID, uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext, Role
+from lab_tracker.capture_setup_catalog import (
+    CANDIDATES_PACKET_KEY,
+    COOLDOWN_DAYS,
+    RESULT_PACKET_KEY,
+    CaptureSetupKind,
+    trusted_candidates,
+)
 from lab_tracker.db_models import ClaimModel, ExplorationNodeModel, NoteModel, QuestionModel
-from lab_tracker.models import ExternalContextPolicy, Note, Session, SessionType
+from lab_tracker.models import (
+    ExternalContextPolicy,
+    GraphChangeSet,
+    GraphChangeSetStatus,
+    GraphDraftMode,
+    Note,
+    Session,
+    SessionType,
+)
+from lab_tracker.services import graph_draft_context
 from lab_tracker.services.graph_draft_batch_policy import BatchReviewer
 from lab_tracker.services.graph_draft_context import (
     _OPEN_PREDICTION_LIMIT,
@@ -27,6 +46,7 @@ from lab_tracker.services.graph_draft_context import (
     _compact_recent_note,
     _graph_batch_context_summary,
 )
+from lab_tracker.services.graph_draft_records import GraphDraftRecords
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 _SELECTION_REASONS = {"active_floor", "staged_fill", "recent", "alias_match"}
@@ -1544,3 +1564,245 @@ def test_batch_context_orders_and_windows_batch_by_observed_at(
         "client",
         "client",
     ]
+
+
+# --- capture-setup candidates: the owner's own capture gaps, offered to the drafter ---
+
+_APP_CAPTURE = {"capture_source": "mobile_capture", "capture_mode": "text"}
+
+
+def _staged_capture(
+    client: TestClient,
+    headers: dict[str, str],
+    project_id: str,
+    *,
+    raw_content: str,
+    created_at: datetime,
+) -> str:
+    response = client.post(
+        "/notes",
+        json={
+            "project_id": project_id,
+            "raw_content": raw_content,
+            "status": "staged",
+            "metadata": _APP_CAPTURE,
+        },
+        headers=headers,
+    )
+    assert response.status_code == 201, response.text
+    note_id = response.json()["data"]["note_id"]
+    _set_note_created_at(client, note_id, created_at)
+    return note_id
+
+
+def _sessionless_phone_day(
+    client: TestClient, headers: dict[str, str], name: str
+) -> tuple[str, list[str], BatchReviewer]:
+    project_id = _create_project(client, headers, name)
+    admin_id = UUID(_admin_user_id(client, headers))
+    start = datetime.now(timezone.utc) - timedelta(hours=3)
+    note_ids = [
+        _staged_capture(
+            client,
+            headers,
+            project_id,
+            raw_content=f"Rig 2 Fly {index}",
+            created_at=start + timedelta(minutes=index),
+        )
+        for index in range(3)
+    ]
+    return project_id, note_ids, BatchReviewer(str(admin_id), admin_id)
+
+
+def _record_tip_history(
+    client: TestClient,
+    *,
+    project_id: str,
+    source_note_id: str,
+    assignee_user_id: UUID,
+    age: timedelta,
+) -> None:
+    change_set = GraphChangeSet(
+        change_set_id=uuid4(),
+        project_id=UUID(project_id),
+        source_note_id=UUID(source_note_id),
+        model="fake",
+        prompt_version="test",
+        status=GraphChangeSetStatus.READY,
+        draft_mode=GraphDraftMode.GRAPH_BATCH,
+        review_assignee=str(assignee_user_id),
+        review_assignee_user_id=assignee_user_id,
+        context_packet={
+            RESULT_PACKET_KEY: {
+                "recommendations": [{"kind": CaptureSetupKind.SESSION_CAPTURE_LINK.value}]
+            }
+        },
+        created_at=datetime.now(timezone.utc) - age,
+    )
+    with _request_api(client) as api:
+        api.graph_drafts.records.save_graph_change_set(change_set)
+
+
+def test_batch_context_offers_the_owners_sessionless_captures_as_a_candidate(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    _project_id, note_ids, owner = _sessionless_phone_day(
+        client, admin_auth_headers, "Capture setup candidates"
+    )
+
+    packet = _batch_packet(client, note_ids, context_owner=owner)
+
+    candidates = packet[CANDIDATES_PACKET_KEY]
+    # Only whitelisted server values: no capture text, no preview.
+    assert candidates == [
+        {
+            "candidate_id": "sessionless_app_captures",
+            "kind": "session_capture_link",
+            "gap": "sessionless_app_captures",
+            "detected": True,
+            "note_ids": note_ids,
+            "note_count": 3,
+            "session_id": None,
+            "session_label": None,
+        }
+    ]
+    assert trusted_candidates(candidates) == candidates
+    assert "Rig 2 Fly" not in json.dumps(candidates)
+    assert list(packet)[-2:] == [CANDIDATES_PACKET_KEY, "context_summary"]
+
+
+def test_batch_context_offers_nothing_for_captures_inside_the_owners_session(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Captured in session")
+    admin_id = UUID(_admin_user_id(client, admin_auth_headers))
+    start = datetime.now(timezone.utc) - timedelta(hours=3)
+    session = client.post(
+        "/sessions",
+        json={
+            "project_id": project_id,
+            "session_type": "operational",
+            "started_at": start.isoformat(),
+        },
+        headers=admin_auth_headers,
+    )
+    assert session.status_code == 201, session.text
+    note_ids = [
+        _staged_capture(
+            client,
+            admin_auth_headers,
+            project_id,
+            raw_content=f"Rig 2 Fly {index}",
+            created_at=start + timedelta(minutes=10 + index),
+        )
+        for index in range(3)
+    ]
+
+    packet = _batch_packet(
+        client, note_ids, context_owner=BatchReviewer(str(admin_id), admin_id)
+    )
+
+    assert CANDIDATES_PACKET_KEY not in packet
+
+
+def test_batch_context_offers_no_candidates_without_a_user_backed_owner(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    _project_id, note_ids, owner = _sessionless_phone_day(
+        client, admin_auth_headers, "No user-backed owner"
+    )
+
+    for context_owner in (None, BatchReviewer(owner.reviewer, None)):
+        packet = _batch_packet(client, note_ids, context_owner=context_owner)
+        assert CANDIDATES_PACKET_KEY not in packet
+    # The same captures do give a candidate to the user-backed owner.
+    assert CANDIDATES_PACKET_KEY in _batch_packet(client, note_ids, context_owner=owner)
+
+
+def test_a_kind_recommended_to_the_owner_this_week_is_not_offered_again(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id, note_ids, owner = _sessionless_phone_day(
+        client, admin_auth_headers, "Capture setup cooldown"
+    )
+    assert owner.reviewer_user_id is not None
+    colleague = client.app.state.auth_service.register_user(
+        username=f"cooldown-{uuid4().hex[:8]}", password="secret", role=Role.EDITOR
+    )
+
+    def history(assignee_user_id: UUID, age: timedelta) -> None:
+        _record_tip_history(
+            client,
+            project_id=project_id,
+            source_note_id=note_ids[0],
+            assignee_user_id=assignee_user_id,
+            age=age,
+        )
+
+    # Older than the cooldown, or recommended to someone else: still offered.
+    history(owner.reviewer_user_id, timedelta(days=COOLDOWN_DAYS + 1))
+    history(colleague.user_id, timedelta(days=2))
+    offered = _batch_packet(client, note_ids, context_owner=owner)
+    assert [item["kind"] for item in offered[CANDIDATES_PACKET_KEY]] == ["session_capture_link"]
+
+    # Recommended to this owner two days ago: not offered again.
+    history(owner.reviewer_user_id, timedelta(days=2))
+    suppressed = _batch_packet(client, note_ids, context_owner=owner)
+    assert CANDIDATES_PACKET_KEY not in suppressed
+    # Review memory reads the same change sets it always did.
+    assert suppressed["review_memory"]["reviewer_scoped"] is True
+
+
+def test_capture_setup_detection_failures_are_logged_and_never_fail_the_batch(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    _project_id, note_ids, owner = _sessionless_phone_day(
+        client, admin_auth_headers, "Detection failure"
+    )
+
+    def explode(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+        raise RuntimeError("detector bug")
+
+    monkeypatch.setattr(graph_draft_context, "detect_capture_setup_candidates", explode)
+    with caplog.at_level(logging.ERROR, logger=graph_draft_context.__name__):
+        packet = _batch_packet(client, note_ids, context_owner=owner)
+
+    assert CANDIDATES_PACKET_KEY not in packet
+    assert [note["id"] for note in packet["batch_notes"]] == note_ids
+    assert packet["context_summary"]["counts"]["batch_notes"] == 3
+    [record] = [item for item in caplog.records if item.name == graph_draft_context.__name__]
+    assert record.levelno == logging.ERROR
+    assert record.getMessage() == (
+        f"capture-setup candidates failed for reviewer {owner.reviewer_user_id}"
+    )
+    assert record.exc_info is not None and isinstance(record.exc_info[1], RuntimeError)
+
+
+def test_review_memory_and_the_cooldown_share_one_change_set_read(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    project_id, note_ids, owner = _sessionless_phone_day(
+        client, admin_auth_headers, "One change-set read"
+    )
+    reads: list[UUID] = []
+    original = GraphDraftRecords.list_review_memory_change_sets
+
+    def counting(self: GraphDraftRecords, project: UUID, **kwargs: Any) -> list[GraphChangeSet]:
+        reads.append(project)
+        return original(self, project, **kwargs)
+
+    monkeypatch.setattr(GraphDraftRecords, "list_review_memory_change_sets", counting)
+    packet = _batch_packet(client, note_ids, context_owner=owner)
+
+    assert packet["review_memory"]["reviewer_scoped"] is True
+    assert CANDIDATES_PACKET_KEY in packet
+    assert reads == [UUID(project_id)]

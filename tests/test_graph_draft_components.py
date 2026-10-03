@@ -2052,6 +2052,43 @@ def test_batch_packet_review_memory_recent_rejections_are_reviewer_and_window_sc
     }
 
 
+def test_review_memory_reuses_change_sets_the_builder_already_loaded() -> None:
+    project_id, reviewer = uuid4(), uuid4()
+    older = _review_change_set(
+        project_id,
+        status=GraphChangeSetStatus.READY,
+        review_assignee_user_id=reviewer,
+        created_at_offset=timedelta(hours=2),
+    )
+    _add_operation(older, payload={"text": "Is lane 2 the same gel?"})
+    newer = _review_change_set(
+        project_id, status=GraphChangeSetStatus.READY, review_assignee_user_id=reviewer
+    )
+    _add_operation(newer, payload={"text": "Do pooled notes support a merged observation?"})
+    owner = BatchReviewer(reviewer=str(reviewer), reviewer_user_id=reviewer)
+    loaded = _review_memory_builder([older, newer]).build_review_memory(
+        project_ids={project_id}, context_owner=owner, now=utc_now()
+    )
+
+    def refuse(*_args: Any, **_kwargs: Any) -> list[GraphChangeSet]:
+        raise AssertionError("review memory queried the change sets again")
+
+    preloaded = [older, newer]
+    reused = _stub_builder(
+        review_memory=SimpleNamespace(list_review_memory_change_sets=refuse)
+    ).build_review_memory(
+        project_ids={project_id}, context_owner=owner, now=utc_now(), change_sets=preloaded
+    )
+
+    assert reused == loaded
+    # Still newest first, and the caller's list is left as it was.
+    assert [item["change_set_id"] for item in reused["pending_proposals"]] == [
+        str(newer.change_set_id),
+        str(older.change_set_id),
+    ]
+    assert preloaded == [older, newer]
+
+
 def test_batch_packet_review_memory_without_reviewer_is_empty_and_flagged() -> None:
     project_id = uuid4()
     change_set = _review_change_set(
