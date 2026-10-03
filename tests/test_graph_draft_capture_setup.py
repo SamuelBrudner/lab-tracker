@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
 
+import lab_tracker_client.watch as watch_capture
 from lab_tracker.capture_setup_catalog import (
     CANDIDATES_PACKET_KEY,
     CAPTURE_SETUP_GUIDES,
@@ -259,13 +261,60 @@ def test_shortcut_memos_that_reached_a_session_give_nothing(resolution: str) -> 
 # --- Detection: lt watch -------------------------------------------------------
 
 
-def test_three_sessionless_watch_files_are_a_detected_gap() -> None:
-    notes = [_note(_at(minute), WATCH, text="IMG_0001.tif") for minute in (0, 5, 10)]
+@pytest.mark.parametrize("adapter", ["lt-watch-files", "lt-watch-acquisition"])
+def test_three_sessionless_watch_files_are_a_detected_gap(adapter: str) -> None:
+    metadata = {**WATCH, "evidence_adapter": adapter}
+    notes = [_note(_at(minute), metadata, text="IMG_0001.tif") for minute in (0, 5, 10)]
     [candidate] = _detect(notes)
     assert candidate["gap"] == "sessionless_watch_files"
     assert candidate["kind"] == "watch_folder_link_code"
     assert candidate["detected"] is True
     assert _detect(notes[:2])[0]["detected"] is False
+
+
+@pytest.mark.parametrize("adapter", ["lt-watch-manifest", "lt-watch"])
+def test_watch_captures_not_made_in_files_mode_give_no_watch_candidate(adapter: str) -> None:
+    # Only files mode reads an LT- code from a folder name; a manifest (analysis
+    # evidence) takes its session from the manifest or --session, so the
+    # folder-name guides would not apply.
+    metadata = {**WATCH, "evidence_adapter": adapter, "watch_capture_kind": "analysis_evidence"}
+    sessionless = [_note(_at(minute), metadata) for minute in (0, 5, 10)]
+    session = _session(_at(-60))
+    from_checkout = _note(
+        _at(1),
+        {**metadata, "watch_session_id": str(session.session_id), "watch_session_source": "active"},
+        session=session,
+    )
+    assert _detect([*sessionless, from_checkout], [session]) == []
+
+
+@pytest.mark.parametrize(
+    ("mode", "sink", "files_mode"),
+    [
+        ("files", "staged-note", True),
+        ("files", "acquisition-output", True),
+        ("manifest", "staged-note", False),
+    ],
+)
+def test_watch_gap_adapters_are_the_ones_lt_watch_files_mode_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    sink: str,
+    files_mode: bool,
+) -> None:
+    monkeypatch.delenv("LAB_TRACKER_WATCH_CONFIG", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_WATCH_OUTBOX", raising=False)
+    monkeypatch.chdir(tmp_path)
+    config = watch_capture.init_config(project_id="project-1")
+    root = tmp_path / "outputs"
+    root.mkdir()
+    manifest = root / watch_capture.DEFAULT_MANIFEST_PATTERN
+    manifest.write_text('{"capture_id": "run-1"}', encoding="utf-8")
+    watch_capture.scan_watch(config, mode=mode, root=root, sink=sink)
+    [event_path] = config.outbox_path().glob("*.json")
+    adapter = watch_capture.read_event(event_path)["adapter"]
+    assert (adapter in graph_draft_capture_setup.FOLDER_WATCH_ADAPTERS) is files_mode
 
 
 def test_a_watch_file_with_a_session_target_is_not_sessionless() -> None:

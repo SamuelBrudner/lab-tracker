@@ -40,7 +40,7 @@ from types import MappingProxyType
 from typing import Any, Final
 from uuid import UUID
 
-from lab_tracker.capture_client_release import EVIDENCE_ADAPTER_KEY, WATCH_ADAPTER_PREFIX
+from lab_tracker.capture_client_release import EVIDENCE_ADAPTER_KEY
 from lab_tracker.capture_setup_catalog import (
     CANDIDATES_PACKET_KEY,
     CAPTURE_SETUP_GUIDES,
@@ -97,6 +97,11 @@ NON_APP_CAPTURE_CHANNELS: Final = frozenset({SHORTCUT_CHANNEL, "bookmarklet", "d
 # routes/voice_capture.py: how a shortcut memo's session was chosen.
 CAPTURE_SESSION_RESOLUTION_KEY: Final = "capture_session_resolution"
 NO_ACTIVE_SESSION_RESOLUTION: Final = "none_active"
+# lab_tracker_client/watch.py: the adapters `lt watch` files mode writes
+# (event_from_file), the only mode that reads an LT- code from a folder name.
+# Manifest mode (lt-watch-manifest) takes its session from the manifest, so
+# the folder-name guides do not apply to it.
+FOLDER_WATCH_ADAPTERS: Final = frozenset({"lt-watch-files", "lt-watch-acquisition"})
 # lab_tracker_client/watch.py: which rule gave a watched file its session;
 # "active" is the checkout's `lt session use` context.
 WATCH_SESSION_SOURCE_KEY: Final = "watch_session_source"
@@ -137,7 +142,7 @@ def _metadata(note: Note, key: str) -> str:
 
 
 def _is_watch_capture(note: Note) -> bool:
-    return _metadata(note, EVIDENCE_ADAPTER_KEY).startswith(WATCH_ADAPTER_PREFIX)
+    return _metadata(note, EVIDENCE_ADAPTER_KEY) in FOLDER_WATCH_ADAPTERS
 
 
 def _is_app_capture(note: Note) -> bool:
@@ -506,6 +511,7 @@ __all__ = [
     "DETECTION_THRESHOLDS",
     "EXPLANATION_SOURCE_MODEL",
     "EXPLANATION_SOURCE_SERVER",
+    "FOLDER_WATCH_ADAPTERS",
     "NON_APP_CAPTURE_CHANNELS",
     "detect_capture_setup_candidates",
     "recently_recommended_kinds",
