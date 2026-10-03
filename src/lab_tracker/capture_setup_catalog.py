@@ -11,7 +11,7 @@ name a setup step, a command, a menu, or a feature that does not exist. The
 drift tests in ``tests/test_docs_drift.py`` pin every doc anchor, ``lt``
 command, and UI label this copy quotes.
 
-Five setup kinds close seven gaps (:data:`CAPTURE_SETUP_GUIDES` maps each gap
+Five setup kinds close six gaps (:data:`CAPTURE_SETUP_GUIDES` maps each gap
 to its guide). A candidate carries only server values -- enum names, note and
 session ids, counts, and the session's own label -- never capture text, and
 :func:`trusted_candidates` is the whitelist the prompt renders from.
@@ -70,7 +70,6 @@ class CaptureSetupGap(str, Enum):
     SHORTCUT_NO_ACTIVE_SESSION = "shortcut_no_active_session"
     SHORTCUT_WITHOUT_SESSION = "shortcut_without_session"
     SESSIONLESS_WATCH_FILES = "sessionless_watch_files"
-    WATCH_SESSION_FROM_CHECKOUT = "watch_session_from_checkout"
     CLOSED_WITHOUT_DEBRIEF = "closed_without_debrief"
     NWB_HEADERS_UNREAD = "nwb_headers_unread"
 
@@ -105,11 +104,9 @@ class CaptureSetupGuide:
 _HOME: Final = ("Home", "shared/ui.jsx")
 _DEVICES: Final = ("Devices", "shared/ui.jsx")
 _START_SESSION: Final = ("Start session", "features/sessions/SessionPanel.jsx")
-_LINK_CODE: Final = ("Link code", "features/sessions/SessionLinkCode.jsx")
 _CAPTURE_LINK_SECTION: Final = "features/sessions/SessionCaptureLinkSection.jsx"
 _SHORTCUT_PANEL: Final = "features/bench-capture/HandsFreeShortcutPanel.jsx"
 _SHORTCUT_DOC: Final = "docs/bench-capture.md#hands-free-voice-shortcut"
-_FOLDER_NAMES_DOC: Final = "docs/watch-folder-capture.md#sessions-from-folder-names"
 
 CAPTURE_SETUP_GUIDES: Final[Mapping[CaptureSetupGap, CaptureSetupGuide]] = MappingProxyType(
     {
@@ -197,33 +194,11 @@ CAPTURE_SETUP_GUIDES: Final[Mapping[CaptureSetupGap, CaptureSetupGuide]] = Mappi
             ),
             app_path="/app",
             command="lt watch add <folder> --session LT-<code> --dry-run",
-            doc=_FOLDER_NAMES_DOC,
-            ui_labels=(_HOME, _LINK_CODE),
+            doc="docs/watch-folder-capture.md#sessions-from-folder-names",
+            ui_labels=(_HOME, ("Link code", "features/sessions/SessionLinkCode.jsx")),
             server_explanation=(
                 "Files synced from a watched folder ({count}) named no session, so the drafter "
                 "could not tell which session produced them."
-            ),
-        ),
-        CaptureSetupGap.WATCH_SESSION_FROM_CHECKOUT: CaptureSetupGuide(
-            kind=CaptureSetupKind.WATCH_FOLDER_LINK_CODE,
-            title="Name the session in the folder, not the checkout",
-            steps=(
-                "These files took their session from the checkout-wide session default, which "
-                "claims every new file until it expires.",
-                'Copy the session\'s "Link code" (LT-<code>) and save its files in a folder '
-                "whose name includes it, for example session001_LT-<code>; a code in the "
-                "folder name takes precedence over the checkout default.",
-                "When the session ends, run the command below in that checkout so later files "
-                "are not claimed by it.",
-            ),
-            app_path="/app",
-            command="lt session clear",
-            doc=_FOLDER_NAMES_DOC,
-            ui_labels=(_LINK_CODE,),
-            server_explanation=(
-                "Files synced from a watched folder ({count}) took their session from a "
-                "checkout-wide default rather than from the folder, so the drafter could not be "
-                "sure they belong to it."
             ),
         ),
         CaptureSetupGap.CLOSED_WITHOUT_DEBRIEF: CaptureSetupGuide(
@@ -285,9 +260,7 @@ _KIND_PROMPT_DESCRIPTIONS: Final[Mapping[CaptureSetupKind, str]] = MappingProxyT
             "(shortcut_no_active_session) or the shortcut sent none (shortcut_without_session)."
         ),
         CaptureSetupKind.WATCH_FOLDER_LINK_CODE: (
-            "files synced from a watched folder that named no session (sessionless_watch_files) "
-            "or took it from a checkout-wide default rather than the folder "
-            "(watch_session_from_checkout)."
+            "files synced from a watched folder that named no session (sessionless_watch_files)."
         ),
         CaptureSetupKind.SESSION_DEBRIEF: (
             "a closed session the person ran that has bench captures but no debrief recording "

@@ -102,10 +102,6 @@ NO_ACTIVE_SESSION_RESOLUTION: Final = "none_active"
 # Manifest mode (lt-watch-manifest) takes its session from the manifest, so
 # the folder-name guides do not apply to it.
 FOLDER_WATCH_ADAPTERS: Final = frozenset({"lt-watch-files", "lt-watch-acquisition"})
-# lab_tracker_client/watch.py: which rule gave a watched file its session;
-# "active" is the checkout's `lt session use` context.
-WATCH_SESSION_SOURCE_KEY: Final = "watch_session_source"
-CHECKOUT_WATCH_SESSION_SOURCE: Final = "active"
 # The voice debrief a session page offers (SessionDebrief.jsx).
 CAPTURE_PURPOSE_KEY: Final = "capture_purpose"
 SESSION_DEBRIEF_PURPOSE: Final = "session_debrief"
@@ -115,15 +111,13 @@ H5PY_MISSING_SNIFF_ERROR: Final = "h5py not installed"
 
 # Captures a gap needs before Lab Tracker's own check calls it detected.
 # Sessionless app captures and watched files use the session-suggestion
-# threshold; one memo or NWB file is already a clear gap; a lingering
-# checkout session is never certain enough to call detected.
-DETECTION_THRESHOLDS: Final[Mapping[CaptureSetupGap, int | None]] = MappingProxyType(
+# threshold; one memo or NWB file is already a clear gap.
+DETECTION_THRESHOLDS: Final[Mapping[CaptureSetupGap, int]] = MappingProxyType(
     {
         CaptureSetupGap.SESSIONLESS_APP_CAPTURES: MIN_CAPTURES_FOR_SESSION,
         CaptureSetupGap.SHORTCUT_NO_ACTIVE_SESSION: 1,
         CaptureSetupGap.SHORTCUT_WITHOUT_SESSION: 1,
         CaptureSetupGap.SESSIONLESS_WATCH_FILES: MIN_CAPTURES_FOR_SESSION,
-        CaptureSetupGap.WATCH_SESSION_FROM_CHECKOUT: None,
         CaptureSetupGap.CLOSED_WITHOUT_DEBRIEF: MIN_CAPTURES_FOR_SESSION,
         CaptureSetupGap.NWB_HEADERS_UNREAD: 1,
     }
@@ -157,8 +151,7 @@ def _is_thin(note: Note) -> bool:
 
 
 def _detected(gap: CaptureSetupGap, count: int) -> bool:
-    threshold = DETECTION_THRESHOLDS[gap]
-    return threshold is not None and count >= threshold
+    return count >= DETECTION_THRESHOLDS[gap]
 
 
 def _candidate(
@@ -234,12 +227,6 @@ def _batch_gap_notes(
         CaptureSetupGap.SESSIONLESS_WATCH_FILES: [
             note for note in unplaced if _is_watch_capture(note)
         ],
-        CaptureSetupGap.WATCH_SESSION_FROM_CHECKOUT: [
-            note
-            for note in own
-            if _is_watch_capture(note)
-            and _metadata(note, WATCH_SESSION_SOURCE_KEY) == CHECKOUT_WATCH_SESSION_SOURCE
-        ],
         CaptureSetupGap.NWB_HEADERS_UNREAD: [
             note
             for note in own
@@ -310,12 +297,12 @@ def detect_capture_setup_candidates(
 
     Only the owner's own staged captures are examined, and only a
     user-backed owner gets candidates (the cooldown is user-scoped). Each gap
-    gives at most one candidate, in gap order; then up to
-    :data:`MAX_DEBRIEF_SESSIONS` debrief candidates, newest ``ended_at``
-    first. Kinds in ``suppressed`` are left out before the
-    :data:`MAX_CANDIDATES` cap, which therefore drops the oldest debrief
-    sessions rather than a whole gap. Note ids are in capture order, at most
-    :data:`MAX_NOTE_IDS` per candidate; ``note_count`` is the full count.
+    not tied to one session gives at most one candidate, in gap order; then up
+    to :data:`MAX_DEBRIEF_SESSIONS` debrief candidates, newest ``ended_at``
+    first. Kinds in ``suppressed`` are left out. All of those fit within the
+    :data:`MAX_CANDIDATES` cap, so the cap never drops a gap. Note ids are in
+    capture order, at most :data:`MAX_NOTE_IDS` per candidate; ``note_count``
+    is the full count.
     """
 
     if owner_user_id is None:

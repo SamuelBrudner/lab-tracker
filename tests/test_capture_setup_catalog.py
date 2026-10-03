@@ -116,10 +116,16 @@ def test_every_gap_has_a_guide_and_every_kind_is_covered() -> None:
         "shortcut_no_active_session",
         "shortcut_without_session",
         "sessionless_watch_files",
-        "watch_session_from_checkout",
         "closed_without_debrief",
         "nwb_headers_unread",
     ]
+
+
+def test_one_offer_holds_every_batch_gap_and_every_debrief_session() -> None:
+    # Each gap not scoped to a session gives at most one candidate, so the
+    # MAX_CANDIDATES cap can never drop a whole gap from the offer.
+    batch_gaps = len(CaptureSetupGap) - len(SESSION_SCOPED_GAPS)
+    assert batch_gaps + MAX_DEBRIEF_SESSIONS <= MAX_CANDIDATES
 
 
 def test_guides_are_frozen() -> None:

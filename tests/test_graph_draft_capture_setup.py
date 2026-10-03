@@ -343,14 +343,7 @@ def test_watch_captures_not_made_in_files_mode_give_no_watch_candidate(adapter: 
     # evidence) takes its session from the manifest or --session, so the
     # folder-name guides would not apply.
     metadata = {**WATCH, "evidence_adapter": adapter, "watch_capture_kind": "analysis_evidence"}
-    sessionless = [_note(_at(minute), metadata) for minute in (0, 5, 10)]
-    session = _session(_at(-60))
-    from_checkout = _note(
-        _at(1),
-        {**metadata, "watch_session_id": str(session.session_id), "watch_session_source": "active"},
-        session=session,
-    )
-    assert _detect([*sessionless, from_checkout], [session]) == []
+    assert _detect([_note(_at(minute), metadata) for minute in (0, 5, 10)]) == []
 
 
 @pytest.mark.parametrize(
@@ -396,7 +389,10 @@ def test_watch_files_whose_session_id_is_outside_the_project_are_not_sessionless
     assert _detect(notes, [_session(_at(-600), _at(-500))]) == []
 
 
-def test_a_watch_file_whose_session_came_from_the_checkout_is_offered_not_detected() -> None:
+def test_watch_files_that_took_an_active_session_default_give_nothing() -> None:
+    # `lt session use` in the checkout and LAB_TRACKER_SESSION_ID both stamp
+    # watch_session_source="active", and the note does not say which, so no
+    # tip can say where the session came from or how to stop it.
     session = _session(_at(-60))
     metadata = {
         **WATCH,
@@ -405,10 +401,7 @@ def test_a_watch_file_whose_session_came_from_the_checkout_is_offered_not_detect
         "declared_target_source": "config_default",
     }
     notes = [_note(_at(minute), metadata, session=session) for minute in (0, 5, 10, 15)]
-    [candidate] = _detect(notes, [session])
-    assert candidate["gap"] == "watch_session_from_checkout"
-    assert candidate["detected"] is False
-    assert candidate["note_ids"] == _ids(notes)
+    assert _detect(notes, [session]) == []
 
 
 # --- Detection: debriefs -------------------------------------------------------
@@ -522,32 +515,25 @@ def test_nwb_files_read_without_h5py_are_a_detected_gap() -> None:
 
 
 def _one_of_every_gap() -> tuple[list[Note], list[Session]]:
-    checkout = _session(_at(-1000), _at(-900))
+    """Captures for every gap, then the NWB file's session and four to debrief, oldest first."""
+
+    acquisition = _session(_at(-1000), _at(-900))
     notes = [
         _note(_at(0), APP),
         _note(_at(1), {**SHORTCUT, "capture_session_resolution": "none_active"}),
         _note(_at(2), SHORTCUT),
         _note(_at(3), WATCH),
-        _note(
-            _at(4),
-            {
-                **WATCH,
-                "watch_session_id": str(checkout.session_id),
-                "watch_session_source": "active",
-            },
-            session=checkout,
-        ),
-        _note(_at(5), {**WATCH, "format_sniff_error": "h5py not installed"}, session=checkout),
+        _note(_at(5), {**WATCH, "format_sniff_error": "h5py not installed"}, session=acquisition),
     ]
-    sessions = [checkout]
-    for end in (-400, -300, -200):
+    sessions = [acquisition]
+    for end in (-400, -300, -200, -100):
         session, captures = _closed_session_with_captures(["ok"], end_minutes=end)
         sessions.append(session)
         notes.extend(captures)
     return notes, sessions
 
 
-def test_candidates_follow_gap_order_with_debrief_sessions_last_and_are_capped() -> None:
+def test_candidates_follow_gap_order_with_debrief_sessions_last() -> None:
     notes, sessions = _one_of_every_gap()
     candidates = _detect(notes, sessions)
     assert len(candidates) == MAX_CANDIDATES
@@ -556,25 +542,28 @@ def test_candidates_follow_gap_order_with_debrief_sessions_last_and_are_capped()
         "shortcut_no_active_session",
         "shortcut_without_session",
         "sessionless_watch_files",
-        "watch_session_from_checkout",
         "nwb_headers_unread",
         "closed_without_debrief",
         "closed_without_debrief",
+        "closed_without_debrief",
     ]
-    # The cap drops the oldest debrief session, never a whole gap.
-    assert [candidate["session_id"] for candidate in candidates[-2:]] == [
-        str(sessions[3].session_id),
-        str(sessions[2].session_id),
+    # Every gap fits in one offer; only the oldest debrief session is left out.
+    assert [candidate["session_id"] for candidate in candidates[-3:]] == [
+        str(session.session_id) for session in reversed(sessions[2:])
     ]
 
 
-def test_suppressed_kinds_are_not_offered_and_free_their_slots() -> None:
+def test_suppressed_kinds_are_not_offered() -> None:
     notes, sessions = _one_of_every_gap()
     candidates = _detect(notes, sessions, suppressed=frozenset({CaptureSetupKind.SHORTCUT_SESSION}))
-    gaps = [candidate["gap"] for candidate in candidates]
-    assert "shortcut_no_active_session" not in gaps
-    assert "shortcut_without_session" not in gaps
-    assert gaps.count("closed_without_debrief") == 3
+    assert [candidate["gap"] for candidate in candidates] == [
+        "sessionless_app_captures",
+        "sessionless_watch_files",
+        "nwb_headers_unread",
+        "closed_without_debrief",
+        "closed_without_debrief",
+        "closed_without_debrief",
+    ]
 
 
 def test_note_ids_are_capped_while_the_count_stays_whole() -> None:
@@ -650,7 +639,7 @@ def _offered() -> tuple[list[dict[str, Any]], list[Note], Session]:
     notes, sessions = _one_of_every_gap()
     app_notes = [_note(_at(10 + minute), APP) for minute in range(2)]
     candidates = _detect([*notes, *app_notes], sessions)
-    return candidates, [notes[0], *app_notes], sessions[3]
+    return candidates, [notes[0], *app_notes], sessions[-1]
 
 
 def _pick(
@@ -786,7 +775,7 @@ def test_unsafe_or_empty_explanations_fall_back_to_the_server_sentence(
     assert tip["explanation_source"] == "server"
 
 
-@pytest.mark.parametrize("explanation", ["", "Run lt session clear after closing."])
+@pytest.mark.parametrize("explanation", ["", "Run lt watch add after closing."])
 def test_the_debrief_server_sentence_holds_for_a_session_with_full_captures(
     explanation: str,
 ) -> None:
