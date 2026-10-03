@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import ast
 import base64
 import re
+import sys
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
 
+from lab_tracker import capture_setup_catalog
 from lab_tracker.capture_setup_catalog import (
     CANDIDATES_PACKET_KEY,
     CAPTURE_SETUP_GUIDES,
@@ -69,6 +73,19 @@ def _debrief_candidate(session_id: UUID, **overrides: Any) -> dict[str, Any]:
         session_label=_label(session_id),
         **overrides,
     )
+
+
+def test_the_catalog_imports_only_the_standard_library() -> None:
+    # The provider clients and the services both import it, so it must stay a leaf.
+    tree = ast.parse(Path(capture_setup_catalog.__file__).read_text(encoding="utf-8"))
+    imported = {
+        alias.name if isinstance(node, ast.Import) else node.module or ""
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in node.names
+    }
+    roots = {name.split(".")[0] for name in imported}
+    assert roots <= set(sys.stdlib_module_names) | {"__future__"}, sorted(roots)
 
 
 def test_the_packet_keys_and_bounds_are_the_documented_constants() -> None:
