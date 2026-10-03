@@ -190,6 +190,7 @@ files = [
   "src/lab_tracker/services/provenance_time_windows.py",
   "src/lab_tracker/services/session_suggestions.py",
   "src/lab_tracker/services/graph_draft_day_log.py",
+  "src/lab_tracker/services/graph_draft_capture_setup.py",
   "src/lab_tracker/capture_setup_catalog.py",
   "src/lab_tracker/provider_error_redaction.py",
   "src/lab_tracker/client_release.py",
