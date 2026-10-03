@@ -207,8 +207,9 @@ CAPTURE_SETUP_GUIDES: Final[Mapping[CaptureSetupGap, CaptureSetupGuide]] = Mappi
             steps=(
                 'Open the session and use "Debrief": three prompts (what happened, what '
                 "surprised you, what you would change) and one recording.",
-                "The recording is saved as a voice note linked to the session and is drafted "
-                "once it has a transcript.",
+                "The recording is saved as a voice note linked to the session. The drafter "
+                "reads it only through its transcript, so if the note has no transcript yet, "
+                "add one before the next daily review.",
                 "Next time, record the debrief offered when you close a session instead of "
                 'choosing "Skip".',
             ),

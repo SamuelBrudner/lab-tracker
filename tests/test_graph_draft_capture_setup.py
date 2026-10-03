@@ -45,7 +45,11 @@ from lab_tracker.services.graph_draft_capture_setup import (
     record_capture_setup,
     resolve_capture_setup,
 )
-from lab_tracker.services.graph_draft_day_log import SHORT_CAPTURE_MAX_CHARS, bench_capture_kind
+from lab_tracker.services.graph_draft_day_log import (
+    SHORT_CAPTURE_MAX_CHARS,
+    BenchCaptureKind,
+    bench_capture_kind,
+)
 from lab_tracker.services.session_clock import session_label
 
 T0 = datetime(2026, 9, 28, 13, 0, tzinfo=timezone.utc)
@@ -491,6 +495,45 @@ def test_a_debrief_in_the_batch_suppresses_the_sessions_candidate() -> None:
         session=session,
     )
     assert _detect([*notes, debrief], [session]) == []
+
+
+def _voice_bench_captures(session: Session, transcripts: list[str]) -> list[Note]:
+    notes = [
+        _note(_at(-110 + index), APP, text="", asset=_upload("memo.m4a", "audio/mp4"))
+        for index in range(len(transcripts))
+    ]
+    return [
+        note.model_copy(update={"transcribed_text": transcript})
+        for note, transcript in zip(notes, transcripts, strict=True)
+    ]
+
+
+def test_a_voice_captures_transcript_decides_whether_it_is_thin() -> None:
+    # Uploads store raw_content as "", so only the transcript says how much a
+    # voice memo said; it must be long enough to count, yet short enough to
+    # stay a bench capture.
+    session = _session(_at(-120), _at(-60))
+    spoken = "x" * (THIN_CAPTURE_MAX_CHARS + 1)
+    assert THIN_CAPTURE_MAX_CHARS < len(spoken) <= SHORT_CAPTURE_MAX_CHARS
+    said_enough = _voice_bench_captures(session, [spoken] * 3)
+    said_little = _voice_bench_captures(session, ["ok"] * 3)
+    assert {bench_capture_kind(note) for note in [*said_enough, *said_little]} == {
+        BenchCaptureKind.VOICE
+    }
+    assert [c["detected"] for c in _detect(said_enough, [session])] == [False]
+    assert [c["detected"] for c in _detect(said_little, [session])] == [True]
+
+
+def test_captures_that_target_the_session_do_not_count_as_its_debrief() -> None:
+    # Captures made through the session's capture link carry a session target
+    # but are not a debrief; only capture_purpose=session_debrief is.
+    session = _session(_at(-120), _at(-60))
+    linked = [
+        _note(_at(-110 + minute), APP, text="ok", session=session) for minute in (0, 1, 2)
+    ]
+    [candidate] = _detect(linked, [session])
+    assert candidate["gap"] == "closed_without_debrief"
+    assert candidate["detected"] is True
 
 
 def test_long_bench_captures_are_offered_but_not_detected() -> None:

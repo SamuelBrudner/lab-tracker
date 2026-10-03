@@ -308,3 +308,13 @@ def test_trusted_candidates_canonicalize_note_and_session_ids() -> None:
     [trusted] = trusted_candidates([candidate])
     assert trusted["note_ids"] == [str(note_id)]
     assert trusted["session_id"] == str(session_id)
+
+
+def test_debrief_steps_say_the_drafter_reads_the_transcript_and_do_not_promise_a_wait() -> None:
+    # Auto-transcription is an operator opt-in and the daily review drafts a
+    # staged recording whether or not it has a transcript, so the copy must not
+    # say drafting waits for one.
+    steps = " ".join(CAPTURE_SETUP_GUIDES[CaptureSetupGap.CLOSED_WITHOUT_DEBRIEF].steps)
+    assert "reads it only through its transcript" in steps
+    assert "before the next daily review" in steps
+    assert "once it has a transcript" not in steps
