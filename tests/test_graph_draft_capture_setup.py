@@ -45,6 +45,7 @@ from lab_tracker.services.graph_draft_capture_setup import (
     record_capture_setup,
     resolve_capture_setup,
 )
+from lab_tracker.services.graph_draft_day_log import SHORT_CAPTURE_MAX_CHARS, bench_capture_kind
 from lab_tracker.services.session_clock import session_label
 
 T0 = datetime(2026, 9, 28, 13, 0, tzinfo=timezone.utc)
@@ -109,11 +110,11 @@ def _note(
     )
 
 
-def _photo() -> NoteRawAsset:
+def _upload(filename: str = "IMG_1.jpg", content_type: str = "image/jpeg") -> NoteRawAsset:
     return NoteRawAsset(
         storage_id=uuid4(),
-        filename="IMG_1.jpg",
-        content_type="image/jpeg",
+        filename=filename,
+        content_type=content_type,
         size_bytes=10,
         checksum="0" * 64,
     )
@@ -404,6 +405,19 @@ def test_watch_files_that_took_an_active_session_default_give_nothing() -> None:
     assert _detect(notes, [session]) == []
 
 
+def test_sessionless_memos_and_watch_files_made_inside_an_own_session_give_nothing() -> None:
+    # They named no session, but time places each in the one session their
+    # author had open, so the drafter knows the session; only placement keeps
+    # them out of the "named no session" tips.
+    session = _session(_at(-60))
+    memos = [
+        _note(_at(0), {**SHORTCUT, "capture_session_resolution": "none_active"}),
+        _note(_at(1), SHORTCUT),
+    ]
+    watched = [_note(_at(minute), WATCH, text="IMG_0001.tif") for minute in (2, 3, 4)]
+    assert _detect([*memos, *watched], [session]) == []
+
+
 # --- Detection: debriefs -------------------------------------------------------
 
 
@@ -438,10 +452,34 @@ def test_an_own_closed_session_with_thin_captures_and_no_debrief_is_detected() -
 
 def test_photos_count_as_thin_bench_captures() -> None:
     session = _session(_at(-120), _at(-60))
-    notes = [_note(_at(-110 + minute), APP, text="", asset=_photo()) for minute in (0, 1, 2)]
+    notes = [_note(_at(-110 + minute), APP, text="", asset=_upload()) for minute in (0, 1, 2)]
     [candidate] = _detect(notes, [session])
     assert candidate["gap"] == "closed_without_debrief"
     assert candidate["detected"] is True
+
+
+def test_a_closed_own_session_without_bench_captures_gives_no_debrief_candidate() -> None:
+    # Time places all of these in the session, but none is a bench capture:
+    # watched files, a typed note too long for the day log, and a PDF.
+    session = _session(_at(-120), _at(-60))
+    notes = [
+        *(_note(_at(-110 + minute), WATCH, text="IMG_0001.tif") for minute in (0, 1, 2)),
+        _note(_at(-105), APP, text="x" * (SHORT_CAPTURE_MAX_CHARS + 1)),
+        _note(_at(-104), APP, text="", asset=_upload("protocol.pdf", "application/pdf")),
+    ]
+    assert [bench_capture_kind(note) for note in notes] == [None] * len(notes)
+    assert _detect(notes, [session]) == []
+
+
+def test_a_debrief_candidate_cites_and_counts_only_the_bench_captures() -> None:
+    session, bench = _closed_session_with_captures(["ok", "gel 2"])
+    watched = [_note(_at(-115 + minute), WATCH, text="IMG_0001.tif") for minute in (0, 1, 2)]
+    [candidate] = _detect([*watched, *bench], [session])
+    assert candidate["note_ids"] == _ids(bench)
+    assert candidate["note_count"] == len(bench)
+    # Two thin bench captures are below the threshold; the watched files do
+    # not make the session look thin.
+    assert candidate["detected"] is False
 
 
 def test_a_debrief_in_the_batch_suppresses_the_sessions_candidate() -> None:
