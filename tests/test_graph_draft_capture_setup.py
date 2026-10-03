@@ -175,6 +175,14 @@ def test_only_the_owners_captures_are_examined_or_cited() -> None:
 def test_no_user_backed_owner_gets_no_candidates() -> None:
     notes = [_note(_at(minute), APP) for minute in (0, 5, 10)]
     assert _detect(notes, owner_user_id=None) == []
+    # Captures with only a string author (legacy rows, seed-demo) also lack a
+    # user id, so only the owner check keeps them from a tip that no
+    # user-scoped cooldown could ever suppress.
+    unattributed = [
+        _note(_at(minute), APP, author=None).model_copy(update={"created_by": "seed-demo"})
+        for minute in (0, 5, 10)
+    ]
+    assert _detect(unattributed, owner_user_id=None) == []
 
 
 def test_a_capture_inside_the_owners_own_session_is_not_sessionless() -> None:
@@ -183,6 +191,18 @@ def test_a_capture_inside_the_owners_own_session_is_not_sessionless() -> None:
     outside = _note(_at(-120), APP)
     [candidate] = _detect([inside, outside], [own_session])
     assert candidate["note_ids"] == _ids([outside])
+
+
+def test_captures_inside_two_overlapping_own_sessions_are_not_sessionless() -> None:
+    # Time cannot pick one of the two sessions, but the captures were not made
+    # outside the person's sessions, which is what this tip and its server
+    # sentence say.
+    earlier, later = _session(_at(-120)), _session(_at(-60))
+    ambiguous = [_note(_at(minute), APP) for minute in (0, 1, 2)]
+    outside = _note(_at(-180), APP)
+    [candidate] = _detect([*ambiguous, outside], [earlier, later])
+    assert candidate["note_ids"] == _ids([outside])
+    assert candidate["detected"] is False
 
 
 def test_a_capture_inside_only_a_colleagues_session_still_qualifies() -> None:

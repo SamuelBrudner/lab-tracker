@@ -71,7 +71,9 @@ from lab_tracker.models import (
 from lab_tracker.services.graph_draft_batch_policy import as_utc
 from lab_tracker.services.graph_draft_day_log import bench_capture_kind
 from lab_tracker.services.session_clock import (
+    SessionTimeline,
     capture_clock,
+    eligible_sessions,
     session_label,
     session_targets,
     sessions_for_captures,
@@ -174,10 +176,38 @@ def _candidate(
     }
 
 
+def _outside_own_sessions(
+    notes: Sequence[Note], sessions: Sequence[Session], *, now: datetime
+) -> list[Note]:
+    """The captures no session of their author (or of no recorded author) contains.
+
+    This is what session suggestions call sessionless. A capture inside two
+    such sessions is unplaced (time cannot pick one) but not outside them.
+    """
+
+    if not notes:
+        return []
+    times = [capture_clock(note).at for note in notes]
+    timeline = SessionTimeline(sessions, now=now, since=min(times))
+    return [
+        note
+        for note, open_sessions in zip(notes, timeline.containing_many(times), strict=True)
+        if not eligible_sessions(note, open_sessions)
+    ]
+
+
 def _batch_gap_notes(
-    own: Sequence[Note], placement: Mapping[UUID, UUID | None]
+    own: Sequence[Note],
+    sessions: Sequence[Session],
+    placement: Mapping[UUID, UUID | None],
+    *,
+    now: datetime,
 ) -> dict[CaptureSetupGap, list[Note]]:
-    """The owner's captures behind each gap that is not tied to one session."""
+    """The owner's captures behind each gap that is not tied to one session.
+
+    Phone and web captures count only when made outside every session of
+    their author, as the tip says; the other gaps need only an unplaced capture.
+    """
 
     unplaced = [
         note for note in own if is_sessionless_capture(note) and placement.get(note.note_id) is None
@@ -185,10 +215,9 @@ def _batch_gap_notes(
     shortcut = [
         note for note in unplaced if _metadata(note, CAPTURE_CHANNEL_KEY) == SHORTCUT_CHANNEL
     ]
+    app = [note for note in unplaced if _is_app_capture(note)]
     return {
-        CaptureSetupGap.SESSIONLESS_APP_CAPTURES: [
-            note for note in unplaced if _is_app_capture(note)
-        ],
+        CaptureSetupGap.SESSIONLESS_APP_CAPTURES: _outside_own_sessions(app, sessions, now=now),
         CaptureSetupGap.SHORTCUT_NO_ACTIVE_SESSION: [
             note
             for note in shortcut
@@ -297,7 +326,7 @@ def detect_capture_setup_candidates(
     if not own:
         return []
     placement = sessions_for_captures(own, sessions, now=now)
-    gap_notes = _batch_gap_notes(own, placement)
+    gap_notes = _batch_gap_notes(own, sessions, placement, now=now)
     candidates = [
         _candidate(gap, gap_notes[gap], detected=_detected(gap, len(gap_notes[gap])))
         for gap in CaptureSetupGap
