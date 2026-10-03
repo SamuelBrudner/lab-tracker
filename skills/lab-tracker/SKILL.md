@@ -140,7 +140,9 @@ the person works; setup verbs need their consent (`--dry-run`, then `--yes`).
   (`worktree_tree_match`), and captures made during one of the author's own
   sessions (`time_window_match`); `GET /projects/{id}/session-suggestions`
   suggests session bookkeeping; batch drafts add one deterministic day log per
-  busy session. None of these commit anything. See `docs/session-suggestions.md`.
+  busy session and may carry read-only capture-setup tips
+  (`context_packet.capture_setup`) to report, never act on. None of these commit
+  anything. See `docs/session-suggestions.md`.
 
 ## MCP Tools
 

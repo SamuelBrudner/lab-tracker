@@ -10,16 +10,18 @@ linking**, and keeps the review burden proportional to the work:
 | **Time-window provenance** | Proposes `note -> session` links for captures made while exactly one session was open | A person accepts or rejects each link |
 | **Session suggestions** | Notices a forgotten open session, a bench day with no session, an instrument booking no session covers | A person clicks Apply or Dismiss |
 | **Day-log grouping** | Folds a session's short bench captures into one proposed timestamped log in the daily review | A reviewer accepts one log instead of N items |
+| **Capture-setup tips** | Finds what a reviewer's own captures were missing (no session, no debrief, unread NWB headers) and lets the batch drafter recommend the setup that would have recorded it, for captures it could not interpret | A person follows the steps or ignores the tip; nothing is accepted or committed |
 
-None of the three writes a committed record on its own: the first writes
+None of the four writes a committed record on its own: the first writes
 `PROPOSED` provenance links, the second writes nothing at all, the third
-appends one `proposed` operation to a daily-review draft. Delegated curation
+appends one `proposed` operation to a daily-review draft, and the fourth adds
+read-only advice to a daily-review draft's `context_packet`. Delegated curation
 ([delegated-curation.md](delegated-curation.md)) treats the day log like any
 other `create_note` proposal (admitted by `full`, never by `organize`).
 
 ## The capture clock and the session window
 
-All three read the same two facts
+All four read the same two facts
 (`src/lab_tracker/services/session_clock.py`):
 
 - **When a capture happened.** The instrument's acquisition time
@@ -225,8 +227,9 @@ Only the batch reviewer's own staged captures are examined: the notes whose
 ran it). A batch whose reviewer has no user id (a legacy assignee string) gets
 no candidates, because the cooldown below is per user. Time ties a capture to
 a session only when the same person ran it, as everywhere on this page, and
-"now" is the end of the batch window, so a retried batch is offered the same
-candidates.
+"now" is the end of the batch window, so a retried batch judges time the same
+way; a retry rebuilds its packet, though, so sessions or drafts that changed in
+between can change what it is offered.
 
 | Kind | Gap | The reviewer's captures it covers | Detected at |
 | --- | --- | --- | --- |
@@ -329,9 +332,9 @@ anything:
 `note_ids` are the cited ones, in candidate order; `explanation_source` is
 `model` or `server`; `guide` is the catalog's copy at generation time (a debrief
 tip's `app_path` names its session), so a later wording fix reaches only new
-drafts. Tips ride on a successful batch draft, like day logs: without a
-configured provider there is no draft, and a failed draft has no tips, though
-it keeps its stored candidates. A failure in either stage (finding candidates
+drafts. Tips ride on a successful generation, like day logs: without a
+configured provider there is no draft, and a draft that fails before its tips
+are recorded has none, though it keeps its stored candidates. A failure in either stage (finding candidates
 or recording tips) is logged and the batch goes on without tips.
 
 ### The cooldown
@@ -411,6 +414,8 @@ to report them and never run their steps.
   `src/lab_tracker/services/graph_draft_capture_setup.py`.
 - There is no separate kill switch. Reject a link and it never comes back;
   dismiss a suggestion on a device; reject a day log. Turning off the daily
-  review stops the detector, the day log, and capture-setup tips with it; the
+  review's schedule stops its scheduled runs of the detector, the day log, and
+  capture-setup tips; a batch started with Run now (or the
+  `lab_tracker_run_graph_draft_batch` MCP tool) still runs all three. The
   suggestion read runs only when the card is shown. A capture-setup tip cannot
   be dismissed; its kind is not offered again for 7 days.

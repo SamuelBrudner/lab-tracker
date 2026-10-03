@@ -6,8 +6,10 @@ dictate". The server finds the gaps from capture metadata, offers them to the
 drafter as *candidates*, and the drafter picks the ones whose captures it
 could not interpret and explains each in its own words. Everything else a tip
 shows -- its title, setup steps, the app page to open, an optional ``lt``
-command, and the guide to read -- is copy owned here, so the model can never
-name a setup step, a command, a menu, or a feature that does not exist. The
+command, and the guide to read -- is copy owned here, so the steps a person
+follows never come from the model. The model writes only the explanation,
+which the server filters for links and commands but otherwise shows as the
+drafter's own words. The
 drift tests in ``tests/test_docs_drift.py`` pin every doc anchor, ``lt``
 command, and UI label this copy quotes.
 
