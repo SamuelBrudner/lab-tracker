@@ -1,3 +1,5 @@
+import DEMO_CAPTURE_SETUP from "./static-demo-capture-setup.json" with { type: "json" };
+
 const DEMO_USER = {
   user_id: "00000000-0000-4000-8000-0000000000d0",
   username: "demo.viewer",
@@ -275,39 +277,9 @@ const GRAPH_DRAFT = {
     "Confirm which recording rig produced the gain measurement before linking a dataset.",
   ],
   context_packet: {
-    // What the server records after the drafter picks a capture-setup tip;
-    // the guide copy is src/lab_tracker/capture_setup_catalog.py's, verbatim.
-    capture_setup: {
-      version: "capture_setup/v1",
-      offered: ["shortcut_no_active_session"],
-      returned: 1,
-      dropped: 0,
-      recommendations: [
-        {
-          recommendation_id: "shortcut_no_active_session",
-          kind: "shortcut_session",
-          gap: "shortcut_no_active_session",
-          detected: true,
-          note_ids: [GRAPH_DRAFT_NOTE_IDS[0]],
-          note_count: 1,
-          session_id: null,
-          session_label: null,
-          explanation:
-            "The voice memo about the 0.6x gain reached no session, so the drafter could not tell which rig or recording it describes.",
-          explanation_source: "model",
-          guide: {
-            title: "Have a session open when you dictate",
-            steps: [
-              "Start a session on \"Home\" with \"Start session\" before you record memos with the hands-free shortcut.",
-              "The shortcut files each memo into your most recently started open session, so memos recorded while it is open arrive linked to it.",
-            ],
-            app_path: "/app",
-            command: null,
-            doc: "docs/bench-capture.md#hands-free-voice-shortcut",
-          },
-        },
-      ],
-    },
+    // What the server records after the drafter picks a capture-setup tip.
+    // tests/test_docs_drift.py checks the fixture equals the server's result.
+    capture_setup: DEMO_CAPTURE_SETUP,
   },
   created_at: "2026-06-05T21:00:00Z",
   draft_mode: "graph_batch",

@@ -14,6 +14,7 @@ import json
 import re
 import shlex
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -32,7 +33,6 @@ from lab_tracker.capture_client_release import (
 )
 from lab_tracker.capture_setup_catalog import (
     CAPTURE_SETUP_GUIDES,
-    SESSION_ID_PLACEHOLDER,
     CaptureSetupGap,
     CaptureSetupKind,
 )
@@ -41,6 +41,7 @@ from lab_tracker.cli import main as lab_tracker_main
 from lab_tracker.config import Settings
 from lab_tracker.decision_context_constants import AGENT_CONSULTATION_POLICY
 from lab_tracker.mcp_tools import READ_TOOLS, WRITE_TOOLS
+from lab_tracker.services.graph_draft_capture_setup import resolve_capture_setup
 from lab_tracker.setup_guide import setup_guide_markdown
 from lab_tracker_client import cli as lt_cli
 from lab_tracker_client import connection_diagnostics
@@ -1162,31 +1163,67 @@ def test_capture_setup_guide_ui_labels_exist_in_their_components() -> None:
 
 
 _STATIC_DEMO_API = _FRONTEND_SRC / "shared" / "static-demo-api.js"
+_STATIC_DEMO_CAPTURE_SETUP = _FRONTEND_SRC / "shared" / "static-demo-capture-setup.json"
+_DEMO_CAPTURE_SETUP_IMPORT = re.compile(
+    r'^import (?P<name>\w+) from "\./static-demo-capture-setup\.json" with \{ type: "json" \};$',
+    re.MULTILINE,
+)
+_DEMO_CAPTURE_SETUP_VALUE = re.compile(r"\bcapture_setup:\s*(?P<value>[^\s,]+)")
+_CANDIDATE_FIELDS = (
+    "kind",
+    "gap",
+    "detected",
+    "note_ids",
+    "note_count",
+    "session_id",
+    "session_label",
+)
 
 
-def _catalog_copy(gap: CaptureSetupGap) -> list[str]:
-    """The guide copy a recorded tip for ``gap`` snapshots, as the demo spells it."""
+def _server_recorded(packet: dict[str, Any]) -> dict[str, Any] | None:
+    """What the server records when the drafter picks exactly the demo's tips.
 
-    guide = CAPTURE_SETUP_GUIDES[gap]
-    texts = [f'kind: "{guide.kind.value}"', guide.title, *guide.steps, guide.doc]
-    if guide.app_path is not None and SESSION_ID_PLACEHOLDER not in guide.app_path:
-        texts.append(f'app_path: "{guide.app_path}"')
-    return texts
+    Each demo tip is replayed as an offered candidate plus the drafter's pick
+    through :func:`resolve_capture_setup`, so the server, not this test,
+    supplies every guide field, the kind for the gap, and the explanation source.
+    """
 
-
-def test_static_demo_capture_setup_tip_quotes_the_catalog() -> None:
-    # The Pages demo shows a sample tip without a server; its copy must be the
-    # catalog's, so the demo never shows setup advice Lab Tracker would not give.
-    source = _read(_STATIC_DEMO_API).replace('\\"', '"')
-    gaps = [gap for gap in CAPTURE_SETUP_GUIDES if f'gap: "{gap.value}"' in source]
-    assert gaps, "the static demo carries no capture-setup tip, so this check checks nothing"
-    stale = [
-        f"{gap.value}: {text!r}"
-        for gap in gaps
-        for text in _catalog_copy(gap)
-        if text not in source
+    tips = [tip for tip in packet.get("recommendations") or [] if isinstance(tip, dict)]
+    candidates = [
+        {"candidate_id": tip.get("recommendation_id")}
+        | {field: tip.get(field) for field in _CANDIDATE_FIELDS}
+        for tip in tips
     ]
-    assert not stale, f"static demo capture-setup copy differs from the catalog: {stale}"
+    picks = [
+        {
+            "candidate_id": tip.get("recommendation_id"),
+            "note_ids": tip.get("note_ids"),
+            "explanation": tip.get("explanation"),
+        }
+        for tip in tips
+    ]
+    return resolve_capture_setup(candidates, picks)
+
+
+def test_static_demo_capture_setup_is_what_the_server_records() -> None:
+    # The Pages demo shows a sample tip without a server. Its whole packet must
+    # equal the server's own result for the same picks, so the demo never shows
+    # a step, command, link, or guide Lab Tracker would not record.
+    packet = json.loads(_read(_STATIC_DEMO_CAPTURE_SETUP))
+    assert packet.get("recommendations"), (
+        "the static demo carries no capture-setup tip, so this check checks nothing"
+    )
+    assert packet == _server_recorded(packet)
+
+
+def test_static_demo_draft_takes_its_capture_setup_from_the_checked_fixture() -> None:
+    source = _read(_STATIC_DEMO_API)
+    imported = _DEMO_CAPTURE_SETUP_IMPORT.search(source)
+    assert imported is not None, "static-demo-api.js no longer imports the capture-setup fixture"
+    values = [match["value"] for match in _DEMO_CAPTURE_SETUP_VALUE.finditer(source)]
+    assert values == [imported["name"]], (
+        f"the demo's capture_setup must be the checked fixture alone, found: {values}"
+    )
 
 
 _SESSION_SUGGESTIONS_DOC = _DOCS / "session-suggestions.md"
