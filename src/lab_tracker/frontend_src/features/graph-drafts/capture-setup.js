@@ -24,6 +24,19 @@ function text(value) {
   return typeof value === "string" ? value : "";
 }
 
+// Each cited capture once, in the order cited. Ids are compared in lower case,
+// as the server writes them, so a repeated id never gives two buttons the
+// same React key.
+function citedNoteIds(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const ids = value
+    .filter((noteId) => typeof noteId === "string" && UUID_RE.test(noteId))
+    .map((noteId) => noteId.toLowerCase());
+  return [...new Set(ids)];
+}
+
 // The button label for an app path a tip may open, or "" for any other path
 // (another site, a protocol-relative URL, a page no tip names).
 function appPathLabel(path) {
@@ -39,13 +52,13 @@ function appPathLabel(path) {
 function captureSetupTip(item) {
   const guide = item?.guide;
   const title = text(guide?.title);
-  const steps = Array.isArray(guide?.steps) ? guide.steps.filter((step) => text(step)) : [];
+  const steps = Array.isArray(guide?.steps)
+    ? guide.steps.filter((step) => text(step).trim())
+    : [];
   if (!title || steps.length === 0) {
     return null;
   }
-  const noteIds = Array.isArray(item.note_ids)
-    ? item.note_ids.filter((noteId) => typeof noteId === "string" && UUID_RE.test(noteId))
-    : [];
+  const noteIds = citedNoteIds(item.note_ids);
   return {
     id: text(item.recommendation_id) || title,
     title,

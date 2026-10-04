@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { appPathLabel, captureSetupTips, MAX_NOTE_LINKS } from "./capture-setup.js";
+import { appPathLabel, captureSetupTips } from "./capture-setup.js";
 
 const NOTE_A = "11111111-1111-4111-8111-111111111111";
 const NOTE_B = "22222222-2222-4222-8222-222222222222";
@@ -176,8 +176,24 @@ describe("captureSetupTips", () => {
     expect(bare).toMatchObject({ sessionLabel: "", explanation: "", command: "", doc: "" });
   });
 
-  it("links at most five captures per tip", () => {
-    expect(MAX_NOTE_LINKS).toBe(5);
+  // graph-drafts.test.jsx renders a six-capture tip and checks it links only
+  // the first five, so the cap is pinned by behaviour there.
+  it("cites each capture once, whatever the case of its id", () => {
+    const lower = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const [tip] = captureSetupTips(
+      packet([recommendation({ note_ids: [lower.toUpperCase(), lower, NOTE_A, NOTE_A] })])
+    );
+    // Repeated ids would also give the page's capture buttons duplicate React keys.
+    expect(tip.noteIds).toEqual([lower, NOTE_A]);
+  });
+
+  it("drops blank steps, and a tip left with none", () => {
+    const { guide } = recommendation();
+    const withBlanks = recommendation({ guide: { ...guide, steps: ["  ", "Then dictate.", "\n"] } });
+    const allBlank = recommendation({ guide: { ...guide, steps: [" ", "\t"] } });
+
+    expect(captureSetupTips(packet([withBlanks]))[0].steps).toEqual(["Then dictate."]);
+    expect(captureSetupTips(packet([allBlank]))).toEqual([]);
   });
 });
 
