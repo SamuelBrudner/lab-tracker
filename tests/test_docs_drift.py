@@ -33,6 +33,7 @@ from lab_tracker.capture_client_release import (
 )
 from lab_tracker.capture_setup_catalog import (
     CAPTURE_SETUP_GUIDES,
+    SESSION_ID_PLACEHOLDER,
     CaptureSetupGap,
     CaptureSetupKind,
 )
@@ -41,7 +42,10 @@ from lab_tracker.cli import main as lab_tracker_main
 from lab_tracker.config import Settings
 from lab_tracker.decision_context_constants import AGENT_CONSULTATION_POLICY
 from lab_tracker.mcp_tools import READ_TOOLS, WRITE_TOOLS
-from lab_tracker.services.graph_draft_capture_setup import resolve_capture_setup
+from lab_tracker.services.graph_draft_capture_setup import (
+    DETECTION_THRESHOLDS,
+    resolve_capture_setup,
+)
 from lab_tracker.setup_guide import setup_guide_markdown
 from lab_tracker_client import cli as lt_cli
 from lab_tracker_client import connection_diagnostics
@@ -1162,6 +1166,47 @@ def test_capture_setup_guide_ui_labels_exist_in_their_components() -> None:
     assert not missing, f"capture-setup UI labels absent from their components: {missing}"
 
 
+_CAPTURE_SETUP_JS = _FRONTEND_SRC / "features" / "graph-drafts" / "capture-setup.js"
+_JS_APP_PATH_LABELS = re.compile(
+    r"const APP_PATH_LABELS = new Map\(\[(?P<entries>.*?)\]\);", re.DOTALL
+)
+_JS_APP_PATH_ENTRY = re.compile(r'\[\s*"(?P<path>[^"]+)",\s*"[^"]+"\s*\]')
+_JS_SESSION_PATH_RE = re.compile(r"const SESSION_PATH_RE =\s*/(?P<source>[^\n]+)/i;")
+_EXAMPLE_SESSION_ID = "6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b"
+
+
+def _review_page_tip_paths() -> tuple[set[str], re.Pattern[str]]:
+    """The fixed app paths capture-setup.js opens, and its session-page pattern."""
+
+    source = _without_js_comments(_read(_CAPTURE_SETUP_JS))
+    labels = _JS_APP_PATH_LABELS.search(source)
+    session = _JS_SESSION_PATH_RE.search(source)
+    assert labels is not None and session is not None, (
+        "capture-setup.js no longer declares APP_PATH_LABELS and SESSION_PATH_RE"
+    )
+    fixed = {entry["path"] for entry in _JS_APP_PATH_ENTRY.finditer(labels["entries"])}
+    return fixed, re.compile(session["source"], re.IGNORECASE)
+
+
+def test_capture_setup_guide_app_paths_are_the_pages_the_review_page_opens() -> None:
+    # The review page shows an "Open" button only for a path it allowlists, so a
+    # guide path missing from that list would quietly lose its button, and a
+    # listed path no guide uses is dead code.
+    fixed, session_page = _review_page_tip_paths()
+    paths = {guide.app_path for guide in CAPTURE_SETUP_GUIDES.values() if guide.app_path}
+    session_paths = {path for path in paths if SESSION_ID_PLACEHOLDER in path}
+    assert session_paths, "no guide opens a session page, so the session check checks nothing"
+    unopened = [
+        path
+        for path in sorted(session_paths)
+        if not session_page.fullmatch(path.replace(SESSION_ID_PLACEHOLDER, _EXAMPLE_SESSION_ID))
+    ]
+    assert not unopened, f"the review page opens no button for these guide paths: {unopened}"
+    assert paths - session_paths == fixed, (
+        "capture-setup.js APP_PATH_LABELS must list exactly the catalog's fixed app paths"
+    )
+
+
 _STATIC_DEMO_API = _FRONTEND_SRC / "shared" / "static-demo-api.js"
 _STATIC_DEMO_CAPTURE_SETUP = _FRONTEND_SRC / "shared" / "static-demo-capture-setup.json"
 _DEMO_CAPTURE_SETUP_IMPORT = re.compile(
@@ -1249,13 +1294,35 @@ def test_capture_setup_doc_names_every_kind_and_gap() -> None:
 
 
 def test_capture_setup_doc_states_the_catalog_bounds() -> None:
-    # Each bound is written "<value> ... (`NAME`)", e.g. "at most 6 tips (`MAX_RECOMMENDATIONS`)".
+    # Each bound is written "<value> ... (`NAME`)", e.g. "at most 6 tips
+    # (`MAX_RECOMMENDATIONS`)", and every mention must carry the current value,
+    # so a page that states a bound twice cannot keep one stale copy.
     text = " ".join(_read(_SESSION_SUGGESTIONS_DOC).split())
-    stale = [
-        f"{name}={getattr(capture_setup_catalog, name)}"
-        for name in _CAPTURE_SETUP_DOC_CONSTANTS
-        if not re.search(
-            rf"\b{getattr(capture_setup_catalog, name)}\b[^().`]*\(`{name}`\)", text
-        )
-    ]
+    stale: list[str] = []
+    for name in _CAPTURE_SETUP_DOC_CONSTANTS:
+        value = str(getattr(capture_setup_catalog, name))
+        mentions = text.count(f"(`{name}`)")
+        stated = re.findall(rf"(?<!\d)(\d+)[^().`\d]*\(`{name}`\)", text)
+        if mentions == 0 or len(stated) != mentions or set(stated) != {value}:
+            stale.append(f"{name}={value} (doc states {stated} in {mentions} mentions)")
     assert not stale, f"docs/session-suggestions.md states other capture-setup bounds: {stale}"
+
+
+_GAP_TABLE_ROW = re.compile(
+    r"^\| `(?P<kind>[a-z0-9_]+)` \| `(?P<gap>[a-z0-9_]+)` \|.*\| (?P<threshold>\d+)[^|]* \|$",
+    re.MULTILINE,
+)
+
+
+def test_capture_setup_doc_gap_table_matches_the_catalog_and_thresholds() -> None:
+    # One row per gap: its kind, and the "Detected at" count Lab Tracker's own
+    # check uses (DETECTION_THRESHOLDS), so the table cannot drift from either.
+    rows = {
+        row["gap"]: (row["kind"], int(row["threshold"]))
+        for row in _GAP_TABLE_ROW.finditer(_read(_SESSION_SUGGESTIONS_DOC))
+    }
+    expected = {
+        gap.value: (guide.kind.value, DETECTION_THRESHOLDS[gap])
+        for gap, guide in CAPTURE_SETUP_GUIDES.items()
+    }
+    assert rows == expected

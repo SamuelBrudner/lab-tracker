@@ -245,7 +245,8 @@ their agent made, not an onboarding checkpoint or a booking, with no session
 target and no session id or link code in its metadata. "Placed" means a single
 declared session, a session id in the metadata, or the one window of the
 author's own session that contains the capture time. A thin capture carries at
-most 40 characters of its own text (its transcript, else its typed text).
+most 40 characters (`THIN_CAPTURE_MAX_CHARS`) of its own text (its transcript,
+else its typed text).
 
 Every other gap gives at most one candidate per batch; the debrief gap gives
 one per session, after the others, newest end first, for at most 3 sessions
@@ -343,15 +344,15 @@ or recording tips) is logged and the batch goes on without tips.
 ### The cooldown
 
 A kind recommended on one of the reviewer's batch drafts in the project (a
-draft assigned to them, or theirs and unassigned) created within 7 days
-(`COOLDOWN_DAYS`) of the batch window's end is not offered again. It is per
-kind, not per gap: a shortcut tip of either gap holds back both, and one
-session's debrief tip holds back the others. Only recommended kinds count; a
-candidate the drafter passed over is offered again next time. The cooldown
-reads the rows review memory already loads (the project's 50 newest drafts
-that are ready, submitted, changes-requested, rejected, or committed), so in a
-busy project a tip can come back sooner. There is no dismissal: the cooldown
-is what keeps a tip from repeating.
+draft assigned to them, or theirs and unassigned) created in the 7 days
+(`COOLDOWN_DAYS`) before the batch window's end, or since, is not offered
+again. It is per kind, not per gap: a shortcut tip of either gap holds back
+both, and one session's debrief tip holds back the others. Only recommended
+kinds count; a candidate the drafter passed over is offered again next time.
+The cooldown reads the rows review memory already loads (the project's 50
+newest drafts that are ready, submitted, changes-requested, rejected, or
+committed), so in a busy project a tip can come back sooner. There is no
+dismissal: the cooldown is what keeps a tip from repeating.
 
 ### In the app
 
