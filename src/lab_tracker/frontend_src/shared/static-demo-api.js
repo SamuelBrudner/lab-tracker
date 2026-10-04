@@ -1,4 +1,5 @@
 const DEMO_USER = {
+  created_at: "2026-06-05T09:53:58.181415Z",
   user_id: "00000000-0000-4000-8000-0000000000d0",
   username: "demo.viewer",
   role: "viewer",

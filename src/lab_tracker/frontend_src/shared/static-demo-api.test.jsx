@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { apiFetch, apiListRequest, apiRequest, apiTextRequest } from "./api.js";
 import { isStaticDemoEnabled } from "./static-demo-api.js";
+import { getCurrentUser } from "./gateways/auth.js";
 import { apiResponse, installFetchMock } from "../test/utils.js";
 
 describe("static demo detection", () => {
@@ -44,6 +45,9 @@ describe("static demo API", () => {
     expect(auth.meta.demo).toBe(true);
     expect(auth.data.username).toBe("demo.viewer");
     expect(auth.data.role).toBe("viewer");
+    const session = await getCurrentUser();
+    expect(session.authEnabled).toBe(true);
+    expect(session.user.created_at).toBe("2026-06-05T09:53:58.181415Z");
   });
 
   it("lists seeded project records with FastAPI-style pagination metadata", async () => {
