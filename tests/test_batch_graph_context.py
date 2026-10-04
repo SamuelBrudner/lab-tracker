@@ -1596,11 +1596,11 @@ def _staged_capture(
 
 
 def _sessionless_phone_day(
-    client: TestClient, headers: dict[str, str], name: str
+    client: TestClient, headers: dict[str, str], name: str, *, day_end: datetime | None = None
 ) -> tuple[str, list[str], BatchReviewer]:
     project_id = _create_project(client, headers, name)
     admin_id = UUID(_admin_user_id(client, headers))
-    start = datetime.now(timezone.utc) - timedelta(hours=3)
+    start = (day_end or datetime.now(timezone.utc)) - timedelta(hours=3)
     note_ids = [
         _staged_capture(
             client,
@@ -1755,6 +1755,34 @@ def test_a_kind_recommended_to_the_owner_this_week_is_not_offered_again(
     assert CANDIDATES_PACKET_KEY not in suppressed
     # Review memory reads the same change sets it always did.
     assert suppressed["review_memory"]["reviewer_scoped"] is True
+
+
+def test_capture_setup_cooldown_counts_back_from_the_batch_window_end(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    # A batch for an old window (a retry, say) is judged at that window's end,
+    # not by today's clock, so it is offered what it was offered then.
+    window_end = datetime.now(timezone.utc) - timedelta(days=30)
+    project_id, note_ids, owner = _sessionless_phone_day(
+        client, admin_auth_headers, "Capture setup window end", day_end=window_end
+    )
+    assert owner.reviewer_user_id is not None
+    _record_tip_history(
+        client,
+        project_id=project_id,
+        source_note_id=note_ids[0],
+        assignee_user_id=owner.reviewer_user_id,
+        age=timedelta(days=30 + 2),
+    )
+    window = (window_end - timedelta(days=1), window_end)
+
+    # Two days before the window's end: cooling down for that window ...
+    in_window = _batch_packet(client, note_ids, context_owner=owner, window=window)
+    assert CANDIDATES_PACKET_KEY not in in_window
+    # ... though a month old by today's clock.
+    today = _batch_packet(client, note_ids, context_owner=owner)
+    assert [item["kind"] for item in today[CANDIDATES_PACKET_KEY]] == ["session_capture_link"]
 
 
 def test_capture_setup_detection_failures_are_logged_and_never_fail_the_batch(
