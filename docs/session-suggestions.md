@@ -266,8 +266,11 @@ their own trusted `<trusted_capture_setup_candidates>` block, outside the
 untrusted batch context. Before rendering, the prompt re-checks every
 candidate against a whitelist: only the known keys, a kind and gap from the
 catalog that belong together, well-formed ids, and a session label that
-matches that session's link code; anything else is dropped. The prompt
-describes what each kind covers, but no step, command, link, or menu.
+matches that session's link code; anything else is dropped. The untrusted
+batch context escapes `<` and `>` as JSON `\u003c` and `\u003e`, so capture
+text can neither close that context nor imitate the trusted block, and the
+model still reads it exactly. The prompt describes what each kind covers, but
+no step, command, link, or menu.
 
 The batch response schema gains a required `capture_setup_recommendations`
 list of `{candidate_id, note_ids, explanation}`. The drafter includes a
