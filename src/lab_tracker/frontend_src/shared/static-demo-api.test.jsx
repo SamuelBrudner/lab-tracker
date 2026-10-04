@@ -101,6 +101,30 @@ describe("static demo API", () => {
     ]);
   });
 
+  it("opens every capture the seeded draft and its capture-setup tip cite", async () => {
+    const { data: batches } = await apiListRequest("/batches?limit=5");
+    const draft = await apiRequest(`/graph-drafts/${batches[0].change_set_id}`);
+    const cited = new Set([
+      ...draft.source_note_ids,
+      ...captureSetupTips(draft).flatMap((tip) => tip.noteIds),
+    ]);
+
+    for (const noteId of cited) {
+      const note = await apiRequest(`/notes/${noteId}`);
+      expect(note.note_id).toBe(noteId);
+      expect(note.status).toBe("staged");
+    }
+    // The tip says this memo reached no session, so the record must agree.
+    const [memoId] = captureSetupTips(draft)[0].noteIds;
+    const memo = await apiRequest(`/notes/${memoId}`);
+    expect(memo.targets).toEqual([]);
+    expect(memo.metadata).toMatchObject({
+      capture_channel: "shortcut",
+      capture_session_resolution: "none_active",
+    });
+    expect(memo.raw_content).toContain("0.6x gain");
+  });
+
   it("serves read-only member orientation and an empty owner queue", async () => {
     const projectId = "2a32290d-5977-4e1a-9639-23210d3d4f1e";
     const orientation = await apiRequest(`/projects/${projectId}/member-onboarding`);
