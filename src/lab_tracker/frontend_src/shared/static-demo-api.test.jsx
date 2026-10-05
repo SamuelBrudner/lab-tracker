@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { apiFetch, apiListRequest, apiRequest, apiTextRequest } from "./api.js";
 import { isStaticDemoEnabled } from "./static-demo-api.js";
 import { getCurrentUser } from "./gateways/auth.js";
+import { captureSetupTips } from "../features/graph-drafts/capture-setup.js";
 import { apiResponse, installFetchMock } from "../test/utils.js";
 
 describe("static demo detection", () => {
@@ -93,6 +94,39 @@ describe("static demo API", () => {
     expect(draft.summary).toContain("one result and one interpretation");
     expect(draft.operations).toHaveLength(2);
     expect(draft.operations[0].source_refs[0].quote).toContain("0.6x gain");
+    // One capture-setup tip, so the review's "Help future captures" block shows.
+    expect(captureSetupTips(draft)).toEqual([
+      expect.objectContaining({
+        appPath: "/app",
+        explanationSource: "model",
+        noteIds: [draft.source_note_ids[0]],
+        title: "Have a session open when you dictate",
+      }),
+    ]);
+  });
+
+  it("opens every capture the seeded draft and its capture-setup tip cite", async () => {
+    const { data: batches } = await apiListRequest("/batches?limit=5");
+    const draft = await apiRequest(`/graph-drafts/${batches[0].change_set_id}`);
+    const cited = new Set([
+      ...draft.source_note_ids,
+      ...captureSetupTips(draft).flatMap((tip) => tip.noteIds),
+    ]);
+
+    for (const noteId of cited) {
+      const note = await apiRequest(`/notes/${noteId}`);
+      expect(note.note_id).toBe(noteId);
+      expect(note.status).toBe("staged");
+    }
+    // The tip says this memo reached no session, so the record must agree.
+    const [memoId] = captureSetupTips(draft)[0].noteIds;
+    const memo = await apiRequest(`/notes/${memoId}`);
+    expect(memo.targets).toEqual([]);
+    expect(memo.metadata).toMatchObject({
+      capture_channel: "shortcut",
+      capture_session_resolution: "none_active",
+    });
+    expect(memo.raw_content).toContain("0.6x gain");
   });
 
   it("serves read-only member orientation and an empty owner queue", async () => {

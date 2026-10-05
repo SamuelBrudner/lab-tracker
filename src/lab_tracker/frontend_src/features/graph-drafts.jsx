@@ -5,6 +5,7 @@ import { useReviewDictation } from "../hooks/useReviewDictation.js";
 import { useSourceArtifactPreviews } from "../hooks/useSourceArtifactPreviews.js";
 import { apiListRequest, buildApiPath } from "../shared/api.js";
 import { AudioReviewConsole } from "./graph-drafts/AudioReviewConsole.jsx";
+import { CaptureSetupTips } from "./graph-drafts/CaptureSetupTips.jsx";
 import { DraftQualityLine } from "./graph-drafts/DraftQualityLine.jsx";
 import { NarrativeReview } from "./graph-drafts/NarrativeReview.jsx";
 import { OperationRow } from "./graph-drafts/OperationRow.jsx";
@@ -494,6 +495,7 @@ function GraphDraftDetailCard({
               </ul>
             </div>
           ) : null}
+          <CaptureSetupTips changeSet={changeSet} navigate={navigate} />
 
           <div className="review-actions">
             <div className="review-tally">

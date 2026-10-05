@@ -12,7 +12,9 @@ import ast
 import inspect
 import json
 import re
+import shlex
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -23,17 +25,27 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - exercised by Python 3.10 CI
     import tomli as tomllib
 
-from lab_tracker import graph_drafting, mcp_server
+from lab_tracker import capture_setup_catalog, graph_drafting, mcp_server
 from lab_tracker.capture_client_release import (
     EVIDENCE_ADAPTER_KEY,
     CaptureEnvironment,
     capture_environment,
+)
+from lab_tracker.capture_setup_catalog import (
+    CAPTURE_SETUP_GUIDES,
+    SESSION_ID_PLACEHOLDER,
+    CaptureSetupGap,
+    CaptureSetupKind,
 )
 from lab_tracker.cli import _skills_homes, init_consumer_repo, update_consumer_repo
 from lab_tracker.cli import main as lab_tracker_main
 from lab_tracker.config import Settings
 from lab_tracker.decision_context_constants import AGENT_CONSULTATION_POLICY
 from lab_tracker.mcp_tools import READ_TOOLS, WRITE_TOOLS
+from lab_tracker.services.graph_draft_capture_setup import (
+    DETECTION_THRESHOLDS,
+    resolve_capture_setup,
+)
 from lab_tracker.setup_guide import setup_guide_markdown
 from lab_tracker_client import cli as lt_cli
 from lab_tracker_client import connection_diagnostics
@@ -990,3 +1002,327 @@ def test_lt_run_counts_as_the_tool_environment_although_it_writes_run_metadata()
         "since an `lt-` adapter such as `lt run` always counts as the tool environment"
         in setup_doc
     )
+
+
+def test_no_doc_still_states_the_retired_major_minor_only_update_rule() -> None:
+    # A PATCH release now notifies (docs/versioning.md). The dedicated-instance
+    # README kept the old rule for a while because it lives outside docs/, so
+    # scan every directory that carries maintained prose.
+    root = _DOCS.parent
+    paths = [
+        *_DOCS.glob("*.md"),
+        *(root / "deployments").rglob("*.md"),
+        *(root / "skills").rglob("*.md"),
+    ]
+    retired = (
+        "only when a client's `MAJOR.MINOR`",
+        "a PATCH release is reported",
+        "PATCH-only gap",
+    )
+    stale = [
+        f"{path.relative_to(root)}: {phrase}"
+        for path in paths
+        for phrase in retired
+        if phrase in " ".join(path.read_text(encoding="utf-8").split())
+    ]
+    assert not stale, f"docs still state the retired MAJOR.MINOR-only rule: {stale}"
+
+
+# Capture-setup tips (src/lab_tracker/capture_setup_catalog.py) quote doc
+# anchors, `lt` commands, and UI labels to a person; each must stay real.
+_FRONTEND_SRC = _REPO_ROOT / "src" / "lab_tracker" / "frontend_src"
+_BACKTICKED_LT_COMMAND = re.compile(r"`(lt [^`]+)`")
+_LT_COMMAND_PLACEHOLDERS = (
+    ("LT-<code>", "LT-" + "A" * 26),
+    ("<folder>", "acq"),
+    ("<uuid>", "00000000-0000-4000-8000-000000000000"),
+)
+
+
+def _capture_setup_lt_commands() -> list[tuple[str, str]]:
+    """``(gap, command)`` for every backticked `lt` command and every guide command."""
+
+    commands: list[tuple[str, str]] = []
+    for gap, guide in CAPTURE_SETUP_GUIDES.items():
+        for text in (guide.title, *guide.steps):
+            commands.extend((gap.value, found) for found in _BACKTICKED_LT_COMMAND.findall(text))
+        if guide.command is not None:
+            commands.append((gap.value, guide.command))
+    return commands
+
+
+# A double-quoted or template string (kept, so "https://" or "image/*" is not
+# read as a comment), else a block comment, else a line comment (dropped).
+# Single quotes are not strings here: JSX text uses them as apostrophes.
+_JS_STRING_OR_COMMENT = re.compile(
+    r'(?P<string>"(?:\\.|[^"\\\n])*"|`(?:\\.|[^`\\])*`)|/\*.*?\*/|(?<![:\w])//[^\n]*',
+    re.DOTALL,
+)
+# Where a component renders a label: the whole text of a JSX element, a
+# branch of a conditional inside a JSX expression ({done ? "Done" : "Skip"}),
+# or the label of an app nav link (["home", "/app", "Home"] in shared/ui.jsx).
+_RENDERED_LABEL_FORMS = (
+    r">\s*{label}\s*<",
+    r'\?\s*(?:"[^"\n]*"|\w+)\s*:\s*"{label}"\s*\}}',
+    r'\?\s*"{label}"\s*:',
+    r'\[\s*"\w+",\s*"/app[^"\n]*",\s*"{label}"\s*\]',
+)
+
+
+def _without_js_comments(source: str) -> str:
+    return _JS_STRING_OR_COMMENT.sub(lambda match: match["string"] or "", source)
+
+
+def _component_shows(label: str, source: str) -> bool:
+    """True when ``source`` renders ``label`` itself, not just names it.
+
+    Comments are dropped first, and a string literal counts only in a
+    rendered position (:data:`_RENDERED_LABEL_FORMS`), so a doc comment or an
+    unrelated constant that quotes the label cannot keep a renamed label green.
+    """
+
+    code = _without_js_comments(source)
+    escaped = re.escape(label)
+    return any(
+        re.search(form.format(label=escaped), code) is not None for form in _RENDERED_LABEL_FORMS
+    )
+
+
+def test_capture_setup_guides_link_existing_doc_headings() -> None:
+    broken: list[str] = []
+    for gap, guide in CAPTURE_SETUP_GUIDES.items():
+        path, _, anchor = guide.doc.partition("#")
+        doc = _REPO_ROOT / path
+        headings = re.findall(r"(?m)^#{1,6} (.+)$", _read(doc)) if doc.is_file() else []
+        if anchor not in {_github_anchor(heading) for heading in headings}:
+            broken.append(f"{gap.value}: {guide.doc}")
+    assert not broken, f"capture-setup guides link missing doc headings: {broken}"
+
+
+def test_capture_setup_guide_lt_commands_parse() -> None:
+    commands = _capture_setup_lt_commands()
+    assert commands, "the catalog names no `lt` command, so this check checks nothing"
+    parser = lt_cli._build_parser()
+    rejected: list[str] = []
+    for gap, command in commands:
+        concrete = command
+        for placeholder, value in _LT_COMMAND_PLACEHOLDERS:
+            concrete = concrete.replace(placeholder, value)
+        argv = shlex.split(concrete)
+        if "<" in concrete or argv[:1] != ["lt"]:
+            rejected.append(f"{gap}: {command} (unfilled placeholder or not `lt`)")
+            continue
+        try:
+            parser.parse_args(argv[1:])
+        except SystemExit:
+            rejected.append(f"{gap}: {command}")
+    assert not rejected, f"capture-setup `lt` commands the parser rejects: {rejected}"
+
+
+@pytest.mark.parametrize(
+    ("label", "source"),
+    [
+        ("Capture into this session", '<h3 id="title">Capture into this session</h3>'),
+        ("Write NFC tag", "<button>\n  Write NFC tag\n</button>"),
+        ("Open bench kiosk", '<a href="https://kiosk.example/s">Open bench kiosk</a>'),
+        ("Skip", '<button>{finished ? "Done" : "Skip"}</button>'),
+        ("Skip", '<button>{recording ? "Skip" : "Done"}</button>'),
+        ("Home", 'const LINKS = [\n  ["home", "/app", "Home"],\n];'),
+    ],
+)
+def test_capture_setup_label_check_accepts_rendered_text(label: str, source: str) -> None:
+    assert _component_shows(label, source)
+
+
+@pytest.mark.parametrize(
+    ("label", "source"),
+    [
+        ("Capture into this session", '// "Capture into this session": a QR\n<h3>QR</h3>'),
+        ("Write NFC tag", '/**\n * "Write NFC tag": an NFC sticker\n */\n<button>Tag</button>'),
+        ("Write NFC tag", "<div>{/* <b>Write NFC tag</b> */}</div>"),
+        ("Hands-free shortcut", 'const DEFAULT_LABEL = "Hands-free shortcut";'),
+        ("Hands-free shortcut", 'save({ title: "Hands-free shortcut" });'),
+        ("Debrief", "<p>Use Debrief after a session.</p>"),
+    ],
+)
+def test_capture_setup_label_check_ignores_comments_and_unrendered_strings(
+    label: str, source: str
+) -> None:
+    assert not _component_shows(label, source)
+
+
+def test_capture_setup_guide_ui_labels_exist_in_their_components() -> None:
+    pinned = [
+        (gap.value, label, _FRONTEND_SRC / component)
+        for gap, guide in CAPTURE_SETUP_GUIDES.items()
+        for label, component in guide.ui_labels
+    ]
+    assert pinned, "the catalog pins no UI label, so this check checks nothing"
+    missing = [
+        f"{gap}: {label!r} in {path.relative_to(_FRONTEND_SRC)}"
+        for gap, label, path in pinned
+        if not path.is_file() or not _component_shows(label, _read(path))
+    ]
+    assert not missing, f"capture-setup UI labels absent from their components: {missing}"
+
+
+_CAPTURE_SETUP_JS = _FRONTEND_SRC / "features" / "graph-drafts" / "capture-setup.js"
+_JS_APP_PATH_LABELS = re.compile(
+    r"const APP_PATH_LABELS = new Map\(\[(?P<entries>.*?)\]\);", re.DOTALL
+)
+_JS_APP_PATH_ENTRY = re.compile(r'\[\s*"(?P<path>[^"]+)",\s*"[^"]+"\s*\]')
+_JS_SESSION_PATH_RE = re.compile(r"const SESSION_PATH_RE =\s*/(?P<source>[^\n]+)/i;")
+_EXAMPLE_SESSION_ID = "6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b"
+
+
+def _review_page_tip_paths() -> tuple[set[str], re.Pattern[str]]:
+    """The fixed app paths capture-setup.js opens, and its session-page pattern."""
+
+    source = _without_js_comments(_read(_CAPTURE_SETUP_JS))
+    labels = _JS_APP_PATH_LABELS.search(source)
+    session = _JS_SESSION_PATH_RE.search(source)
+    assert labels is not None and session is not None, (
+        "capture-setup.js no longer declares APP_PATH_LABELS and SESSION_PATH_RE"
+    )
+    fixed = {entry["path"] for entry in _JS_APP_PATH_ENTRY.finditer(labels["entries"])}
+    return fixed, re.compile(session["source"], re.IGNORECASE)
+
+
+def test_capture_setup_guide_app_paths_are_the_pages_the_review_page_opens() -> None:
+    # The review page shows an "Open" button only for a path it allowlists, so a
+    # guide path missing from that list would quietly lose its button, and a
+    # listed path no guide uses is dead code.
+    fixed, session_page = _review_page_tip_paths()
+    paths = {guide.app_path for guide in CAPTURE_SETUP_GUIDES.values() if guide.app_path}
+    session_paths = {path for path in paths if SESSION_ID_PLACEHOLDER in path}
+    assert session_paths, "no guide opens a session page, so the session check checks nothing"
+    unopened = [
+        path
+        for path in sorted(session_paths)
+        if not session_page.fullmatch(path.replace(SESSION_ID_PLACEHOLDER, _EXAMPLE_SESSION_ID))
+    ]
+    assert not unopened, f"the review page opens no button for these guide paths: {unopened}"
+    assert paths - session_paths == fixed, (
+        "capture-setup.js APP_PATH_LABELS must list exactly the catalog's fixed app paths"
+    )
+
+
+_STATIC_DEMO_API = _FRONTEND_SRC / "shared" / "static-demo-api.js"
+_STATIC_DEMO_CAPTURE_SETUP = _FRONTEND_SRC / "shared" / "static-demo-capture-setup.json"
+_DEMO_CAPTURE_SETUP_IMPORT = re.compile(
+    r'^import (?P<name>\w+) from "\./static-demo-capture-setup\.json" with \{ type: "json" \};$',
+    re.MULTILINE,
+)
+_DEMO_CAPTURE_SETUP_VALUE = re.compile(r"\bcapture_setup:\s*(?P<value>[^\s,]+)")
+_CANDIDATE_FIELDS = (
+    "kind",
+    "gap",
+    "detected",
+    "note_ids",
+    "note_count",
+    "session_id",
+    "session_label",
+)
+
+
+def _server_recorded(packet: dict[str, Any]) -> dict[str, Any] | None:
+    """What the server records when the drafter picks exactly the demo's tips.
+
+    Each demo tip is replayed as an offered candidate plus the drafter's pick
+    through :func:`resolve_capture_setup`, so the server, not this test,
+    supplies every guide field, the kind for the gap, and the explanation source.
+    """
+
+    tips = [tip for tip in packet.get("recommendations") or [] if isinstance(tip, dict)]
+    candidates = [
+        {"candidate_id": tip.get("recommendation_id")}
+        | {field: tip.get(field) for field in _CANDIDATE_FIELDS}
+        for tip in tips
+    ]
+    picks = [
+        {
+            "candidate_id": tip.get("recommendation_id"),
+            "note_ids": tip.get("note_ids"),
+            "explanation": tip.get("explanation"),
+        }
+        for tip in tips
+    ]
+    return resolve_capture_setup(candidates, picks)
+
+
+def test_static_demo_capture_setup_is_what_the_server_records() -> None:
+    # The Pages demo shows a sample tip without a server. Its whole packet must
+    # equal the server's own result for the same picks, so the demo never shows
+    # a step, command, link, or guide Lab Tracker would not record.
+    packet = json.loads(_read(_STATIC_DEMO_CAPTURE_SETUP))
+    assert packet.get("recommendations"), (
+        "the static demo carries no capture-setup tip, so this check checks nothing"
+    )
+    assert packet == _server_recorded(packet)
+
+
+def test_static_demo_draft_takes_its_capture_setup_from_the_checked_fixture() -> None:
+    source = _read(_STATIC_DEMO_API)
+    imported = _DEMO_CAPTURE_SETUP_IMPORT.search(source)
+    assert imported is not None, "static-demo-api.js no longer imports the capture-setup fixture"
+    values = [match["value"] for match in _DEMO_CAPTURE_SETUP_VALUE.finditer(source)]
+    assert values == [imported["name"]], (
+        f"the demo's capture_setup must be the checked fixture alone, found: {values}"
+    )
+
+
+_SESSION_SUGGESTIONS_DOC = _DOCS / "session-suggestions.md"
+_CAPTURE_SETUP_DOC_CONSTANTS = (
+    "MAX_CANDIDATES",
+    "MAX_DEBRIEF_SESSIONS",
+    "MAX_NOTE_IDS",
+    "MAX_RECOMMENDATIONS",
+    "EXPLANATION_MAX_CHARS",
+    "THIN_CAPTURE_MAX_CHARS",
+    "COOLDOWN_DAYS",
+)
+
+
+def test_capture_setup_doc_names_every_kind_and_gap() -> None:
+    text = _read(_SESSION_SUGGESTIONS_DOC)
+    missing = [
+        member.value
+        for member in (*CaptureSetupKind, *CaptureSetupGap)
+        if f"`{member.value}`" not in text
+    ]
+    assert not missing, f"docs/session-suggestions.md omits capture-setup kinds or gaps: {missing}"
+
+
+def test_capture_setup_doc_states_the_catalog_bounds() -> None:
+    # Each bound is written "<value> ... (`NAME`)", e.g. "at most 6 tips
+    # (`MAX_RECOMMENDATIONS`)", and every mention must carry the current value,
+    # so a page that states a bound twice cannot keep one stale copy.
+    text = " ".join(_read(_SESSION_SUGGESTIONS_DOC).split())
+    stale: list[str] = []
+    for name in _CAPTURE_SETUP_DOC_CONSTANTS:
+        value = str(getattr(capture_setup_catalog, name))
+        mentions = text.count(f"(`{name}`)")
+        stated = re.findall(rf"(?<!\d)(\d+)[^().`\d]*\(`{name}`\)", text)
+        if mentions == 0 or len(stated) != mentions or set(stated) != {value}:
+            stale.append(f"{name}={value} (doc states {stated} in {mentions} mentions)")
+    assert not stale, f"docs/session-suggestions.md states other capture-setup bounds: {stale}"
+
+
+_GAP_TABLE_ROW = re.compile(
+    r"^\| `(?P<kind>[a-z0-9_]+)` \| `(?P<gap>[a-z0-9_]+)` \|.*\| (?P<threshold>\d+)[^|]* \|$",
+    re.MULTILINE,
+)
+
+
+def test_capture_setup_doc_gap_table_matches_the_catalog_and_thresholds() -> None:
+    # One row per gap: its kind, and the "Detected at" count Lab Tracker's own
+    # check uses (DETECTION_THRESHOLDS), so the table cannot drift from either.
+    rows = {
+        row["gap"]: (row["kind"], int(row["threshold"]))
+        for row in _GAP_TABLE_ROW.finditer(_read(_SESSION_SUGGESTIONS_DOC))
+    }
+    expected = {
+        gap.value: (guide.kind.value, DETECTION_THRESHOLDS[gap])
+        for gap, guide in CAPTURE_SETUP_GUIDES.items()
+    }
+    assert rows == expected

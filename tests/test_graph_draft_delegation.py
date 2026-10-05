@@ -23,7 +23,12 @@ from alembic.script import ScriptDirectory
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, inspect, text
 from test_draft_quality import T0, _row
-from test_graph_draft_batches import FakeBatchDraftClient, _note, _registered_user
+from test_graph_draft_batches import (
+    FakeBatchDraftClient,
+    _note,
+    _phone_capture,
+    _registered_user,
+)
 from test_graph_drafts import FakeDraftClient, _image_note, _project
 
 from lab_tracker.api import LabTrackerAPI
@@ -39,6 +44,7 @@ from lab_tracker.auth import (
     service_principal_can_access,
     utc_now,
 )
+from lab_tracker.capture_setup_catalog import RESPONSE_FIELD, RESULT_PACKET_KEY
 from lab_tracker.draft_quality import aggregate_draft_quality
 from lab_tracker.errors import PermissionDeniedError, ServiceScopeDeniedError, ValidationError
 from lab_tracker.models import (
@@ -1322,6 +1328,44 @@ def test_drafting_pass_leaves_clarification_requests_for_a_person(
     operations = _by_semantic(draft)
     assert operations["link_note_to_question"]["acceptance_mode"] == "auto_accepted"
     assert operations["request_clarification"]["status"] == "proposed"
+
+
+def test_drafting_pass_commits_a_batch_whose_only_extra_is_a_capture_setup_tip(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    question_id = _question(client, admin_auth_headers, project_id)
+    note_ids = [
+        _phone_capture(client, admin_auth_headers, project_id, f"Rig 2 Fly {index}")
+        for index in range(3)
+    ]
+    _grant(client, admin_auth_headers, project_id, "full")
+    tip = {
+        "candidate_id": "sessionless_app_captures",
+        "note_ids": note_ids,
+        "explanation": "These phone notes named no session.",
+    }
+
+    run = _run_now(
+        client,
+        admin_auth_headers,
+        project_id,
+        {**_patch(_link_op(note_ids[0], question_id)), RESPONSE_FIELD: [tip]},
+    )
+
+    # A tip is not a proposal: it neither blocks nor triggers the delegated commit.
+    assert run["status"] == "ready"
+    draft = _read_draft(client, admin_auth_headers, run["change_set_id"])
+    assert draft["status"] == "committed"
+    assert [operation["acceptance_mode"] for operation in draft["operations"]] == [
+        "auto_accepted"
+    ]
+    assert draft["context_packet"][DELEGATED_CURATION_PACKET_KEY]["committed"] is True
+    recorded = draft["context_packet"][RESULT_PACKET_KEY]
+    assert [item["recommendation_id"] for item in recorded["recommendations"]] == [
+        "sessionless_app_captures"
+    ]
+    assert recorded["recommendations"][0]["explanation"] == tip["explanation"]
 
 
 def test_drafting_pass_does_nothing_when_delegation_is_off(

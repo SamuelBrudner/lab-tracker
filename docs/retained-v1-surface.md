@@ -233,7 +233,16 @@ research record:
     model-free day-log `create_note` proposal per session with three or more
     short bench captures; it is recorded in `context_packet.day_logs` and
     committed with `origin_model=deterministic_day_log`, and each capture's own
-    proposals stay available. See [session-suggestions.md](session-suggestions.md).
+    proposals stay available. Batch drafts, and no others, may also carry
+    capture-setup tips: the server detects capture-setup gaps in the
+    reviewer's own staged captures and offers them to the drafter as trusted
+    candidates, the drafter picks the ones whose captures it could not
+    interpret and explains each, and the picks, with the server's own setup
+    steps, are recorded in `context_packet.capture_setup` and shown read-only
+    on the review page. Tips are advice, not proposals: never accepted,
+    committed, or delegated, never counted as clarifications, and with no
+    fallback when the drafter picks none. See
+    [session-suggestions.md](session-suggestions.md).
 - Package-pinned code-facing idiom teaching rendered from one generator into
   consent-gated managed agent surfaces, with the advisory
   `lab-tracker://code-conventions` MCP resource treating the package text as
@@ -290,7 +299,11 @@ research record:
   recent rejections) and the re-draft of a rejected note draft is seeded with
   the rejected operations and their review notes; no validator rewrites,
   merges, or suppresses proposals — duplicates are surfaced to the model and
-  left to the reviewer.
+  left to the reviewer. Capture-setup tips are not proposals, so that rule
+  does not cover them: the server keeps only picks that name an offered
+  candidate and cite its notes, replaces an unsafe explanation with its own
+  sentence, keeps at most six, and does not offer a kind recommended to the
+  same reviewer in the same project within the last 7 days.
 - Ongoing-project member onboarding as a prospective-first retained workflow:
   one immutable project-visible checkpoint per project/member, one to three
   individually resolved live-question alignments, a deterministic labelled

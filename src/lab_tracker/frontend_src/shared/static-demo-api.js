@@ -1,3 +1,5 @@
+import DEMO_CAPTURE_SETUP from "./static-demo-capture-setup.json" with { type: "json" };
+
 const DEMO_USER = {
   created_at: "2026-06-05T09:53:58.181415Z",
   user_id: "00000000-0000-4000-8000-0000000000d0",
@@ -268,6 +270,44 @@ const NOTES = [
     created_by_user_id: null,
     updated_at: "2026-06-05T10:10:03.259965Z",
   },
+  // The seeded batch draft's two staged sources. The demo ships no audio or
+  // image files, so each carries its words as text. The voice memo came from
+  // the hands-free shortcut while no session was open, which is what the
+  // draft's capture-setup tip cites.
+  {
+    note_id: GRAPH_DRAFT_NOTE_IDS[0],
+    project_id: PROJECT_ID,
+    raw_content:
+      "Voice memo: background-odor lane showed ~0.6x gain (n=18). Rig 2 or rig 4, check.",
+    raw_asset: null,
+    transcribed_text: null,
+    targets: [],
+    metadata: {
+      capture_source: "mobile_capture",
+      capture_kind: "voice",
+      capture_channel: "shortcut",
+      capture_session_resolution: "none_active",
+    },
+    status: "staged",
+    created_at: "2026-06-05T16:42:10Z",
+    created_by: CREATED_BY,
+    created_by_user_id: null,
+    updated_at: "2026-06-05T16:42:10Z",
+  },
+  {
+    note_id: GRAPH_DRAFT_NOTE_IDS[1],
+    project_id: PROJECT_ID,
+    raw_content: "Whiteboard photo: divisive-normalization sketch for PN gain.",
+    raw_asset: null,
+    transcribed_text: null,
+    targets: [],
+    metadata: { capture_source: "mobile_capture", capture_kind: "text" },
+    status: "staged",
+    created_at: "2026-06-05T17:05:44Z",
+    created_by: CREATED_BY,
+    created_by_user_id: null,
+    updated_at: "2026-06-05T17:05:44Z",
+  },
 ];
 
 const GRAPH_DRAFT = {
@@ -275,7 +315,11 @@ const GRAPH_DRAFT = {
   clarification_requests: [
     "Confirm which recording rig produced the gain measurement before linking a dataset.",
   ],
-  context_packet: {},
+  context_packet: {
+    // What the server records after the drafter picks a capture-setup tip.
+    // tests/test_docs_drift.py checks the fixture equals the server's result.
+    capture_setup: DEMO_CAPTURE_SETUP,
+  },
   created_at: "2026-06-05T21:00:00Z",
   draft_mode: "graph_batch",
   model: "gpt-5.4-mini",

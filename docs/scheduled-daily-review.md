@@ -287,5 +287,8 @@ session with a heavy bench day (three or more short text, voice, or photo
 captures in the batch) gets one extra **day log** proposal: a timestamped
 `HH:MM — …` note targeting the session, labelled as a deterministic grouping,
 so you can accept one log instead of each capture. The per-capture proposals
-stay. See [session-suggestions.md](session-suggestions.md) for both, and for
-the session suggestions card on the Review page.
+stay. A run can also end with read-only **capture-setup tips**: setup that
+would have recorded what some of your captures were missing, chosen by the
+drafter from gaps Lab Tracker found in your own captures. See
+[session-suggestions.md](session-suggestions.md) for all three, and for the
+session suggestions card on the Review page.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from uuid import UUID
 
 from lab_tracker.auth import AuthContext
+from lab_tracker.capture_setup_catalog import CANDIDATES_PACKET_KEY
 from lab_tracker.claim_effective_status import (
     OPEN_PREDICTION_STATUSES,
     ClaimInterpretation,
@@ -56,6 +58,10 @@ from lab_tracker.services.graph_draft_batch_policy import (
     context_owner_for,
     note_matches_reviewer,
 )
+from lab_tracker.services.graph_draft_capture_setup import (
+    detect_capture_setup_candidates,
+    recently_recommended_kinds,
+)
 from lab_tracker.services.note_observed_at import note_observed_at
 from lab_tracker.services.note_service import NoteService
 from lab_tracker.services.project_service import ProjectService
@@ -66,6 +72,8 @@ from lab_tracker.services.visualization_service import VisualizationService
 
 if TYPE_CHECKING:
     from lab_tracker.schemas import GraphSearchHit
+
+logger = logging.getLogger(__name__)
 
 EntityResult = (
     Project
@@ -358,6 +366,11 @@ class GraphContextBuilder:
             int(item.get("raw_asset_text_omitted_bytes") or 0)
             for item in bounded_source_artifacts
         )
+        reviewer_user_id = context_owner.reviewer_user_id if context_owner is not None else None
+        # Loaded once: review memory and the capture-setup cooldown read the same rows.
+        review_change_sets = self._review_memory_change_sets(
+            set(notes_by_project), reviewer_user_id
+        )
         packet: dict[str, Any] = {
             "mode": "graph_batch",
             "batch_window": _batch_window(window, batch_notes),
@@ -386,11 +399,59 @@ class GraphContextBuilder:
                 project_ids=set(notes_by_project),
                 context_owner=context_owner,
                 now=utc_now(),
+                change_sets=review_change_sets,
             ),
             "truncated_note_count": truncated_note_count,
         }
+        candidates = self._capture_setup_candidates(
+            batch_notes,
+            reviewer_user_id=reviewer_user_id,
+            change_sets=review_change_sets,
+            now=window[1] if window is not None else utc_now(),
+        )
+        if candidates:
+            packet[CANDIDATES_PACKET_KEY] = candidates
         packet["context_summary"] = _graph_batch_context_summary(packet)
         return packet
+
+    def _capture_setup_candidates(
+        self,
+        batch_notes: list[Note],
+        *,
+        reviewer_user_id: UUID | None,
+        change_sets: list[GraphChangeSet],
+        now: datetime,
+    ) -> list[dict[str, Any]]:
+        """Capture-setup candidates for a user-backed owner's own batch captures.
+
+        Kinds recently recommended on this reviewer's batch drafts are left out.
+        Best effort: a failure is logged and the packet carries no candidates,
+        so detection can never fail a batch. ``now`` is the batch window's end
+        when there is one, so a retried batch is offered the same candidates.
+        """
+
+        if reviewer_user_id is None:
+            return []
+        try:
+            project_ids = sorted({note.project_id for note in batch_notes}, key=str)
+            sessions = [
+                session
+                for project_id in project_ids
+                for session in self.sessions.repository.query_sessions(
+                    project_id=project_id, limit=None, offset=0
+                )[0]
+            ]
+            history = [item for item in change_sets if _reviewed_by_user(item, reviewer_user_id)]
+            return detect_capture_setup_candidates(
+                batch_notes,
+                sessions,
+                owner_user_id=reviewer_user_id,
+                now=now,
+                suppressed=recently_recommended_kinds(history, now),
+            )
+        except Exception:
+            logger.exception("capture-setup candidates failed for reviewer %s", reviewer_user_id)
+            return []
 
     def build_review_memory(
         self,
@@ -398,28 +459,25 @@ class GraphContextBuilder:
         project_ids: set[UUID],
         context_owner: BatchReviewer | None,
         now: datetime,
+        change_sets: list[GraphChangeSet] | None = None,
     ) -> dict[str, Any]:
         """Reviewer-scoped pending proposals and recent rejections, capped.
 
         Without a user-backed reviewer (or a records port) the block is empty
         and flagged ``reviewer_scoped=False`` rather than matched on a legacy
-        reviewer string.
+        reviewer string. ``change_sets`` are the rows
+        :meth:`_review_memory_change_sets` already loaded; without them this
+        loads its own.
         """
 
         reviewer_user_id = context_owner.reviewer_user_id if context_owner is not None else None
         if self.review_memory is None or reviewer_user_id is None:
             return _empty_review_memory()
-        change_sets: list[GraphChangeSet] = []
-        for project_id in sorted(project_ids, key=str):
-            change_sets.extend(
-                self.review_memory.list_review_memory_change_sets(
-                    project_id,
-                    statuses=set(REVIEW_MEMORY_REJECTION_STATUSES),
-                    limit=_REVIEW_MEMORY_QUERY_LIMIT,
-                )
-            )
-        change_sets.sort(
-            key=lambda item: (-as_utc(item.created_at).timestamp(), str(item.change_set_id))
+        if change_sets is None:
+            change_sets = self._review_memory_change_sets(project_ids, reviewer_user_id)
+        change_sets = sorted(
+            change_sets,
+            key=lambda item: (-as_utc(item.created_at).timestamp(), str(item.change_set_id)),
         )
         pending, truncated = self._pending_proposals(change_sets, reviewer_user_id)
         cutoff = now - timedelta(days=RECENT_REJECTIONS_WINDOW_DAYS)
@@ -432,6 +490,30 @@ class GraphContextBuilder:
                 change_sets, reviewer_user_id, cutoff=cutoff
             ),
         }
+
+    def _review_memory_change_sets(
+        self,
+        project_ids: set[UUID],
+        reviewer_user_id: UUID | None,
+    ) -> list[GraphChangeSet]:
+        """The newest change sets per project that review memory reads.
+
+        Empty without a records port or a user-backed reviewer: nothing is
+        then matched on a legacy reviewer string.
+        """
+
+        if self.review_memory is None or reviewer_user_id is None:
+            return []
+        change_sets: list[GraphChangeSet] = []
+        for project_id in sorted(project_ids, key=str):
+            change_sets.extend(
+                self.review_memory.list_review_memory_change_sets(
+                    project_id,
+                    statuses=set(REVIEW_MEMORY_REJECTION_STATUSES),
+                    limit=_REVIEW_MEMORY_QUERY_LIMIT,
+                )
+            )
+        return change_sets
 
     def _pending_proposals(
         self,

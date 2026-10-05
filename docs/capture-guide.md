@@ -110,6 +110,13 @@ setup:
   for, or covering an instrument booking. See [Session suggestions](session-suggestions.md).
 - **Day logs.** A heavy bench day in one session arrives as one proposed
   timestamped log instead of many separate items.
+- **Capture-setup tips.** When the drafter could not place or interpret some
+  of your captures because of how they were made (phone or web captures and
+  shortcut memos that reached no session, watched files whose folder names no
+  session, a closed session with no debrief, NWB headers left unread), the
+  review page's **Help future captures** block names the setup that would
+  have recorded what was missing. It is advice only and changes nothing in the
+  draft. See [Capture-setup tips](session-suggestions.md#capture-setup-tips-in-the-daily-review).
 
 ## Turning things off
 
