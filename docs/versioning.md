@@ -16,9 +16,9 @@ to the Git tag and is not part of the package version.
 The automated release path currently accepts stable releases only. Do not use
 pre-release or build suffixes until their mapping between SemVer and Python's
 package-version rules is designed and added to `scripts/verify_release.py`.
-Adopting this policy does not itself publish or tag a release; `0.1.0` remains
-the initial baseline until a maintainer intentionally completes the release
-steps below.
+Adopting this policy does not itself publish or tag a release; a release exists
+only once a maintainer completes the steps below. `0.1.0` was the untagged
+baseline, and `v0.2.0` is the first tagged release.
 
 The public compatibility surface is:
 

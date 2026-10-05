@@ -1,7 +1,7 @@
 FROM python:3.11-slim
 
 ARG LAB_TRACKER_SOURCE_REVISION=unknown
-ARG LAB_TRACKER_SOURCE_VERSION=0.1.0
+ARG LAB_TRACKER_SOURCE_VERSION=0.2.0
 
 LABEL org.opencontainers.image.source="https://github.com/SamuelBrudner/lab-tracker" \
     org.opencontainers.image.revision="${LAB_TRACKER_SOURCE_REVISION}" \

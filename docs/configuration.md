@@ -1223,7 +1223,7 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
 #### Container image and entrypoint
 
 - `LAB_TRACKER_SOURCE_VERSION`: Docker build argument recorded as the image's
-  OCI version label and environment (default: `0.1.0`)
+  OCI version label and environment (default: `0.2.0`)
 - `LAB_TRACKER_RUNTIME_ENV_DIR`: directory where the entrypoint keeps the
   secrets it generates (default: `/app/data/runtime-env`)
 - `LAB_TRACKER_AUTH_SECRET_KEY_FILE`: file the entrypoint reads the auth secret
