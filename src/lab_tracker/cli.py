@@ -344,8 +344,21 @@ def _uninstall_setup_skill(*, result: InitResult, dry_run: bool = False) -> None
     from lab_tracker.skill_bundle import skill_resources
 
     for _name, home in _skills_homes():
+        linked_skills: set[str] = set()
+        for skill_name in ("lab-tracker", "lab-tracker-setup"):
+            root = home / skill_name
+            if root.is_symlink():
+                # A development install links the folder to repository source.
+                # Removing its children would delete files in that checkout.
+                linked_skills.add(skill_name)
+                result.stripped.append(root)
+                if not dry_run:
+                    root.unlink()
         for relative_path in skill_resources():
-            _uninstall_setup_skill_at_path(home / relative_path, result=result, dry_run=dry_run)
+            if relative_path.split("/", 1)[0] not in linked_skills:
+                _uninstall_setup_skill_at_path(
+                    home / relative_path, result=result, dry_run=dry_run
+                )
         if not dry_run:
             for skill_name in ("lab-tracker", "lab-tracker-setup"):
                 with suppress(OSError):

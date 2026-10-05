@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 import shutil
 
+import pytest
+
 from lab_tracker.cli import init_consumer_repo, refresh_setup_skills
 from lab_tracker.skill_bundle import skill_resources
 from lab_tracker_client.setup import _skills_status
@@ -58,6 +60,41 @@ def test_uninstall_removes_managed_references_and_preserves_user_files(tmp_path,
     assert user_file.read_text() == "user resource"
     assert all(not (home / p).exists() for p in skill_resources())
     assert not (home / "lab-tracker-setup").exists()
+
+
+@pytest.mark.parametrize("broken_link", [False, True])
+def test_uninstall_removes_folder_links_without_deleting_source(
+    tmp_path, monkeypatch, broken_link
+):
+    source = tmp_path / "source"
+    home = tmp_path / "skills"
+    home.mkdir()
+    expected = skill_resources()
+    for relative_path, content in expected.items():
+        path = source / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    for name in ("lab-tracker", "lab-tracker-setup"):
+        try:
+            (home / name).symlink_to(source / name, target_is_directory=True)
+        except OSError:
+            pytest.skip("Directory symlinks are unavailable on this host")
+    if broken_link:
+        destination = tmp_path / "moved-source"
+        source.rename(destination)
+        source = destination
+    monkeypatch.setenv("LAB_TRACKER_SKILLS_HOME", str(home))
+    preview = init_consumer_repo(
+        tmp_path / "consumer", uninstall=True, install_skills=True, dry_run=True
+    )
+    assert {home / "lab-tracker", home / "lab-tracker-setup"} <= set(preview.stripped)
+    assert all((home / name).is_symlink() for name in ("lab-tracker", "lab-tracker-setup"))
+    init_consumer_repo(tmp_path / "consumer", uninstall=True, install_skills=True)
+    assert list(home.iterdir()) == []
+    assert {
+        path.relative_to(source).as_posix(): path.read_text(encoding="utf-8")
+        for path in source.rglob("*.md")
+    } == expected
 
 
 def test_generator_check_covers_source_and_packaged_reference_drift(tmp_path, monkeypatch):
