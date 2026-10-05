@@ -24,7 +24,7 @@ visualizations.
 [**Deploy to Render**](https://render.com/deploy?repo=https://github.com/SamuelBrudner/lab-tracker) ·
 [**Documentation**](#documentation) · [**Run locally**](#run-locally)
 
-> **Status:** Lab Tracker is at `0.1.0` and under active development. It is
+> **Status:** Lab Tracker is at `0.2.0` and under active development. It is
 > intended for evaluation and early research use; interfaces and deployment
 > defaults may still change. The
 > [supported v1 surface](docs/retained-v1-surface.md) is authoritative.

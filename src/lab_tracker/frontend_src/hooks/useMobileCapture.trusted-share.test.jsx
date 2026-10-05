@@ -5,6 +5,7 @@ import { buildApiPath } from "../shared/api.js";
 import {
   SHARE_INBOX_UPDATED_MESSAGE,
   createMemoryShareStorage,
+  expiredSharesMessage,
 } from "../shared/share-target-inbox.js";
 import {
   SHARE_TRUST_KEY,
@@ -164,6 +165,28 @@ describe("useMobileCapture trusted share window", () => {
     consoleError.mockRestore();
     shareMocks.getUploadQueue.mockReset();
     shareMocks.storage = null;
+  });
+
+  it("judges share expiry by its own clock, not the wall clock", async () => {
+    // The wall clock is a month past T0 and the hook's clock ten minutes past
+    // it, so a share received at T0 stays and one 8 days older expires.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(T0 + 30 * 24 * HOUR);
+    try {
+      installRoutes({ createdNotes });
+      shareMocks.storage = createMemoryShareStorage([
+        { text: "fresh by the hook's clock", receivedAt: T0 },
+        { text: "stale by the hook's clock", receivedAt: T0 - 8 * 24 * HOUR },
+      ]);
+
+      const { props, result } = renderCaptureHook();
+
+      await waitFor(() => expect(result.current.incomingShares).toHaveLength(1));
+      expect(result.current.incomingShares[0].text).toBe("fresh by the hook's clock");
+      expect(props.setFlash).toHaveBeenCalledWith("", expiredSharesMessage(1));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("imports shares straight into the trusted session with capture_channel=share", async () => {

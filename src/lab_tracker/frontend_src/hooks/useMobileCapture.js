@@ -379,7 +379,11 @@ function useMobileCapture({
     }
     const readSeq = shareReadSeqRef.current + 1;
     shareReadSeqRef.current = readSeq;
-    const { expired, shares } = await listReviewableShares({ storage: shareStorage });
+    // Expiry reads the hook's clock, the same one the trust window reads.
+    const { expired, shares } = await listReviewableShares({
+      storage: shareStorage,
+      now: now(),
+    });
     if (expired > 0 && mountedRef.current) {
       // The expired shares are gone whichever read removed them; say so.
       setFlash("", expiredSharesMessage(expired));
@@ -387,7 +391,7 @@ function useMobileCapture({
     if (mountedRef.current && shareReadSeqRef.current === readSeq) {
       setIncomingShares(shares);
     }
-  }, [setFlash, shareStorage]);
+  }, [now, setFlash, shareStorage]);
 
   const reportShareInboxReadFailure = useCallback(
     (error) => {

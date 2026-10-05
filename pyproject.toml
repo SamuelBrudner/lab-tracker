@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lab-tracker"
-version = "0.1.0"
+version = "0.2.0"
 description = "Human-gated research provenance for questions, evidence, analyses, claims, and figures"
 readme = "README.md"
 requires-python = ">=3.10"
