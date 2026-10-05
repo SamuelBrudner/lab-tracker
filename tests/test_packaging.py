@@ -224,6 +224,50 @@ def test_wheel_contains_all_frontend_bundle_files(built_wheel: Path):
     assert wheel_files == bundle_files
 
 
+def test_wheel_installs_complete_skill_trees_without_a_checkout(
+    tmp_path: Path, built_wheel: Path
+) -> None:
+    """Exercise importlib resources from a zipped wheel outside the repository."""
+    repo_root = Path(__file__).resolve().parent.parent
+    package_root = repo_root / "src" / "lab_tracker"
+    bundle_files = _packaged_files(package_root, "skill_data")
+    with zipfile.ZipFile(built_wheel) as archive:
+        wheel_files = {
+            name.removeprefix("lab_tracker/")
+            for name in archive.namelist()
+            if name.startswith("lab_tracker/skill_data/") and not name.endswith("/")
+        }
+    assert wheel_files == bundle_files
+    environment = {
+        **os.environ,
+        "PYTHONPATH": str(built_wheel),
+        "LAB_TRACKER_SKILLS_HOME": str(tmp_path / "skills"),
+    }
+    script = """
+import os
+from pathlib import Path
+import lab_tracker.skill_bundle as bundle
+from lab_tracker.cli import refresh_setup_skills
+assert ".whl" in bundle.__file__, bundle.__file__
+resources = bundle.skill_resources()
+result = refresh_setup_skills()
+home = Path(os.environ["LAB_TRACKER_SKILLS_HOME"])
+assert set(result.created) == {home / p for p in resources}
+for path, expected in resources.items():
+    assert (home / path).read_text(encoding="utf-8") == expected
+assert (home / "lab-tracker/references/api.md").is_file()
+assert (home / "lab-tracker-setup/SKILL.md").is_file()
+"""
+    subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def test_wheel_contains_and_runs_isolated_local_health_helper(
     tmp_path: Path,
     built_wheel: Path,

@@ -97,6 +97,8 @@ lab_tracker = [
   "alembic/versions/*.py",
   "frontend/*",
   "frontend/**/*",
+  "skill_data/*/*.md",
+  "skill_data/*/references/*.md",
 ]
 
 [tool.codex_orchestrator]

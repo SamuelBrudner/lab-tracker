@@ -284,7 +284,7 @@ also exposes the retained-v1 read surfaces of the HTTP API, including:
 
 These tools mirror the API filters, use the same envelopes, and are read-only.
 The authoritative tool inventory is generated in
-[`skills/lab-tracker/SKILL.md`](../skills/lab-tracker/SKILL.md).
+[`references/tools.md`](../skills/lab-tracker/references/tools.md).
 
 ### MCP Resources
 

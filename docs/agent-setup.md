@@ -227,10 +227,11 @@ ID and project membership with the project owner. A successful `lt health`
 checks connectivity, not authenticated project access. `--dry-run` previews the
 binding without writing `lt_ids.json`.
 
-The generated setup skill is machine-wide, not per repo. When `lt setup status`
-reports it missing or stale, `lt update --skills-only` (`--dry-run` previews)
-refreshes it in the Claude and Codex homes and touches no file in the current
-directory, so it is safe to run outside an analysis repo (a relative
+Both Lab Tracker skills and their supporting references are machine-wide, not
+per repo. When `lt setup status` reports missing or stale files,
+`lt update --skills-only` (`--dry-run` previews) refreshes the complete skill
+trees in the Claude and Codex homes and touches no file in the current
+directory, so it can run outside an analysis repo (a relative
 `LAB_TRACKER_SKILLS_HOME` resolves against the current directory, so keep that
 override absolute). The `lt setup init` step above is for onboarding a repo.
 
@@ -263,8 +264,8 @@ Registration is per client, and each client reads a different file.
 `lt setup init` writes the repository files in the table above, and the
 `.mcp.json` it writes carries no token. That covers Claude Code. Any run without
 `--dry-run` also records the repository in `~/.lab-tracker/applied-repos.json`,
-and `--install-skills` additionally writes the generated setup skill into the
-user-level Claude and Codex skill homes (`~/.claude/skills` and
+and `--install-skills` additionally writes both skills and supporting references
+into the user-level Claude and Codex skill homes (`~/.claude/skills` and
 `~/.agents/skills`). It never writes a client's own MCP registration file
 (`claude_desktop_config.json`, `~/.codex/config.toml`, or `~/.claude.json`), so
 Claude Desktop chat and both Codex products are registered by hand, once per

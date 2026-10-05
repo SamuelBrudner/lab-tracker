@@ -186,7 +186,7 @@ def init_consumer_repo(
         _install_setup_skill(result=result, dry_run=dry_run)
     else:
         result.offers.append(
-            "The lab-tracker-setup skill can be installed for Claude/Codex "
+            "Both Lab Tracker skills and references can be installed for Claude/Codex "
             "agents with `--install-skills`."
         )
     if not dry_run:
@@ -242,7 +242,7 @@ def _skills_homes() -> tuple[tuple[str, Path], ...]:
 
     The explicit environment override predates Codex support and remains a
     single-target escape hatch for custom installs and isolated tests. Without
-    it, install the generated setup skill for both supported agent homes. A
+    it, install both skill trees for both supported agent homes. A
     relative override is taken as written and so resolves against the current
     directory; it should be an absolute path.
     """
@@ -277,30 +277,30 @@ def _setup_skill_path() -> Path:
 
 
 def _install_setup_skill(*, result: InitResult, dry_run: bool = False) -> None:
-    """Render the packaged setup skill into each configured agent skill home.
+    """Install both complete skill trees into each configured agent skill home.
 
-    A real file copy (no symlinks — Windows), LF-only because the trailing
-    sha line pins the exact bytes, fully generated from package text so
-    upgrades refresh it via the same call. A version-line-only difference is
+    Real file copies work on Windows. LF-only writes preserve the setup skill's
+    generated hash, and upgrades refresh every bundled resource. A setup
+    version-line-only difference is
     rewritten without a backup (a package bump with unchanged text must not
     churn — or clobber — the single ``.bak-lt-update`` slot); a genuinely
     customised copy is backed up like any other refreshed scaffold file.
     """
 
     from lab_tracker.setup_guide import (
-        setup_skill_markdown,
         skill_content_without_version_line,
     )
+    from lab_tracker.skill_bundle import skill_resources
 
-    content = setup_skill_markdown()
-    for _name, path in _setup_skill_targets():
-        _install_setup_skill_at_path(
-            path,
-            content=content,
-            skill_content_without_version_line=skill_content_without_version_line,
-            result=result,
-            dry_run=dry_run,
-        )
+    for _name, home in _skills_homes():
+        for relative_path, content in skill_resources().items():
+            _install_setup_skill_at_path(
+                home / relative_path,
+                content=content,
+                skill_content_without_version_line=skill_content_without_version_line,
+                result=result,
+                dry_run=dry_run,
+            )
 
 
 def _install_setup_skill_at_path(
@@ -341,8 +341,15 @@ def _install_setup_skill_at_path(
 
 
 def _uninstall_setup_skill(*, result: InitResult, dry_run: bool = False) -> None:
-    for _name, path in _setup_skill_targets():
-        _uninstall_setup_skill_at_path(path, result=result, dry_run=dry_run)
+    from lab_tracker.skill_bundle import skill_resources
+
+    for _name, home in _skills_homes():
+        for relative_path in skill_resources():
+            _uninstall_setup_skill_at_path(home / relative_path, result=result, dry_run=dry_run)
+        if not dry_run:
+            for skill_name in ("lab-tracker", "lab-tracker-setup"):
+                with suppress(OSError):
+                    (home / skill_name).rmdir()
 
 
 def _uninstall_setup_skill_at_path(
@@ -475,7 +482,7 @@ def update_consumer_repo(
 
 
 def refresh_setup_skills(*, dry_run: bool = False) -> InitResult:
-    """Install or refresh only the ``lab-tracker-setup`` skill, machine-wide.
+    """Install or refresh complete research/setup skill trees, machine-wide.
 
     This is the skills half of ``update_consumer_repo(install_skills=True)`` on
     its own. It takes no target, so it cannot scaffold: it writes no repo file,
@@ -512,7 +519,7 @@ def reject_skills_only_conflicts(prog: str, *, yes: bool, target: str | None) ->
     if given:
         flags = " and ".join(given)
         raise SystemExit(
-            f"{prog} update --skills-only refreshes only the lab-tracker-setup skill "
+            f"{prog} update --skills-only refreshes only Lab Tracker skills and references "
             "machine-wide and never touches a repository, so it cannot be combined "
             f"with {flags}. Drop {flags}, or drop --skills-only to update the "
             "repository."
@@ -748,7 +755,7 @@ def main(argv: list[str] | None = None) -> None:
         "--install-skills",
         action="store_true",
         help=(
-            "Also render the lab-tracker-setup skill into the Claude and Codex "
+            "Install both Lab Tracker skills and references into the Claude and Codex "
             "skill homes (with --uninstall: remove it)."
         ),
     )
@@ -778,7 +785,7 @@ def main(argv: list[str] | None = None) -> None:
         "--install-skills",
         action="store_true",
         help=(
-            "Also refresh the lab-tracker-setup skill in the Claude and Codex "
+            "Refresh both Lab Tracker skills and references in the Claude and Codex "
             "homes, in addition to updating the repo (use --skills-only to leave "
             "the repo alone)."
         ),
@@ -787,7 +794,7 @@ def main(argv: list[str] | None = None) -> None:
         "--skills-only",
         action="store_true",
         help=(
-            "Install or refresh only the lab-tracker-setup skill in the Claude and "
+            "Install or refresh both Lab Tracker skills and references in the Claude and "
             "Codex homes, machine-wide; implies --install-skills and touches no "
             "repo or file in the current directory, unless LAB_TRACKER_SKILLS_HOME "
             "is a relative path (use an absolute one). Cannot be combined with "

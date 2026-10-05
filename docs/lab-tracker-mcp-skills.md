@@ -194,7 +194,7 @@ interpreter:
 ```
 
 The authoritative MCP tool inventory is generated in
-[`skills/lab-tracker/SKILL.md`](../skills/lab-tracker/SKILL.md) from the
+[`references/tools.md`](../skills/lab-tracker/references/tools.md) from the
 registered `READ_TOOLS` and `WRITE_TOOLS` tuples. Do not duplicate the list in
 this document; run `python scripts/generate_lab_tracker_skill_reference.py` after
 changing MCP tool registration.
@@ -380,23 +380,30 @@ The skill source lives at:
 skills/lab-tracker/SKILL.md
 ```
 
-On this machine it should be installed into both assistant homes, preferably as
-symlinks so repo updates are picked up by new agent sessions:
+The installed package includes both the research skill and the focused setup
+skill, including supporting references. Preview and install them machine-wide:
 
-```text
-~/.codex/skills/lab-tracker -> <repo>/skills/lab-tracker
-~/.claude/skills/lab-tracker -> <repo>/skills/lab-tracker
+```bash
+lt update --skills-only --dry-run
+lt update --skills-only
 ```
+
+The default destinations are `~/.agents/skills` for Codex and
+`~/.claude/skills` for Claude. `LAB_TRACKER_SKILLS_HOME` selects a single custom
+destination. These commands copy complete skill folders; copying only
+`SKILL.md` would leave its reference links unresolved. For a development
+checkout, symlink the complete skill folders to pick up source changes.
 
 Restart Codex or Claude after changing MCP or skill config so the new server and
 skill are loaded. Registration and verification for each client (Claude Code,
 Claude Desktop chat, Codex in the ChatGPT desktop app, Codex CLI) are in
 [Choose your client](agent-setup.md#choose-your-client).
 
-The skill's Capture Surfaces section lists every capture path with its setup
+The skill's [capture reference](../skills/lab-tracker/references/capture.md) lists
+every capture path with its setup
 command and doc; the generated `lab-tracker-setup` skill (installed by
 `lt setup init --install-skills`) walks a person through enabling them, and
 [capture-guide.md](capture-guide.md) is the same map for people.
-`lt update --skills-only` refreshes that generated skill machine-wide without
+`lt update --skills-only` refreshes both complete skills machine-wide without
 touching the current directory (a relative `LAB_TRACKER_SKILLS_HOME` resolves
 against the current directory, so keep that override absolute).

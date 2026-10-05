@@ -546,15 +546,21 @@ def _suggestions(status: JsonObject) -> list[str]:
             "The installed lab-tracker-setup skill is stale; "
             f"`lt update --skills-only` refreshes it {_SKILLS_ONLY_SCOPE_NOTE}"
         )
+    if skills.get("all_resources_up_to_date") is False:
+        suggestions.append(
+            "Lab Tracker skill files or supporting references are missing or stale; "
+            f"`lt update --skills-only` refreshes both complete skills {_SKILLS_ONLY_SCOPE_NOTE}"
+        )
     return suggestions
 
 
 def _skills_status() -> JsonObject:
-    from lab_tracker.cli import _setup_skill_targets
+    from lab_tracker.cli import _setup_skill_targets, _skills_homes
     from lab_tracker.setup_guide import (
         setup_skill_markdown,
         skill_content_without_version_line,
     )
+    from lab_tracker.skill_bundle import skill_resources
 
     generated = setup_skill_markdown()
     targets: list[JsonObject] = []
@@ -593,6 +599,31 @@ def _skills_status() -> JsonObject:
     )
     summary["all_version_in_sync"] = all(
         target.get("version_in_sync") is True for target in targets
+    )
+    # Preserve the existing setup-only fields and expose complete-tree health.
+    resources = skill_resources()
+    bundles: list[JsonObject] = []
+    for name, home in _skills_homes():
+        missing: list[str] = []
+        stale: list[str] = []
+        for relative_path, expected in resources.items():
+            path = home / relative_path
+            if not path.is_file():
+                missing.append(relative_path)
+                continue
+            try:
+                installed = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                stale.append(relative_path)
+                continue
+            if skill_content_without_version_line(installed) != (
+                skill_content_without_version_line(expected)
+            ):
+                stale.append(relative_path)
+        bundles.append({"name": name, "missing_files": missing, "stale_files": stale})
+    summary["bundles"] = bundles
+    summary["all_resources_up_to_date"] = all(
+        not bundle["missing_files"] and not bundle["stale_files"] for bundle in bundles
     )
     return summary
 

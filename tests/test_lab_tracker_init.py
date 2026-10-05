@@ -42,6 +42,7 @@ from lab_tracker.decision_context_constants import (
 )
 from lab_tracker.demo_seed import DemoSeedResult
 from lab_tracker.setup_guide import setup_skill_markdown
+from lab_tracker.skill_bundle import skill_resources
 from lab_tracker_client import registry as repo_registry
 from lab_tracker_client.cli import main as lt_main
 
@@ -593,7 +594,9 @@ def test_update_skills_only_cli_never_scaffolds(
     assert _backup_of(skill_path).read_text(encoding="utf-8") == "customised skill"
     assert payload["overwritten"] == [str(skill_path)]
     assert payload["backups"] == {str(skill_path): str(_backup_of(skill_path))}
-    assert payload["created"] == []
+    assert set(payload["created"]) == {
+        str(skill_home / p) for p in skill_resources() if p != "lab-tracker-setup/SKILL.md"
+    }
     assert payload["offers"] == []
     assert payload["warnings"] == []
     assert captured.err == ""
@@ -618,9 +621,11 @@ def test_update_skills_only_spellings_are_identical(
 
     payload = json.loads(capsys.readouterr().out)
     skill_path = skill_home / "lab-tracker-setup" / "SKILL.md"
-    assert payload["created"] == [str(skill_path)]
+    assert set(payload["created"]) == {str(skill_home / p) for p in skill_resources()}
     assert skill_path.read_text(encoding="utf-8") == setup_skill_markdown()
-    assert sorted(item.name for item in skill_home.iterdir()) == ["lab-tracker-setup"]
+    assert sorted(item.name for item in skill_home.iterdir()) == [
+        "lab-tracker", "lab-tracker-setup"
+    ]
     assert list(scratch_cwd.iterdir()) == []
 
 
@@ -685,10 +690,12 @@ def test_update_skills_only_creates_only_the_skill_directories(
     main(["update", "--skills-only"])
 
     capsys.readouterr()
-    assert sorted(path.relative_to(skill_home).as_posix() for path in skill_home.rglob("*")) == [
-        "lab-tracker-setup",
-        "lab-tracker-setup/SKILL.md",
-    ]
+    installed_files = {
+        path.relative_to(skill_home).as_posix()
+        for path in skill_home.rglob("*")
+        if path.is_file()
+    }
+    assert installed_files == set(skill_resources())
     assert list(scratch_cwd.iterdir()) == []
 
 
@@ -722,7 +729,7 @@ def test_update_skills_only_dry_run_writes_nothing(
     main(["update", "--skills-only", "--dry-run"])
 
     payload = json.loads(capsys.readouterr().out)
-    assert list(payload["diffs"]) == [str(skill_path)]
+    assert set(payload["diffs"]) == {str(skill_home / p) for p in skill_resources()}
     assert payload["overwritten"] == [str(skill_path)]
     assert skill_path.read_text(encoding="utf-8") == "customised skill"
     assert not _backup_of(skill_path).exists()

@@ -196,7 +196,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--install-skills",
         action="store_true",
         help=(
-            "Also refresh the lab-tracker-setup skill in the Claude and Codex "
+            "Refresh both Lab Tracker skills and references in the Claude and Codex "
             "homes, in addition to updating the repo (use --skills-only to leave "
             "the repo alone)."
         ),
@@ -205,7 +205,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--skills-only",
         action="store_true",
         help=(
-            "Install or refresh only the lab-tracker-setup skill in the Claude and "
+            "Install or refresh both Lab Tracker skills and references in the Claude and "
             "Codex homes, machine-wide; implies --install-skills and touches no "
             "repo or file in the current directory, unless LAB_TRACKER_SKILLS_HOME "
             "is a relative path (use an absolute one). Cannot be combined with "
@@ -437,7 +437,7 @@ def _add_setup_parsers(subcommands: argparse._SubParsersAction) -> None:
         "--install-skills",
         action="store_true",
         help=(
-            "Also render the lab-tracker-setup skill into the Claude and Codex "
+            "Install both Lab Tracker skills and references into the Claude and Codex "
             "skill homes (with --uninstall: remove it)."
         ),
     )
