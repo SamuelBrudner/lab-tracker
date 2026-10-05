@@ -91,12 +91,16 @@ Incomplete, cancelled and bounded-out trials fail their behavioral grades.
 Normal CI discovers `tests/test_agent_skill_evals.py` in the existing full Python
 suites. These checks are offline: they verify isolation, source-schema validation,
 negative safety grading, record links, bundle boundaries, consent and the Responses
-continuation protocol. No API key or live model is required. Live comparisons
+continuation protocol, and replay every archived baseline trace. The evaluator
+also has an explicit type-check step. No API key or live model is required. Live comparisons
 are explicit development/release checks. Repeat the same corpus when changing
 skills, tool descriptions or orchestration. Review safety failures individually;
 compare task completion, tokens and latency, and retain failures rather than
 selecting only successful runs. Three repetitions provide an initial baseline,
 not a statistically precise estimate or a production security guarantee.
+
+See the [2026-10-05 baseline](evals/2026-10-05-baseline.md) for the recorded
+comparison, retained failures and known grader limitations.
 
 The implementation follows the official [function-calling guide](https://developers.openai.com/api/docs/guides/function-calling)
 and preserves [reasoning items during tool continuation](https://developers.openai.com/api/docs/guides/reasoning#keeping-reasoning-items-in-context).

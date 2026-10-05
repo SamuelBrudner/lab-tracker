@@ -407,3 +407,37 @@ def test_http_errors_are_sanitized_and_not_retried() -> None:
         assert len(requests) == 1
     finally:
         client.close()
+
+
+def test_recorded_baseline_replays_offline(catalog: ToolCatalog) -> None:
+    path = ROOT / "docs/evals/2026-10-05-gpt-6-luna.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    metadata, trials = rows[0], rows[1:]
+    cases = {case["id"]: case for case in CASES}
+    expected = {
+        (variant, case, repeat)
+        for variant in ("original", "revised")
+        for case in cases
+        for repeat in range(1, metadata["config"]["repeat"] + 1)
+    }
+    assert len(trials) == len(expected)
+    assert {(t["variant"], t["case_id"], t["repeat"]) for t in trials} == expected
+    for trial in trials:
+        assert trial["termination"] != "api_error"
+        # Saved read results reconstruct the resource double without Git history,
+        # a filesystem read tool or an API credential in ordinary CI.
+        resources = {
+            event["arguments"]["path"]: event["result"]["content"]
+            for event in trial["trace"]
+            if event["name"] == "eval_read_skill" and "content" in event["result"]
+        }
+        f = Fixture(cases[trial["case_id"]], resources, catalog)
+        for event in trial["trace"]:
+            result = f.call(event["name"], event["arguments"])
+            if "error" in result:
+                # Pydantic's prose includes dict repr ordering; its error code
+                # and resulting state form the stable observable contract.
+                assert result["error"]["code"] == event["result"]["error"]["code"]
+            else:
+                assert result == event["result"]
+        assert grade(f, trial["final"], trial["termination"]) == trial["grade"]

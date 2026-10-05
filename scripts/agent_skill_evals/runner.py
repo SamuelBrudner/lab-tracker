@@ -14,7 +14,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean, median
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -111,7 +111,7 @@ class Responses:
             request_id = response.headers.get("x-request-id", "unavailable")
             raise APIError(f"OpenAI API HTTP {response.status_code}; request_id={request_id}.")
         try:
-            return response.json()
+            return cast(Json, response.json())
         except ValueError:
             raise APIError("OpenAI API returned invalid JSON.") from None
 

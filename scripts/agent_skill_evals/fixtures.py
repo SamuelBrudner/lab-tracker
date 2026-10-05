@@ -6,11 +6,12 @@ import copy
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from mcp.server.fastmcp import FastMCP
-from pydantic import ValidationError
+from mcp.server.fastmcp.tools import Tool
+from pydantic import BaseModel, ValidationError
 
 from lab_tracker.mcp_evidence_bundle import _component_request
 from lab_tracker.mcp_tools import register_read_tools, register_write_tools
@@ -67,7 +68,7 @@ TOOL_NAMES = frozenset(
         "record_evidence_bundle",
     )
 )
-CREATE_MODELS = {
+CREATE_MODELS: dict[str, type[BaseModel]] = {
     "question": QuestionCreate,
     "dataset": DatasetCreate,
     "analysis": AnalysisCreate,
@@ -107,8 +108,11 @@ class ToolCatalog:
         self.server = FastMCP("Lab Tracker evaluation schemas")
         register_read_tools(self.server)
         register_write_tools(self.server)
-        self.tools = {name: self.server._tool_manager.get_tool(name) for name in sorted(TOOL_NAMES)}
-        assert all(self.tools.values())
+        self.tools: dict[str, Tool] = {}
+        for name in sorted(TOOL_NAMES):
+            tool = self.server._tool_manager.get_tool(name)
+            assert tool is not None
+            self.tools[name] = tool
 
     def definitions(self) -> list[Json]:
         definitions = [
@@ -165,7 +169,7 @@ class ToolCatalog:
 
 def load_cases(path: Path) -> list[Json]:
     corpus = json.loads(path.read_text(encoding="utf-8"))
-    cases = corpus["cases"]
+    cases = cast(list[Json], corpus["cases"])
     ids = [case["id"] for case in cases]
     if corpus["version"] != 1 or len(set(ids)) != len(ids) or not cases:
         raise ValueError("Unsupported or duplicate evaluation cases.")
@@ -238,7 +242,8 @@ class Fixture:
         self.replays: dict[str, tuple[str, Json]] = {}
 
     def call(self, name: str, arguments: Json) -> Json:
-        event = {"name": name, "arguments": copy.deepcopy(arguments)}
+        event: Json = {"name": name, "arguments": copy.deepcopy(arguments)}
+        result: Json
         try:
             if name == "eval_read_skill":
                 path = arguments.get("path", "")
@@ -504,12 +509,12 @@ class Fixture:
         ):
             raise FixtureError("unauthorized_action", "Only a bundle preview was authorized.")
         fingerprint = json.dumps(request, sort_keys=True)
-        key = request.get("idempotency_key")
+        key = cast(str, request.get("idempotency_key"))
         if not dry_run and key in self.replays:
-            previous, result = self.replays[key]
+            previous, replay_result = self.replays[key]
             if previous != fingerprint:
                 raise FixtureError("validation_error", "Conflicting idempotency-key reuse.")
-            return copy.deepcopy(result)
+            return copy.deepcopy(replay_result)
         # Simulate atomicity: validation/ref checks complete before any state is retained.
         saved = copy.deepcopy(self.records)
         ids: Json = {}
