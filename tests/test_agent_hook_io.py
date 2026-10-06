@@ -21,8 +21,8 @@ from typing import Any
 import pytest
 
 from lab_tracker.cli import init_consumer_repo
-from lab_tracker_client import agent_hooks
 from lab_tracker_client import cli as lt_cli
+from lab_tracker_client import hook_context
 from lab_tracker_client.client import LTValidationError
 
 NEXT_QUESTIONS = {
@@ -125,7 +125,7 @@ def test_prime_hook_classifies_the_payload_prompt_and_emits_context(
     hook = _hook_output(capsys.readouterr().out)
     assert hook["hookEventName"] == "UserPromptSubmit"
     header, body = hook["additionalContext"].split("\n", 1)
-    assert header == agent_hooks.PRIME_CONTEXT_HEADER
+    assert header == hook_context.PRIME_CONTEXT_HEADER
     assert json.loads(body) == NEXT_QUESTIONS
     assert stub_client.calls == [{"project_id": None, "limit": 5}]
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lab-tracker"
-version = "0.1.0"
+version = "0.2.0"
 description = "Human-gated research provenance for questions, evidence, analyses, claims, and figures"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -55,6 +55,10 @@ test = [
   "pytest-cov",
   "pytest-xdist",
   "pyld",
+  # Exercise the optional `decode` extra in CI (wheels exist for CPython
+  # 3.10-3.12+ on Linux, macOS, and Windows).
+  "zxing-cpp>=2.3",
+  "pillow",
 ]
 lint = [
   "mypy>=1.15,<3",
@@ -62,6 +66,12 @@ lint = [
 ]
 figure = [
   "matplotlib",
+  "pillow",
+]
+# Deterministic, local decoding of QR codes and barcodes in uploaded photos
+# (not OCR). Without it, uploads simply carry no decoded-code metadata.
+decode = [
+  "zxing-cpp>=2.3",
   "pillow",
 ]
 
@@ -79,6 +89,9 @@ where = ["src"]
 include = ["lab_tracker", "lab_tracker.*", "lab_tracker_client", "lab_tracker_client.*"]
 
 [tool.setuptools.package-data]
+# The R autotrack implementation (a byte-identical copy of r/labtracker/R/labtracker.R)
+# that `lt setup autotrack --r` points ~/.Rprofile at.
+lab_tracker_client = ["r_labtracker/*.R"]
 lab_tracker = [
   "alembic/env.py",
   "alembic/versions/*.py",
@@ -134,8 +147,31 @@ show_error_codes = true
 files = [
   "src/lab_tracker/_version.py",
   "src/lab_tracker_client/_version.py",
-  "src/lab_tracker_client/agent_hooks.py",
+  "src/lab_tracker_client/hook_context.py",
+  "src/lab_tracker_client/maintenance.py",
   "src/lab_tracker_client/capture_project.py",
+  "src/lab_tracker_client/pipeline_capture.py",
+  "src/lab_tracker_client/cli_pipeline.py",
+  "src/lab_tracker_client/cli_hpc_epilog.py",
+  "src/lab_tracker_client/integrations",
+  "src/lab_tracker_client/yaml_subset.py",
+  "src/lab_tracker_client/redaction.py",
+  "src/lab_tracker_client/_autotrack_pth.py",
+  "src/lab_tracker_client/autotrack_setup.py",
+  "src/lab_tracker_client/display_capture.py",
+  "src/lab_tracker_client/notebook_capture.py",
+  "src/lab_tracker_client/script_capture.py",
+  "src/lab_tracker_client/cli_capture.py",
+  "src/lab_tracker_client/r_autotrack.py",
+  "src/lab_tracker_client/run_capture.py",
+  "src/lab_tracker_client/cli_run.py",
+  "src/lab_tracker_client/format_sniffers.py",
+  "src/lab_tracker/gs1.py",
+  "src/lab_tracker/photo_codes.py",
+  "src/lab_tracker_client/agent_session.py",
+  "src/lab_tracker_client/agent_hooks.py",
+  "src/lab_tracker_client/watch_touch.py",
+  "src/lab_tracker_client/cli_agent.py",
   "src/lab_tracker/patching.py",
   "src/lab_tracker/claim_effective_status.py",
   "src/lab_tracker/repository.py",
@@ -149,7 +185,14 @@ files = [
   "src/lab_tracker/graph_query.py",
   "src/lab_tracker/coverage_query.py",
   "src/lab_tracker/services/provenance_id_matches.py",
+  "src/lab_tracker/services/provenance_tree_matches.py",
   "src/lab_tracker/services/provenance_detection_stage.py",
+  "src/lab_tracker/services/session_clock.py",
+  "src/lab_tracker/services/provenance_time_windows.py",
+  "src/lab_tracker/services/session_suggestions.py",
+  "src/lab_tracker/services/graph_draft_day_log.py",
+  "src/lab_tracker/services/graph_draft_capture_setup.py",
+  "src/lab_tracker/capture_setup_catalog.py",
   "src/lab_tracker/provider_error_redaction.py",
   "src/lab_tracker/client_release.py",
   "src/lab_tracker/capture_client_release.py",
@@ -186,6 +229,7 @@ files = [
   "src/lab_tracker/bounded_subprocess.py",
   "src/lab_tracker/_windows_job.py",
   "src/lab_tracker/application",
+  "src/lab_tracker/capture_channels",
   "src/lab_tracker/graph_drafting.py",
   "src/lab_tracker/draft_quality.py",
   "src/lab_tracker/services/shared.py",

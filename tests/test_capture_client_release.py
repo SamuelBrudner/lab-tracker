@@ -219,12 +219,15 @@ def test_every_stale_source_on_a_machine_is_judged_on_its_own() -> None:
     assert current_figure.update_notice is None
 
 
-def test_a_patch_release_gap_is_reported_but_never_nags() -> None:
+def test_a_patch_release_gap_gets_a_notice() -> None:
     judged = _judge(_watch("0.5.0"), server=ReleaseIdentity(version="0.5.3", revision="b" * 40))
 
     assert judged.release_status == "behind"
-    assert judged.update_recommended is False
-    assert judged.update_notice is None
+    assert judged.update_recommended is True
+    notice = judged.update_notice
+    assert notice is not None
+    assert "release 0.5.0" in notice
+    assert "0.5.3" in notice
 
 
 @pytest.mark.parametrize(
@@ -263,6 +266,15 @@ def test_a_predating_client_is_unknown_while_the_server_release_is_unknown() -> 
 
 def test_a_client_that_cannot_read_its_own_release_is_unknown_not_predating() -> None:
     judged = _judge(_metadata(FIGURE_ADAPTER, capture_client_version=UNKNOWN_VERSION))
+
+    assert judged.release_status == "unknown"
+    assert judged.update_recommended is False
+    assert judged.update_notice is None
+
+
+def test_a_capture_with_an_oversized_client_version_is_unknown_not_an_error() -> None:
+    # The version is stored capture metadata, so it is untrusted input.
+    judged = _judge(_watch("9" * 5000))
 
     assert judged.release_status == "unknown"
     assert judged.update_recommended is False

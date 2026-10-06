@@ -1,9 +1,24 @@
 name: release
 
 on:
+  # A maintainer pushes the annotated vX.Y.Z tag (docs/versioning.md).
   push:
     tags:
       - "v*.*.*"
+  # Or auto-release.yml calls this once main's CI passes on a commit whose
+  # project.version has no tag yet. A tag pushed with GITHUB_TOKEN would not
+  # start the push run above, so this run creates the tag itself, and only
+  # after every check below has passed on that commit.
+  workflow_call:
+    inputs:
+      tag:
+        description: The vX.Y.Z tag to create and release.
+        required: true
+        type: string
+      sha:
+        description: The commit the new tag points at.
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -15,8 +30,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      # A called run's github.ref is main, so the tag comes from the caller.
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.sha || github.ref }}
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
@@ -30,7 +50,7 @@ jobs:
       - name: Install Python dependencies
         run: uv sync --frozen --extra test --extra lint
       - name: Verify release tag
-        run: uv run --frozen python scripts/verify_release.py --tag "$GITHUB_REF_NAME"
+        run: uv run --frozen python scripts/verify_release.py --tag "$RELEASE_TAG"
       - name: Lint
         run: uv run --frozen ruff check .
       - name: Test
@@ -52,7 +72,26 @@ jobs:
           assert server_version == expected, (server_version, expected)
           assert client_version == expected, (client_version, expected)
           PY
+      - name: Create the release tag
+        if: inputs.sha
+        env:
+          RELEASE_SHA: ${{ inputs.sha }}
+        run: |
+          # A re-run after a failed GitHub Release step finds the tag already
+          # pushed: keep it if it names this commit, refuse if it names another.
+          tagged="$(git ls-remote --tags origin "refs/tags/$RELEASE_TAG^{}" | cut -f1)"
+          if [ "$tagged" = "$RELEASE_SHA" ]; then
+            echo "$RELEASE_TAG already points at $RELEASE_SHA."
+            exit 0
+          elif [ -n "$tagged" ]; then
+            echo "::error::$RELEASE_TAG already points at $tagged, not $RELEASE_SHA."
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$RELEASE_TAG" -m "Lab Tracker $RELEASE_TAG" "$RELEASE_SHA"
+          git push origin "refs/tags/$RELEASE_TAG"
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+        run: gh release create "$RELEASE_TAG" dist/* --verify-tag --generate-notes

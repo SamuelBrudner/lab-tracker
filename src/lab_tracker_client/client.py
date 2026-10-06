@@ -25,6 +25,7 @@ from lab_tracker.assistant_next_questions import (
     build_next_questions_payload,
 )
 from lab_tracker.client_release import ReleaseIdentity, installed_release
+from lab_tracker.file_watch import NotRegularFileError, open_regular_file
 from lab_tracker.instance_url import (
     BASE_URL_ENV,
     DEFAULT_BASE_URL,
@@ -183,6 +184,17 @@ def capture_host_metadata() -> dict[str, NoteMetadataScalar]:
     the server compares each capture source's newest capture with its own
     release to name a stale client ("update lab-tracker on the machine watching
     fly_walking_data") in the daily review.
+
+    It reaches every capture queued through ``watch.make_event`` (``lt watch``,
+    ``lt run``, ``lt pipeline``, coding-agent session, notebook and git capture),
+    ``hpc.make_event``, ``repo.make_event``, and figure capture (``lt capture
+    file`` included, so the R package's captures record the release of the
+    ``lt`` they run). A note made by hand or import (``upsert_note``,
+    ``quick_capture``, ``upload_note_file``, ``lt note``, ``lt quick``,
+    ``lt import-folder``) and the MATLAB package do not record it, so they
+    carry no install id or client release of their own and name no stale
+    client, unless a caller writes a ``capture_install_id`` into the note's
+    metadata by hand.
     """
 
     metadata: dict[str, NoteMetadataScalar] = {}
@@ -1573,19 +1585,33 @@ class LabTracker:
         targets: Sequence[EntityRef | Mapping[str, Any] | tuple[str, str] | str] = (),
         observed_at: str | datetime | None = None,
         client_capture_id: str | None = None,
+        payload: bytes | None = None,
     ) -> EvidenceImportResult:
-        path = Path(file_path).expanduser().resolve()
-        if not path.is_file():
-            raise LTValidationError(f"Evidence path is not a file: {path}")
-        # Reject an oversize file before reading it into memory. The bytes are
-        # then read exactly once: the same snapshot is hashed and uploaded, so a
-        # concurrent write between the read and the upload cannot desync the
-        # content hash from the transferred bytes.
-        self._preflight_upload(path)
-        payload = _read_non_empty_file(
-            path,
-            empty_message="Evidence file must not be empty.",
-        )
+        """Stage one local file as an evidence note, skipping known content.
+
+        ``payload`` is the file's bytes when the caller has already read and
+        checked them (the watch sync verifies them against the scanned hash);
+        ``file_path`` is then not opened again and only names the evidence.
+        """
+
+        path = Path(file_path).expanduser()
+        # Supplied bytes are not re-read, so their path only names them and is
+        # not resolved again (a symlink swapped in later must not rename them).
+        path = path.resolve() if payload is None else path.absolute()
+        if payload is None:
+            if not path.is_file():
+                raise LTValidationError(f"Evidence path is not a file: {path}")
+            # Reject an oversize file before reading it into memory. The bytes
+            # are then read exactly once: the same snapshot is hashed and
+            # uploaded, so a concurrent write between the read and the upload
+            # cannot desync the content hash from the transferred bytes.
+            self._preflight_upload(path)
+            payload = _read_non_empty_file(
+                path,
+                empty_message="Evidence file must not be empty.",
+            )
+        elif not payload:
+            raise LTValidationError("Evidence file must not be empty.")
         content_hash = _bytes_sha256(payload)
         resolved_source_uri = source_uri or path.as_uri()
         resolved_external_id = source_external_id or resolved_source_uri
@@ -1871,10 +1897,23 @@ def _bytes_sha256(payload: bytes) -> str:
 
 
 def _read_non_empty_file(path: Path, *, empty_message: str) -> bytes:
+    # One descriptor, checked as a regular file and size-capped through that
+    # descriptor, so a path swapped after the caller's checks (to a FIFO, a
+    # device, or a larger file) is refused instead of blocking the read or
+    # overrunning the cap.
     try:
-        payload = path.read_bytes()
+        with open_regular_file(path) as handle:
+            size = os.fstat(handle.fileno()).st_size
+            payload = b"" if size > MAX_UPLOAD_BYTES else handle.read(MAX_UPLOAD_BYTES + 1)
+    except NotRegularFileError as exc:
+        raise LTValidationError(f"Evidence path is not a file: {path}") from exc
     except OSError as exc:
         raise LTValidationError(f"Could not read evidence file {path}: {exc}") from exc
+    if size > MAX_UPLOAD_BYTES or len(payload) > MAX_UPLOAD_BYTES:
+        raise LTValidationError(
+            f"Upload file is {max(size, len(payload))} bytes, over the "
+            f"{MAX_UPLOAD_BYTES}-byte limit: {path}"
+        )
     if not payload:
         raise LTValidationError(empty_message)
     return payload

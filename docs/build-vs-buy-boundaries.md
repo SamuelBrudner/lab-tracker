@@ -114,6 +114,13 @@ edges against questions and claims with no double-entry. Labs that run a pipelin
 framework get the epistemic layer for free; labs that run ad-hoc scripts get the
 same edges from output capture plus the content-hash join.
 
+Status (2026-09-28): the hooks exist for Snakemake, Nextflow, Kedro, and DVC
+(`lt pipeline report` and `lab_tracker_client.integrations`; see
+[pipeline-capture.md](pipeline-capture.md)). They stage one evidence note per
+run carrying the declared inputs and outputs as hashed pointers; the
+`used`/`wasGeneratedBy` meaning is still proposed and accepted through review
+rather than written directly, and no catalog or runner is involved.
+
 ## Anti-Scope Guardrails
 
 Lab Tracker should not add:

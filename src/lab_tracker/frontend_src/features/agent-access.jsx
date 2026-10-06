@@ -156,35 +156,6 @@ function repoCommands(project, canStageEvidence) {
   return commands;
 }
 
-function clientMcpCommands(clientSetup) {
-  if (!clientSetup) {
-    return [];
-  }
-  const commands = [
-    {
-      command: "claude mcp add --transport stdio --scope user lab-tracker -- lt-mcp",
-      title: "Claude Code: register for your user account (optional with repo .mcp.json)",
-    },
-    {
-      command: "claude mcp list",
-      title: "Claude Code: check the connection",
-    },
-    {
-      command: "codex mcp add lab-tracker -- lt-mcp",
-      title: "Codex CLI: register Lab Tracker MCP",
-    },
-    {
-      command: "codex mcp list",
-      title: "Codex CLI: confirm registration",
-    },
-    {
-      command: clientSetup.verifyMcpCommand,
-      title: "For either client: verify MCP health, auth, and client revision",
-    },
-  ];
-  return commands;
-}
-
 function CommandSnippet({ title, command, onCopy }) {
   return (
     <div className="command-snippet">
@@ -198,6 +169,47 @@ function CommandSnippet({ title, command, onCopy }) {
         <code>{command}</code>
       </pre>
     </div>
+  );
+}
+
+function ClientMcpGuide({ clientSetup, copyText }) {
+  const snippet = (item) => (
+    <CommandSnippet
+      key={item.command}
+      title={item.title}
+      command={item.command}
+      onCopy={() => copyText(item.command, `${item.title} command copied.`)}
+    />
+  );
+  return (
+    <>
+      <p className="subtle">{clientSetup.mcpClientsIntro}</p>
+      {clientSetup.mcpClients.map((client) => (
+        <React.Fragment key={client.id}>
+          <p>
+            <strong>{client.name}</strong>
+          </p>
+          <p className="subtle">{client.guidance}</p>
+          {client.commands.map(snippet)}
+        </React.Fragment>
+      ))}
+      {snippet({
+        command: clientSetup.verifyMcpCommand,
+        title: clientSetup.mcpVerifyTitle,
+      })}
+      <p className="subtle">
+        {clientSetup.mcpVerifyNote}{" "}
+        {/* A new tab: this page holds the once-shown token only in its state. */}
+        <a
+          href={clientSetup.clientDocsUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          {clientSetup.clientDocsLabel}
+        </a>
+        .
+      </p>
+    </>
   );
 }
 
@@ -421,7 +433,6 @@ function AgentAccessPage({
     `lt setup connect --base-url ${baseUrl}` +
     (projectId ? ` --project ${projectId}` : "") +
     " --yes";
-  const mcpCommands = clientMcpCommands(clientSetup);
   const installCommands = clientSetup
     ? [
         {
@@ -534,29 +545,15 @@ function AgentAccessPage({
                   }
                 />
               ))}
-              <p className="subtle">
-                Choose the commands for your client below. Claude Code can use
-                the generated repository <code>.mcp.json</code>; approve the server
-                when prompted. Use user registration if you need access outside
-                that repository. These are local CLI instructions.
-              </p>
-              {mcpCommands.map((item) => (
-                <CommandSnippet
-                  key={item.command}
-                  title={item.title}
-                  command={item.command}
-                  onCopy={() =>
-                    copyText(item.command, `${item.title} command copied.`)
-                  }
-                />
-              ))}
+              <ClientMcpGuide clientSetup={clientSetup} copyText={copyText} />
               <p className="subtle">
                 The pinned tool and Python dependency come from the same
                 immutable revision as this server. The repo setup installs the
                 Lab Tracker setup skill into the Claude and Codex user skill
                 homes and writes repo-level MCP configuration. The MCP verifier
                 launches <code>lt-mcp</code>, checks health, and makes a project
-                read; <code>codex mcp list</code> alone checks registration.
+                read; a registration listing such as <code>codex mcp list</code>{" "}
+                checks registration only.
               </p>
             </>
           ) : (
@@ -720,25 +717,7 @@ function AgentAccessPage({
                       }
                     />
                   ))}
-                  <p className="subtle">
-                    Choose the commands for your client below. Claude Code can use
-                    the generated repository <code>.mcp.json</code>; approve the server
-                    when prompted. Use user registration if you need access outside
-                    that repository. These are local CLI instructions.
-                  </p>
-                  {mcpCommands.map((item) => (
-                    <CommandSnippet
-                      key={item.command}
-                      title={item.title}
-                      command={item.command}
-                      onCopy={() =>
-                        copyText(
-                          item.command,
-                          `${item.title} command copied.`
-                        )
-                      }
-                    />
-                  ))}
+                  <ClientMcpGuide clientSetup={clientSetup} copyText={copyText} />
                   <p className="subtle">
                     The exact project id is included in the connection profile,
                     repository binding, and hook commands. Repo setup installs
@@ -747,6 +726,20 @@ function AgentAccessPage({
                     <code>.gemini/settings.json</code>, and agent instruction
                     files. <code>lt setup status</code> reports the final local
                     state.
+                  </p>
+                  <p className="subtle">
+                    Optional capture, each previewed with <code>--dry-run</code>{" "}
+                    and applied with <code>--yes</code>:{" "}
+                    <code>lt setup autotrack</code> captures figures notebooks
+                    save or display (<code>--jupyter</code>,{" "}
+                    <code>--scripts</code>, and <code>--r</code> extend it to
+                    notebook pages, plain scripts, and R),{" "}
+                    <code>lt setup schedule</code> syncs watch folders on a
+                    timer, and <code>lt setup agent-hooks</code> keeps
+                    coding-agent session retrospectives. With no setup,{" "}
+                    <code>lt run -- &lt;command&gt;</code> records an analysis
+                    run and <code>lt pipeline report</code> records a pipeline
+                    run. The installed setup skill walks through each one.
                   </p>
                 </>
               ) : (

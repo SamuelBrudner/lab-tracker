@@ -70,7 +70,11 @@ research record:
   dataset ids declared for a watch (flags, watch entries, or manifests)
   become the staged note's targets, labelled
   `declared_target_source=explicit`, so a stale id fails the sync loudly
-  instead of landing as metadata only. A session the client can resolve on
+  instead of landing as metadata only. A manifest cannot choose the project
+  or name a local file to upload: its note is rendered from the summary,
+  and the project comes from the flag, the watch entry, or the checkout
+  binding. A watch root must be a real folder or file, not a symlink to one,
+  and sync refuses to upload a hard-linked file. A session the client can resolve on
   its own (`--session` as a UUID or link code, an `LT-<code>` link code in
   the watched folder or file name, or the checkout's `lt session use`
   context, overridden by `LAB_TRACKER_SESSION_ID`) becomes that target the
@@ -128,6 +132,121 @@ research record:
   drains after each commit, and `lt outbox status|sync` and the scheduled
   `lt watch run` cover every adapter outbox (watch, repo, hpc). See
   [repo-report-capture.md](repo-report-capture.md).
+- Low-effort capture surfaces added 2026-09-28 (mapped for people in
+  [capture-guide.md](capture-guide.md)). Every one lands staged notes
+  or proposed links only, follows the bound-project rule wherever it fires in
+  every directory or process, and is opt-in through a consent-gated setup verb
+  or operator configuration:
+  - **Notebooks and scripts.** Inside IPython, `autotrack()` also captures the
+    exact bytes of matplotlib figures a cell displays inline, coalesced per
+    cell. `lt setup autotrack --jupyter` enables the
+    `lab_tracker_client.notebook_capture` Jupyter Server extension, which files
+    each bound notebook's saves as one staged "notebook page" per local day
+    (pointer, SHA-256, bounded markdown text, one summary line per code cell),
+    held by the reserved `payload.deliver_after` key until that day ends.
+    `lt setup autotrack --scripts` installs a `.pth` hook so plain scripts
+    capture figures they save or `plt.show()`. `lt setup autotrack --r` adds a
+    managed `~/.Rprofile` block for `ggsave()` and the file graphics devices.
+    `LAB_TRACKER_AUTOTRACK=0` disables all of them. See
+    [notebook-and-script-capture.md](notebook-and-script-capture.md) and
+    [lab-tracker-r.md](lab-tracker-r.md).
+  - **Any runtime.** `lt capture file PATH` is the language-neutral fail-soft
+    single-file capture: it prints the result JSON and exits 0 for every
+    capture outcome. MATLAB `labtracker.savefig`/`uploadFigure` now queue
+    unreachable saves into the checkout's watch outbox, resolve the project
+    from `lt_ids.json`, and record the active session and `run_*` git facts.
+  - **Commands and pipelines.** `lt run [options] -- <command>` exits with the
+    command's exact code and queues one staged note per run (redacted argv, git
+    state, lockfile fingerprint, SHA-256 pointers for files under declared
+    `--output` folders). `lt pipeline report|nextflow|dvc` and the Snakemake
+    and Kedro adapters in `lab_tracker_client.integrations` record one staged
+    note per pipeline run from its declared inputs and outputs, never a
+    catalog. `.github/actions/lab-tracker-repo-report` runs `lt repo report`
+    in CI under the post-commit hook's `<normalized-remote>@<sha>` identity.
+    `lt hpc submit` writes a run manifest into the submit directory, and
+    `lt hpc epilog` with `scripts/slurm-task-epilog.sh` finishes submitted runs
+    from an admin-installed TaskEpilog. See [run-capture.md](run-capture.md),
+    [pipeline-capture.md](pipeline-capture.md), and
+    [hpc-analysis-capture.md](hpc-analysis-capture.md).
+  - **Identity for uncommitted code.** Captures stamp the git tree id of the
+    working copy (`run_git_worktree_tree`, `capture_git_worktree_tree`,
+    `hpc_git_worktree_tree`), computed read-only against a scratch index and
+    bounded; `lt repo` commit notes stamp `repo_git_tree`.
+    `LAB_TRACKER_WORKTREE_TREE=0` turns the computation off.
+  - **Coding-agent sessions.** `lt setup agent-hooks` is an explicit opt-in
+    that `lt setup init` never makes. It writes the personal, git-ignored
+    `.claude/settings.local.json` by default; only `--shared`, with a warning,
+    writes the committed `.claude/settings.json`. Its SessionEnd hook runs
+    `lt agent session-end`, which stages one bounded, redacted retrospective
+    note per session with `request_draft`, so any decision, dead-end, or pivot
+    proposals wait for review; the transcript is never uploaded. Its
+    PostToolUse hook runs `lt watch touch`, which queues exactly what a
+    configured watch scan would capture for one written file.
+    `LAB_TRACKER_AGENT_HOOKS=0` turns both off. See
+    [agent-session-capture.md](agent-session-capture.md).
+  - **Instrument files.** `lt watch` reads bounded FCS, OME-TIFF (DTDs
+    refused), and NWB (`h5py` optional) headers into `format_kind`,
+    `format_acquired_at`, and other `format_*` metadata; a malformed header
+    records `format_sniff_error` and never fails a scan.
+    `LAB_TRACKER_WATCH_FORMAT_SNIFF=0` turns it off.
+  - **Machine-readable labels in photos.** With the optional `decode` extra,
+    image uploads are decoded locally and within fixed bounds for QR codes and
+    barcodes. This is deterministic decoding of machine-readable symbols, not
+    OCR, which stays deferred. It stamps only server-owned metadata:
+    `decoded_session_link_code`, `photo_session_id` (only when exactly one
+    decoded session is in the note's own project), `barcode_gs1_*`, and
+    `barcode_text`. It never blocks an upload, and
+    `LAB_TRACKER_DECODE_PHOTO_CODES` is its kill switch. See
+    [decoded-labels-and-file-headers.md](decoded-labels-and-file-headers.md).
+  - **Bench capture in the app.** A chrome-free kiosk scan station
+    (`/app/capture?kiosk=1`, opened from the Devices page or a session's
+    page), NFC station tags that carry a session's capture
+    link, a per-device trusted share window (1, 2, or 4 hours, one project and
+    session), multi-photo session import, a skippable voice debrief when a
+    session closes, `POST /notes/voice-capture` for phone shortcuts (raw audio
+    body, quick-capture auth, bounded by `max_upload_bytes`), and a desktop
+    bookmarklet that prefills the capture page and saves nothing until the
+    person confirms. Every path is tagged `capture_channel`. See
+    [bench-capture.md](bench-capture.md).
+  - **Server capture channels.** Operator-opt-in signed Slack capture (a slash
+    command and a message shortcut, authored by the mapped person),
+    email-to-capture through a per-(user, project) HMAC plus-address accepted
+    only from the mapped sender and shown only to that person (Devices →
+    Email capture), instrument-calendar (ICS) bookings, and
+    registered-store scans. Bookings and store files become SYSTEM-authored
+    staged notes; channel principals are non-interactive and can never accept
+    or commit. Pollers run from the optional ticker, `POST
+    /integrations/run-due`, or `lab-tracker integrations poll`, each at most
+    once per minimum interval. See
+    [server-capture-channels.md](server-capture-channels.md).
+  - **New deterministic proposals.** Each batch execution also runs a
+    worktree-tree detector (`basis: worktree_tree_match`, a capture to the
+    earliest note whose `repo_git_tree` is the same tree) and a time-window
+    detector (`basis: time_window_match`, a recent capture that names no
+    session, made by `format_acquired_at` or else its observed time inside
+    exactly one session window run by the capture's own author when both
+    authors are known). `photo_session_id` joins the exact-id detector's
+    session keys. All of them write PROPOSED links only, and a declined pair
+    never returns.
+  - **Sessions as the clock.** `GET /projects/{project_id}/session-suggestions`
+    computes read-only suggestions: close a quiet session, record a
+    sessionless bench day (offered to the captures' own author), or cover an
+    instrument booking. A person applies one from the Session suggestions card
+    through the ordinary session and note-target routes; `POST /sessions`
+    accepts a back-dated `started_at`. Batch drafts append one deterministic,
+    model-free day-log `create_note` proposal per session with three or more
+    short bench captures; it is recorded in `context_packet.day_logs` and
+    committed with `origin_model=deterministic_day_log`, and each capture's own
+    proposals stay available. Batch drafts, and no others, may also carry
+    capture-setup tips: the server detects capture-setup gaps in the
+    reviewer's own staged captures and offers them to the drafter as trusted
+    candidates, the drafter picks the ones whose captures it could not
+    interpret and explains each, and the picks, with the server's own setup
+    steps, are recorded in `context_packet.capture_setup` and shown read-only
+    on the review page. Tips are advice, not proposals: never accepted,
+    committed, or delegated, never counted as clarifications, and with no
+    fallback when the drafter picks none. See
+    [session-suggestions.md](session-suggestions.md).
 - Package-pinned code-facing idiom teaching rendered from one generator into
   consent-gated managed agent surfaces, with the advisory
   `lab-tracker://code-conventions` MCP resource treating the package text as
@@ -184,7 +303,11 @@ research record:
   recent rejections) and the re-draft of a rejected note draft is seeded with
   the rejected operations and their review notes; no validator rewrites,
   merges, or suppresses proposals — duplicates are surfaced to the model and
-  left to the reviewer.
+  left to the reviewer. Capture-setup tips are not proposals, so that rule
+  does not cover them: the server keeps only picks that name an offered
+  candidate and cite its notes, replaces an unsafe explanation with its own
+  sentence, keeps at most six, and does not offer a kind recommended to the
+  same reviewer in the same project within the last 7 days.
 - Ongoing-project member onboarding as a prospective-first retained workflow:
   one immutable project-visible checkpoint per project/member, one to three
   individually resolved live-question alignments, a deterministic labelled
@@ -265,7 +388,7 @@ research record:
   `capture_install_id`/`capture_host_label`). Each listed source also carries
   its capture health: how many notes it delivered in the last `recent_days`
   (7), how many of its staged notes are still unreviewed, and a `quiet` flag
-  for a scheduled source (the `lt watch` family or `lt-hpc`) that captured
+  for a scheduled source (the `lt watch` family or `lt hpc`) that captured
   inside `quiet_window_days` (30) but not inside the recent window, so a
   stalled scheduler, expired token, or moved folder is visible on the home
   page's Capture health card instead of showing up as an emptier review
@@ -523,11 +646,15 @@ research record:
   [external-artifact-resolution-design.md](external-artifact-resolution-design.md).
 - Advisory client-update awareness keyed to release versions: `GET /health`
   reports the server's `[project].version` and source revision; `lt doctor` and
-  `lt setup status` check that the installed `lt-mcp` imports and compare the
-  client's release with the server's; stdio `lt-mcp` prefixes its MCP
-  instructions and adds `_lab_tracker_update_notice` to every tool result when
-  an update is recommended; and captures record the capturing client's
-  release. Each coverage `capture_sources` row carries its newest capture's
+  `lt setup status` check that the installed `lt-mcp` imports (in a child
+  interpreter) and compare the client's release with the server's (`lt doctor`
+  fails soft: a server it cannot reach is a warning, never a failure); stdio `lt-mcp` prefixes its MCP instructions and adds
+  `_lab_tracker_update_notice` to every tool result when an update is
+  recommended; and captures queued through the watch outbox (`lt watch`,
+  `lt run`, `lt pipeline`, agent sessions, notebook and git capture), by
+  `lt hpc`, by the repo hooks, and by figure capture record the capturing
+  client's release (a note made by hand or import, and the MATLAB package, do
+  not). Each coverage `capture_sources` row carries its newest capture's
   `capture_client_version`/`capture_client_revision`, its `release_status`
   against the report's `server_release`, `update_recommended`, the
   `watched_folder` of a watch source, and a per-source `update_notice` when
@@ -538,10 +665,19 @@ research record:
   an analysis repo's pinned `uv add` dependency; the home page's Capture
   health card marks every source whose client is behind with a "client
   behind" pill that carries the notice when there is one. A capture queued
-  offline and drained later carries the release that queued it. Only a newer
-  server `MAJOR.MINOR` produces a notice ([versioning.md](versioning.md)); a
-  PATCH-only gap and revision drift within a release are reported, never
-  suggested. None of these checks blocks capture, a session, or MCP startup.
+  offline and drained later carries the release that queued it. Any newer
+  server release, a PATCH release included, produces a notice
+  ([versioning.md](versioning.md)); revision drift within one release is
+  reported, never suggested. None of these checks blocks capture, and each is limited so that
+  a slow answer does not hold a session or MCP startup open: the import check
+  has a 15-second limit, and the `lt setup status` and `lt-mcp` `/health`
+  probes have 2-second connect and read timeouts and a 4-second deadline on the
+  whole response, headers included, so a server that trickles its headers or
+  its body is cut at the deadline (give or take one read). Getting connected is
+  outside that deadline: name resolution takes as long as the system resolver
+  takes, and the connect timeout applies to each address a name resolves to.
+  A failed `lt-mcp` probe, including a client that cannot be built, is written
+  to stderr and startup continues.
   See [setup.md](setup.md#know-when-a-client-install-is-broken-or-behind-its-server).
 - Read-only assistant and MCP endpoints over the retained graph. Remote agents
   can orient with `graph_overview`, locate a typed anchor with `search_graph`,

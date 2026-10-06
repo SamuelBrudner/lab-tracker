@@ -111,6 +111,17 @@ that destination through your normal off-machine backup process.
   dataset files, and visualization assets (default: `104857600`, 100 MiB).
   Uploads that exceed the limit are rejected and partial local files are
   cleaned up.
+- `LAB_TRACKER_DECODE_PHOTO_CODES`: decode QR codes and barcodes in photo
+  uploads (`/notes/upload-file`, `/notes/quick-capture`) into
+  `decoded_session_link_code`, `photo_session_id`, `barcode_gs1_*`, and
+  `barcode_text` note metadata (default: `true`). It takes effect only when
+  the optional `decode` extra (`zxing-cpp`, Pillow) is installed; decoding is
+  local and deterministic (not OCR), sends nothing outside the instance, and
+  never fails or blocks an upload. Set `false` to turn it off. See
+  [decoded-labels-and-file-headers.md](decoded-labels-and-file-headers.md).
+- `LAB_TRACKER_DECODE_PHOTO_CODES_TIMEOUT_SECONDS`: longest an upload waits for
+  its photo's decode before it proceeds without decoded metadata (default:
+  `1.5`; greater than `0` and at most `10`)
 
 ### Scoped store-authority grants
 
@@ -924,6 +935,87 @@ does not target the deployed Postgres database. The optional
 one-shot external bridge; it lets the profile read the app's existing runtime
 secret from a read-only volume rather than duplicating that secret in Compose.
 
+### Server capture channels
+
+Every channel is off until configured, and every capture lands as a **staged**
+note carrying pointers and bounded text — never a committed record. A person
+who acted (a Slack save, a verified email) authors their capture; a record the
+server fetched itself (a calendar booking, a new file in a registered store) is
+authored by the `SYSTEM` principal and labelled with `capture_channel`. Every
+setting below is validated at startup and a malformed or half-configured
+channel refuses to start, naming the variable (never its value). Setup, the
+email threat model, the Slack app manifest, and limits are in
+[`server-capture-channels.md`](server-capture-channels.md).
+
+The three pollers (email, bookings, store scans) run from the optional
+in-process ticker, from `POST /integrations/run-due` (an admin session, an
+admin `all`-scope token, or the admin `batch_run_due` scheduler token), or from
+`lab-tracker integrations poll` under cron. Each poller runs at most once per
+minimum interval whoever triggers it, is bounded, and fails on its own without
+stopping the others or the daily-review batch dispatch.
+
+- `LAB_TRACKER_INTEGRATIONS_POLLER_ENABLED`: start the in-process ticker that
+  runs due capture pollers (default: `false`; it also stays idle while no
+  poller is configured)
+- `LAB_TRACKER_INTEGRATIONS_POLL_MIN_INTERVAL_SECONDS`: minimum seconds between
+  two runs of the same poller across the ticker, the HTTP trigger, and the CLI
+  (default: `300`; `60`–`86400`)
+- `LAB_TRACKER_INTEGRATIONS_STATE_PATH`: JSON file holding each poller's last
+  run and each store scan's baseline (default:
+  `<LAB_TRACKER_NOTE_STORAGE_PATH>/.integrations-poll-state.json`; an explicit
+  value must be absolute); written atomically with mode `0600`
+- `LAB_TRACKER_CAPTURE_USER_EMAILS`: JSON object mapping a sender email address
+  to a Lab Tracker user id or username, e.g.
+  `{"alice@lab.example.org": "alice"}`. Email capture accepts mail only from a
+  mapped address, and a Slack user may be mapped by one of these addresses
+- `LAB_TRACKER_SLACK_SIGNING_SECRET`: the Slack app's signing secret; enables
+  `POST /integrations/slack/commands` and `/integrations/slack/interactivity`,
+  which are authenticated by Slack's `v0` HMAC over the raw body with a
+  five-minute replay window instead of a bearer token (unset: both answer
+  `404`)
+- `LAB_TRACKER_SLACK_WORKSPACE_URL`: `https://<workspace>.slack.com`, used to
+  build message permalinks (optional)
+- `LAB_TRACKER_SLACK_CHANNEL_PROJECTS`: JSON object mapping a Slack channel id
+  to a Lab Tracker project UUID, e.g. `{"C0123ABCD": "<project uuid>"}`; a
+  capture from an unmapped channel is refused with an ephemeral reply
+- `LAB_TRACKER_SLACK_USERS`: JSON object mapping a Slack user id to a Lab
+  Tracker user id, username, or an address in
+  `LAB_TRACKER_CAPTURE_USER_EMAILS`; an unmapped user is refused with an
+  ephemeral reply and nothing is stored
+- `LAB_TRACKER_EMAIL_CAPTURE_ADDRESS`: the base capture address, e.g.
+  `capture@lab.example.org` (no `+` extension); each person's per-project
+  address is `capture+<token>@lab.example.org` where the token is a truncated
+  HMAC of the user and project under `LAB_TRACKER_AUTH_SECRET_KEY` (so rotating
+  that secret changes every capture address). Requires a non-placeholder auth
+  secret and the IMAP settings below
+- `LAB_TRACKER_EMAIL_CAPTURE_IMAP_HOST`: IMAP server hostname (implicit TLS
+  with certificate verification)
+- `LAB_TRACKER_EMAIL_CAPTURE_IMAP_PORT`: IMAP port (default: `993`)
+- `LAB_TRACKER_EMAIL_CAPTURE_IMAP_USERNAME`: mailbox login
+- `LAB_TRACKER_EMAIL_CAPTURE_IMAP_PASSWORD` / `LAB_TRACKER_EMAIL_CAPTURE_IMAP_PASSWORD_FILE`:
+  the mailbox password, or a file holding it (read at each poll, so a rotated
+  file needs no restart); set exactly one
+- `LAB_TRACKER_EMAIL_CAPTURE_IMAP_FOLDER`: folder to poll for unseen mail
+  (default: `INBOX`)
+- `LAB_TRACKER_EMAIL_CAPTURE_PROCESSED_FOLDER`: optional folder a processed
+  message is moved to (`MOVE`, else `COPY` plus `\Deleted` without expunge);
+  unset, processed mail is only flagged `\Seen`
+- `LAB_TRACKER_BOOKING_CALENDARS`: JSON list of instrument calendar feeds,
+  `[{"project_id": "<uuid>", "url": "https://…/feed.ics", "instrument":
+  "Confocal 1", "timezone": "America/New_York"}]` (`timezone`, default `UTC`,
+  applies to floating times and all-day dates). Feeds are HTTPS-only and
+  fetched through the outbound HTTP policy above, capped at 2 MiB and 20
+  seconds; the URL (which often embeds a secret token) is never logged or
+  stored
+- `LAB_TRACKER_STORE_SCANS`: JSON list of registered-store scans,
+  `[{"project_id": "<uuid>", "store": "lab-onedrive", "prefix": "flow",
+  "patterns": ["*.fcs"], "include_existing": false}]`. `local_fs` stores must
+  lie inside `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS`; rclone-backed stores must be
+  in `LAB_TRACKER_RCLONE_ALLOWED_REMOTES`; other kinds cannot be listed
+- `LAB_TRACKER_STORE_SCAN_HASH_MAX_BYTES`: largest file a scan streams to
+  compute its SHA-256 (default: `67108864`, 64 MiB; `0`–`536870912`); larger
+  or unreadable files are staged with `content_hash_pending=true`
+
 ### MCP service client (`lt-mcp`)
 
 These variables are read by the MCP server process, not the FastAPI app. The
@@ -1011,14 +1103,25 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
   hostname)
 - `LAB_TRACKER_AUTOTRACK`: `0`, `false`, `no`, or `off` disables the matplotlib
   figure autotrack hook everywhere, including the IPython startup file that
-  `lt setup autotrack` installs (default: on). The hook captures only saves
-  whose project comes from `autotrack(project_id=...)`,
-  `LAB_TRACKER_PROJECT_ID`, or the checkout's `lt_ids.json`
+  `lt setup autotrack` installs, its capture of figures a notebook displays
+  inline, the Jupyter notebook save hook (`--jupyter`), the scripts `.pth`
+  hook (`--scripts`, checked at every interpreter start), and the R autotrack
+  hooks, including the `~/.Rprofile` block `lt setup autotrack --r` adds
+  (default: on). The hooks capture only when the project comes from
+  `autotrack(project_id=...)`, `LAB_TRACKER_PROJECT_ID`, or the checkout's
+  `lt_ids.json`; see [notebook-and-script-capture.md](notebook-and-script-capture.md)
+  and [lab-tracker-r.md](lab-tracker-r.md)
+- `LAB_TRACKER_AGENT_HOOKS`: `0`, `false`, `no`, or `off` turns off the
+  coding-agent hooks `lt setup agent-hooks` installs: `lt agent session-end`
+  and `lt watch touch` return at once without reading a transcript or queuing
+  anything (default: on). See [agent session capture](agent-session-capture.md)
 - `LAB_TRACKER_CAPTURE_OUTBOX`: `0`, `false`, `no`, or `off` stops figure
-  captures from queueing into the checkout's watch outbox when the server is
-  unreachable; the save then reports the failure instead (default: on)
+  captures (Python client, `lt capture file`, and the MATLAB package) from
+  queueing into the checkout's watch outbox when the server is unreachable;
+  the save then reports the failure instead (default: on)
 - `LAB_TRACKER_SKILLS_HOME`: install the generated setup skill into this one
-  directory instead of both `~/.claude/skills` and `~/.agents/skills`
+  directory instead of both `~/.claude/skills` and `~/.agents/skills`; use an
+  absolute path, because a relative one resolves against the current directory
 
 #### Git, repo, HPC, and watch capture
 
@@ -1028,8 +1131,12 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
   `LAB_TRACKER_REPO_HOOK_ENABLED` instead (default: on)
 - `LAB_TRACKER_GIT_DRAFT_ENABLED`: older name for
   `LAB_TRACKER_GIT_CAPTURE_ENABLED`, used only when the new name is unset
-- `LAB_TRACKER_LT`: `lt` executable the managed Git and repo hooks run
-  (default: the path recorded when the hook was installed)
+- `LAB_TRACKER_LT`: `lt` executable the managed Git and repo hooks and the R
+  autotrack hooks run (default: the path recorded when the hook or the
+  `~/.Rprofile` block was installed; R then falls back to `lt` on `PATH`); the
+  Slurm `scripts/slurm-task-epilog.sh` template also honours it (default there:
+  the `lt` that submitted the job, recorded in its run manifest, then `lt` on
+  `PATH`)
 - `LAB_TRACKER_PYTHON`: Python interpreter the Windows graph-draft hook
   (`scripts/install-git-graph-draft-hook.ps1`) and `scripts/matlab-smoke.sh`
   run (default: the interpreter recorded at install, or `python3`)
@@ -1040,6 +1147,11 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
   for `lt repo` commit events and `lt git snapshot` alike (default: `3`)
 - `LAB_TRACKER_GIT_TIMEOUT_SECONDS`: timeout in seconds for each `git` probe the
   client runs (default: `10`)
+- `LAB_TRACKER_WORKTREE_TREE`: set to `0`, `false`, `no`, or `off` to stop the
+  client computing the git tree id of the working copy (the identity of
+  uncommitted code) for `run_context`, figure/file captures, `lt run`, and `lt
+  hpc begin`/`finish`; captures then record `*_git_worktree_tree_error:
+  disabled` instead (default: on; see [run-capture.md](run-capture.md))
 - `LAB_TRACKER_GIT_COMMIT` / `LAB_TRACKER_GIT_REPO`: default commit and
   repository for `scripts/create-analysis-graph-draft.py` (repository default:
   the current directory)
@@ -1059,7 +1171,15 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
   `outbox` (defaults: `.lab-tracker/outbox/repo`, `hpc`, and `watch`)
 - `LAB_TRACKER_REPO_RUN_ID` / `LAB_TRACKER_HPC_RUN_ID`: run id for `lt repo` and
   `lt hpc` events when `--run` is not given. `lt hpc` sets the HPC run id,
-  outbox, and config for the job it submits.
+  outbox, and config for the job it submits; a job started with
+  `--export=NONE` finds them in the run manifest `lt hpc submit` writes to
+  the submit directory instead.
+- `LAB_TRACKER_HPC_EPILOG_ENABLED`: `0`, `false`, `no`, or `off` makes
+  `lt hpc epilog` and the `scripts/slurm-task-epilog.sh` TaskEpilog template
+  record nothing for a job or site (default: on)
+- `LAB_TRACKER_PIPELINE_CAPTURE`: `0`, `false`, `no`, or `off` turns off
+  `lt pipeline report`/`nextflow`/`dvc` and the Snakemake and Kedro pipeline
+  adapters without editing the pipeline (default: on)
 - `LAB_TRACKER_SESSION_ID`: session UUID or link code that every figure capture
   and watch scan from this shell or job attaches to; it overrides the
   checkout's active session recorded by `lt session use` and, as a per-shell
@@ -1075,6 +1195,10 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
 - `LAB_TRACKER_SESSION_CONTEXT`: path of the active-session file that `lt
   session use` writes and captures read (default: `.lab-tracker/session.json`
   at the checkout root)
+- `LAB_TRACKER_WATCH_FORMAT_SNIFF`: set to `0` (or `false`/`no`/`off`) to stop
+  `lt watch` from reading FCS, OME-TIFF, and NWB headers into `format_*`
+  note metadata (default: on; reads are bounded and never fail a scan). See
+  [decoded-labels-and-file-headers.md](decoded-labels-and-file-headers.md).
 - `LAB_TRACKER_CONTAINER_REF`: container image reference folded into the
   repository environment fingerprint
 
@@ -1099,7 +1223,7 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
 #### Container image and entrypoint
 
 - `LAB_TRACKER_SOURCE_VERSION`: Docker build argument recorded as the image's
-  OCI version label and environment (default: `0.1.0`)
+  OCI version label and environment (default: `0.2.0`)
 - `LAB_TRACKER_RUNTIME_ENV_DIR`: directory where the entrypoint keeps the
   secrets it generates (default: `/app/data/runtime-env`)
 - `LAB_TRACKER_AUTH_SECRET_KEY_FILE`: file the entrypoint reads the auth secret

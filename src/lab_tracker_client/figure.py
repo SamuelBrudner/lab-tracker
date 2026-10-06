@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import mimetypes
 import os
 import stat
@@ -30,9 +31,11 @@ from lab_tracker_client.capture_project import (
 from lab_tracker_client.client import (
     DECLARED_TARGET_SOURCE_CONFIG_DEFAULT,
     DECLARED_TARGET_SOURCE_KEY,
+    MAX_PAGE_SIZE,
     EntityRef,
     LabTracker,
     LTAPIError,
+    LTConflictError,
     LTError,
     LTRecord,
     LTValidationError,
@@ -47,10 +50,13 @@ from lab_tracker_client.client import (
 from lab_tracker_client.gitinfo import (
     DirtyState,
     HeadCommit,
+    WorktreeTree,
+    _reset_worktree_tree_cache_for_tests,
     git_dirty_state,
     git_head_commit,
     git_output,
     sanitize_remote_url,
+    worktree_tree_id,
 )
 from lab_tracker_client.repo import normalize_remote
 from lab_tracker_client.session_context import (
@@ -63,10 +69,16 @@ FIGURE_CAPTURE_TIMEOUT_SECONDS = 2.5
 FIGURE_CIRCUIT_COOLDOWN_SECONDS = 30.0
 FIGURE_PREVIEW_MAX_BYTES = 2_000_000
 FIGURE_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
+# Upper bound on the working-copy tree computation a plain capture runs before
+# its upload; a slow git records ``capture_git_worktree_tree_error: timeout``
+# instead of holding the user's save. Repeat saves hit a per-process cache.
+CAPTURE_WORKTREE_TREE_TIMEOUT_SECONDS = 2.0
 # SVG is deliberately absent: the server rejects image/svg+xml uploads
 # (scriptable), so a default pattern for it would only produce failures.
 _DEFAULT_IMAGE_PATTERNS = ("*.png", "*.jpg", "*.jpeg", "*.pdf", "*.tif", "*.tiff")
 CAPTURE_OUTBOX_ENV = "LAB_TRACKER_CAPTURE_OUTBOX"
+# Folder inside the watch outbox holding queued in-memory capture bytes.
+QUEUED_PAYLOAD_DIRNAME = "blobs"
 _RUN_CONTEXT: ContextVar[RunContext | None] = ContextVar("lab_tracker_run_context", default=None)
 # True while an explicit capture helper (savefig, capture_figures) is doing the
 # save itself, so an installed autotrack hook does not capture the same file
@@ -125,7 +137,29 @@ SESSION_TARGET_DROPPED_NOTICE = (
 # (session id, project id) pairs the server refused, so later saves in this
 # process skip the target instead of being refused again.
 _REFUSED_SESSION_TARGETS: set[tuple[str, str]] = set()
+# (endpoint, project id, client capture id) -> note id of the staged note a
+# capture id already made, so a re-capture in this process (a notebook cell
+# re-run) finds its note without scanning the project's notes.
+_CAPTURE_NOTE_IDS: dict[tuple[str, str, str], str] = {}
+# A re-capture whose note is not in that cache scans at most this many notes.
+CAPTURE_NOTE_LOOKUP_MAX_NOTES = 5000
+# How the server words the 409 for a capture id replayed with other fields
+# (note_service._ensure_matching_capture_note); any other conflict is a failure.
+CAPTURE_ID_REUSE_MESSAGE = "was already used with different field(s)"
+# A capture never changes a note a person curated (committed or archived).
+# New bytes for such a note become a new staged capture whose metadata names
+# the curated note under this key.
+SUPERSEDES_CAPTURE_NOTE_KEY = "supersedes_capture_note_id"
+SUPERSEDED_NOTE_STATUS_KEY = "supersedes_capture_note_status"
+CAPTURE_REVISION_REASON = "curated_note_kept"
 AUTOTRACK_NO_PROJECT_WHY = "that checkout is not bound to a project (no lt_ids.json)"
+# A plain script is a new process on every run, so under the scripts .pth the
+# unbound notice is remembered in the client config dir: each checkout (or
+# loose folder) is named at most once a week, in a bounded file.
+_PERSISTENT_UNBOUND_NOTICES = [False]
+UNBOUND_NOTICE_FILENAME = "autotrack-notices.json"
+UNBOUND_NOTICE_REPEAT_SECONDS = 7 * 24 * 3600
+UNBOUND_NOTICE_MAX_ENTRIES = 256
 AUTOTRACK_OUTSIDE_CHECKOUT_WHY = (
     "that folder is not inside a git checkout, so no lt_ids.json binds it to a project"
 )
@@ -198,6 +232,10 @@ class RunContext:
     code_line: int = 0
     code_region_hash: str = ""
     extra: dict[str, NoteMetadataScalar] = field(default_factory=dict)
+    # The working copy's git tree id when the context opened (identity for
+    # uncommitted code), or the marker saying why it is unknown.
+    git_worktree_tree: str = ""
+    git_worktree_tree_error: str = ""
 
     def expired(self) -> bool:
         return time.monotonic() >= self.expires_at
@@ -215,6 +253,11 @@ class RunContext:
             metadata["run_git_commit"] = self.git_commit
         elif self.git_commit_error:
             metadata["run_git_commit_error"] = self.git_commit_error
+        metadata.update(
+            WorktreeTree(
+                tree=self.git_worktree_tree, error=self.git_worktree_tree_error
+            ).as_fields("run_git_worktree_tree")
+        )
         if self.repo_remote_url:
             metadata["run_repo_remote_url"] = self.repo_remote_url
         if self.code_file:
@@ -349,6 +392,7 @@ def run_context(
     head = git_head_commit(None)
     git_commit = head.commit
     dirty_state = _git_dirty_state(head)
+    worktree = worktree_tree_id(None)
     context = RunContext(
         captured_at=datetime.now(timezone.utc).isoformat(),
         expires_at=time.monotonic() + max(0.0, float(ttl_seconds)),
@@ -365,6 +409,8 @@ def run_context(
         code_line=int(pointer.get("code_line", 0) or 0),
         code_region_hash=str(pointer.get("code_region_hash", "")),
         extra=resolved_extra,
+        git_worktree_tree=worktree.tree,
+        git_worktree_tree_error=worktree.error,
     )
     return _RunContextManager(context)
 
@@ -526,6 +572,47 @@ def capture(
     )
 
 
+def capture_figure_bytes(
+    payload: bytes,
+    *,
+    filename: str,
+    anchor: str | Path,
+    source_uri: str,
+    logical_id: str,
+    fig: Any = None,
+    client: LabTracker | None = None,
+    project_id: str | None = None,
+    metadata: Mapping[str, NoteMetadataScalar] | None = None,
+    preview_max_bytes: int = FIGURE_PREVIEW_MAX_BYTES,
+    version_every_change: bool = False,
+    require_bound_project: bool = False,
+) -> FigureCaptureResult:
+    """Fail-soft capture of figure bytes that were never saved to a file.
+
+    For a figure a notebook displayed inline or a script only showed:
+    ``filename`` names the capture (its suffix sets the content type),
+    ``anchor`` is the folder whose checkout binds the project (the notebook's
+    or script's), and ``source_uri`` points at where the figure was seen.
+    Nothing is written to disk on a live capture; only when the server is
+    unreachable are the bytes kept in the watch outbox's ``blobs/`` folder so
+    the queued event can deliver them on the next sync.
+    """
+
+    return _capture_saved_figure(
+        fig=fig,
+        path=Path(anchor).expanduser() / Path(filename).name,
+        client=client,
+        project_id=project_id,
+        logical_id=logical_id,
+        metadata=metadata,
+        preview_max_bytes=preview_max_bytes,
+        version_every_change=version_every_change,
+        require_bound_project=require_bound_project,
+        payload=bytes(payload),
+        source_uri=source_uri,
+    )
+
+
 def _capture_saved_figure(
     *,
     fig: Any,
@@ -538,12 +625,16 @@ def _capture_saved_figure(
     version_every_change: bool,
     kind: str = "figure",
     require_bound_project: bool = False,
+    payload: bytes | None = None,
+    source_uri: str | None = None,
 ) -> FigureCaptureResult:
     """Capture one saved file, fail-soft.
 
     ``require_bound_project`` (set by ``autotrack``) skips the save, sending
     and queueing nothing, unless its project comes from an explicit argument,
     ``LAB_TRACKER_PROJECT_ID``, or the saved file's checkout binding.
+    ``payload`` and ``source_uri`` (see :func:`capture_figure_bytes`) capture
+    in-memory bytes named by ``path`` instead of reading a file there.
     """
 
     resolved_path = Path(path).expanduser()
@@ -565,10 +656,13 @@ def _capture_saved_figure(
                 **{**result_defaults, "action": "skipped", "reason": AUTOTRACK_UNBOUND_REASON}
             )
         bound_project_id = capture_project.project_id if capture_project else None
-        file_size = resolved_path.stat().st_size
+        file_size = len(payload) if payload is not None else resolved_path.stat().st_size
         if file_size <= 0:
             raise LTValidationError(f"Captured {kind} file must not be empty.")
-        if file_size > FIGURE_UPLOAD_MAX_BYTES:
+        if payload is not None:
+            full_payload = payload if file_size <= FIGURE_UPLOAD_MAX_BYTES else None
+            content_hash = _bytes_sha256(payload)
+        elif file_size > FIGURE_UPLOAD_MAX_BYTES:
             # Never read an oversized artifact into memory: stream-hash it and
             # let _preview_payload emit a pointer (or a fig-rendered preview).
             full_payload: bytes | None = None
@@ -579,7 +673,7 @@ def _capture_saved_figure(
                 raise LTValidationError(f"Captured {kind} file must not be empty.")
             content_hash = _bytes_sha256(full_payload)
         resolved_path = resolved_path.resolve()
-        source_uri = resolved_path.as_uri()
+        source_uri = source_uri or resolved_path.as_uri()
         client_capture_id = _client_capture_id(
             resolved_path,
             logical_id=logical_id,
@@ -623,6 +717,8 @@ def _capture_saved_figure(
                 size_bytes=file_size,
                 metadata=base_metadata,
                 reason="circuit_open",
+                payload=payload,
+                source_uri=source_uri,
             )
             if queued is not None:
                 return FigureCaptureResult(
@@ -683,20 +779,25 @@ def _capture_saved_figure(
                 # not a per-capture choice, so it carries the weaker label.
                 upload_metadata[DECLARED_TARGET_SOURCE_KEY] = DECLARED_TARGET_SOURCE_CONFIG_DEFAULT
 
-            def upload(
-                metadata: dict[str, NoteMetadataScalar], upload_targets: list[EntityRef]
-            ) -> tuple[LTRecord, int]:
-                return resolved_client._upload_note_file_payload_with_status(
-                    project_id=resolved_project_id,
-                    path=preview.path,
-                    payload=preview.payload,
-                    metadata=metadata,
-                    status="staged",
-                    content_type=preview.content_type,
-                    client_capture_id=client_capture_id,
-                    targets=upload_targets,
-                    timeout=capture_timeout,
-                )
+            def upload_as(capture_id: str) -> _Upload:
+                def upload(
+                    metadata: dict[str, NoteMetadataScalar], upload_targets: list[EntityRef]
+                ) -> tuple[LTRecord, int]:
+                    return resolved_client._upload_note_file_payload_with_status(
+                        project_id=resolved_project_id,
+                        path=preview.path,
+                        payload=preview.payload,
+                        metadata=metadata,
+                        status="staged",
+                        content_type=preview.content_type,
+                        client_capture_id=capture_id,
+                        targets=upload_targets,
+                        timeout=capture_timeout,
+                    )
+
+                return upload
+
+            upload = upload_as(client_capture_id)
 
             try:
                 note, status_code, upload_metadata = _upload_with_session_fallback(
@@ -706,6 +807,25 @@ def _capture_saved_figure(
                     project_id=resolved_project_id,
                     kind=kind,
                 )
+            except LTConflictError as conflict:
+                # A re-capture under the same capture id differs from the first
+                # upload at least in its observed-at time, so the server refuses
+                # the replay; coalesce into the note that capture id made.
+                existing_note = (
+                    _existing_capture_note(
+                        resolved_client,
+                        endpoint_key=endpoint_key,
+                        project_id=resolved_project_id,
+                        client_capture_id=client_capture_id,
+                        content_hash=content_hash,
+                        timeout=capture_timeout,
+                    )
+                    if CAPTURE_ID_REUSE_MESSAGE in str(conflict.error_message or conflict)
+                    else None
+                )
+                if existing_note is None:
+                    raise
+                note, status_code = existing_note, 200
             except Exception as exc:
                 if not _is_transport_failure(exc):
                     raise
@@ -723,6 +843,8 @@ def _capture_saved_figure(
                     size_bytes=file_size,
                     metadata=base_metadata,
                     reason=str(exc),
+                    payload=payload,
+                    source_uri=source_uri,
                 )
                 if queued is None:
                     raise
@@ -742,6 +864,31 @@ def _capture_saved_figure(
                 )
             # The endpoint answered: close any open breaker for it.
             _close_circuit(endpoint_key)
+            _remember_capture_note(endpoint_key, resolved_project_id, client_capture_id, note)
+            if status_code == 200 and not _note_is_staged(note):
+                revision_id = _client_capture_id(
+                    resolved_path, logical_id=logical_id, content_hash=content_hash, kind=kind
+                )
+                if _stored_content_hash(note) not in {"", content_hash} and (
+                    revision_id != client_capture_id
+                ):
+                    # The note a person committed or archived stays as it is;
+                    # the new bytes enter review as their own staged capture.
+                    return _capture_curated_revision(
+                        client=resolved_client,
+                        upload=upload_as(revision_id),
+                        curated=note,
+                        revision_id=revision_id,
+                        upload_metadata=upload_metadata,
+                        targets=targets,
+                        endpoint_key=endpoint_key,
+                        project_id=resolved_project_id,
+                        result_defaults=result_defaults,
+                        content_hash=content_hash,
+                        no_preview=preview.no_preview,
+                        kind=kind,
+                        timeout=capture_timeout,
+                    )
             if status_code == 200:
                 return _coalesced_result(
                     client=resolved_client,
@@ -786,6 +933,149 @@ def _capture_saved_figure(
         )
 
 
+_Upload = Callable[[dict[str, NoteMetadataScalar], list[EntityRef]], tuple[LTRecord, int]]
+
+
+def _note_is_staged(note: Mapping[str, Any]) -> bool:
+    """Whether a capture may still update ``note`` (a person has not curated it)."""
+
+    return str(note.get("status") or "") == "staged"
+
+
+def _stored_content_hash(note: Mapping[str, Any]) -> str:
+    metadata = note.get("metadata")
+    return str(metadata.get("evidence_content_hash") or "") if isinstance(metadata, Mapping) else ""
+
+
+def _capture_curated_revision(
+    *,
+    client: LabTracker,
+    upload: _Upload,
+    curated: LTRecord,
+    revision_id: str,
+    upload_metadata: dict[str, NoteMetadataScalar],
+    targets: list[EntityRef],
+    endpoint_key: str | None,
+    project_id: str,
+    result_defaults: dict[str, Any],
+    content_hash: str,
+    no_preview: bool,
+    kind: str,
+    timeout: Any,
+) -> FigureCaptureResult:
+    """File new bytes for a curated note as a new staged note (the versioned id).
+
+    The curated note is never written. The new note's capture id is the base
+    id plus a content-hash suffix (the ``version_every_change`` scheme), so a
+    later identical re-save coalesces onto it; this path never recurses.
+    """
+
+    metadata = dict(upload_metadata)
+    metadata.update(
+        {
+            "evidence_source_external_id": revision_id,
+            f"{kind}_source_external_id_current": revision_id,
+            f"{kind}_client_capture_id": revision_id,
+            SUPERSEDES_CAPTURE_NOTE_KEY: str(curated.get("note_id") or ""),
+            SUPERSEDED_NOTE_STATUS_KEY: str(curated.get("status") or ""),
+        }
+    )
+    defaults = {
+        **result_defaults,
+        "source_external_id": revision_id,
+        "client_capture_id": revision_id,
+        "reason": CAPTURE_REVISION_REASON,
+    }
+    try:
+        note, status_code, metadata = _upload_with_session_fallback(
+            upload, metadata=metadata, targets=targets, project_id=project_id, kind=kind
+        )
+    except LTConflictError as conflict:
+        if CAPTURE_ID_REUSE_MESSAGE not in str(conflict.error_message or conflict):
+            raise
+        existing = _existing_capture_note(
+            client,
+            endpoint_key=endpoint_key,
+            project_id=project_id,
+            client_capture_id=revision_id,
+            content_hash=content_hash,
+            timeout=timeout,
+        )
+        if existing is None:
+            raise
+        note, status_code = existing, 200
+    _remember_capture_note(endpoint_key, project_id, revision_id, note)
+    action = "coalesced" if status_code == 200 else "imported"
+    return FigureCaptureResult(
+        **{
+            **defaults,
+            "action": action,
+            "metadata": metadata,
+            "note": note,
+            "no_preview": no_preview,
+        }
+    )
+
+
+def _remember_capture_note(
+    endpoint_key: str | None, project_id: str, client_capture_id: str, note: Any
+) -> None:
+    with suppress(AttributeError, KeyError, TypeError):
+        key = (endpoint_key or "", str(project_id), client_capture_id)
+        _CAPTURE_NOTE_IDS[key] = str(note.id)
+
+
+def _existing_capture_note(
+    client: LabTracker,
+    *,
+    endpoint_key: str | None,
+    project_id: str,
+    client_capture_id: str,
+    content_hash: str,
+    timeout: Any,
+) -> LTRecord | None:
+    """The staged note ``client_capture_id`` already made in ``project_id``, if any.
+
+    Tries the note this process remembers for it, then the project's notes
+    carrying this content hash (an unchanged re-save), then up to
+    :data:`CAPTURE_NOTE_LOOKUP_MAX_NOTES` of the project's notes.
+    """
+
+    remembered = _CAPTURE_NOTE_IDS.get((endpoint_key or "", str(project_id), client_capture_id))
+    if remembered:
+        try:
+            note: LTRecord | None = client._data_record(
+                client._request("GET", f"/notes/{remembered}", timeout=timeout)
+            )
+        except LTError:
+            note = None
+        if note is not None and note.get("client_capture_id") == client_capture_id:
+            return note
+    for params in (
+        {"project_id": str(project_id), "evidence_content_hash": content_hash},
+        {"project_id": str(project_id)},
+    ):
+        offset = 0
+        while offset < CAPTURE_NOTE_LOOKUP_MAX_NOTES:
+            page = client._request(
+                "GET",
+                "/notes",
+                params={**params, "limit": MAX_PAGE_SIZE, "offset": offset},
+                timeout=timeout,
+            )
+            data = page.get("data")
+            items = data if isinstance(data, list) else []
+            for item in items:
+                if isinstance(item, Mapping) and item.get("client_capture_id") == (
+                    client_capture_id
+                ):
+                    return LTRecord(item)
+            if len(items) < MAX_PAGE_SIZE:
+                break
+            offset += len(items)
+    return None
+
+
 def _coalesced_result(
     *,
     client: LabTracker,
@@ -803,7 +1093,9 @@ def _coalesced_result(
     existing_metadata = dict(note_metadata) if isinstance(note_metadata, Mapping) else {}
     existing_hash = str(existing_metadata.get("evidence_content_hash") or "")
     stale_review_bytes = bool(existing_hash and existing_hash != content_hash)
-    if not stale_review_bytes:
+    # Only a staged note is ever patched: a capture never rewrites a note a
+    # person committed or archived (the caller files new bytes separately).
+    if not stale_review_bytes or not _note_is_staged(note):
         return FigureCaptureResult(
             **{
                 **result_defaults,
@@ -868,6 +1160,7 @@ def _base_figure_metadata(
     context = _active_run_context()
     if context is not None:
         merged.update(context.to_metadata())
+    merged.update(_capture_worktree_metadata(path))
     session = read_active_session()
     if session and session.get("session_id"):
         merged["capture_session_id"] = str(session["session_id"])
@@ -894,6 +1187,24 @@ def _base_figure_metadata(
         }
     )
     return evidence
+
+
+def _capture_worktree_metadata(path: Path) -> dict[str, NoteMetadataScalar]:
+    """``capture_git_worktree_tree`` for a file saved inside a git checkout.
+
+    The tree is the saving checkout's working copy *without the saved file
+    itself* (an output is not the code that produced it), so re-saving the
+    same figure reuses the cached tree. Outside a checkout it is ``{}``; any
+    failure is at most an error marker, never a failed capture.
+    """
+
+    try:
+        worktree = worktree_tree_id(
+            path.parent, exclude=(path,), timeout=CAPTURE_WORKTREE_TREE_TIMEOUT_SECONDS
+        )
+        return worktree.as_fields("capture_git_worktree_tree")
+    except Exception:  # noqa: BLE001 - code identity is optional; the capture is not.
+        return {}
 
 
 def _merge_current_metadata(
@@ -1128,7 +1439,7 @@ def _warn_unbound_autotrack(path: Path, capture_project: CaptureProject | None) 
     root = capture_checkout_root(path)
     if root is None and capture_project is None:
         folder = path.expanduser().parent.resolve()
-        _warn_once(
+        _warn_unbound_once(
             f"{AUTOTRACK_UNBOUND_REASON}:{folder}",
             AUTOTRACK_UNBOUND_NOTICE.format(
                 checkout=folder,
@@ -1139,12 +1450,51 @@ def _warn_unbound_autotrack(path: Path, capture_project: CaptureProject | None) 
         return
     why = AUTOTRACK_WATCH_CONFIG_WHY if capture_project is not None else AUTOTRACK_NO_PROJECT_WHY
     checkout = root or path.expanduser().parent.resolve()
-    _warn_once(
+    _warn_unbound_once(
         f"{AUTOTRACK_UNBOUND_REASON}:{checkout}",
         AUTOTRACK_UNBOUND_NOTICE.format(
             checkout=checkout, why=why, remedy=AUTOTRACK_CHECKOUT_REMEDY
         ),
     )
+
+
+def _warn_unbound_once(key: str, message: str) -> None:
+    if key in _WARNED:
+        return
+    if _PERSISTENT_UNBOUND_NOTICES[0] and not _claim_unbound_notice(key):
+        _WARNED.add(key)
+        return
+    _warn_once(key, message)
+
+
+def _claim_unbound_notice(key: str, *, now: float | None = None) -> bool:
+    """Record that ``key``'s notice is shown now; False if shown within the week."""
+
+    base = os.getenv("LAB_TRACKER_CONFIG_DIR")
+    path = (Path(base).expanduser() if base else Path.home() / ".lab-tracker") / (
+        UNBOUND_NOTICE_FILENAME
+    )
+    current = time.time() if now is None else now
+    shown: dict[str, float] = {}
+    with suppress(OSError, ValueError, TypeError):
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            shown = {
+                str(name): float(when)
+                for name, when in loaded.items()
+                if isinstance(when, (int, float))
+                and current - float(when) < UNBOUND_NOTICE_REPEAT_SECONDS
+            }
+    if key in shown:
+        return False
+    shown[key] = current
+    newest = sorted(shown.items(), key=lambda item: item[1])[-UNBOUND_NOTICE_MAX_ENTRIES:]
+    with suppress(OSError):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        partial = path.with_name(f".{path.name}.{uuid.uuid4().hex}.partial")
+        partial.write_text(json.dumps(dict(newest), sort_keys=True), encoding="utf-8")
+        os.replace(partial, path)
+    return True
 
 
 def _queue_capture_offline(
@@ -1158,12 +1508,16 @@ def _queue_capture_offline(
     size_bytes: int,
     metadata: Mapping[str, NoteMetadataScalar],
     reason: str,
+    payload: bytes | None = None,
+    source_uri: str | None = None,
 ) -> Path | None:
     """Write the capture as a watch-outbox event so a later sync delivers it.
 
     Returns the event path, or ``None`` when queueing is disabled, no project
     is known, or the outbox cannot be written (never raises: the figure was
     already saved to disk and the caller reports a plain failure instead).
+    In-memory ``payload`` bytes (an inline display) are first written to the
+    outbox's ``blobs/`` folder, the only file such a capture ever creates.
     """
 
     if not _capture_outbox_enabled() or not project_id:
@@ -1181,6 +1535,9 @@ def _queue_capture_offline(
             relative_path = path.resolve().relative_to(root).as_posix()
         except ValueError:
             relative_path = path.name
+        title = path.name
+        if payload is not None:
+            path = _queued_payload_file(config.outbox_path(), payload, content_hash, path.suffix)
         extra = {
             str(key): value
             for key, value in metadata.items()
@@ -1195,7 +1552,7 @@ def _queue_capture_offline(
             sink=watch_capture.SINK_STAGED_NOTE,
             source={
                 "provider": f"local-{kind}",
-                "uri": path.resolve().as_uri(),
+                "uri": source_uri or path.resolve().as_uri(),
                 "external_id": client_capture_id,
                 "path": str(path.resolve()),
                 "root": str(root),
@@ -1211,7 +1568,7 @@ def _queue_capture_offline(
             },
             context={"project_id": project_id, "session_id": _session_id(session)},
             payload={
-                "title": path.name,
+                "title": title,
                 "summary": f"Queued {kind} capture while Lab Tracker was unreachable.",
                 "status": "staged",
                 "metadata": extra,
@@ -1226,6 +1583,24 @@ def _queue_capture_offline(
             f"Lab Tracker could not queue the {kind} capture offline: {exc}",
         )
         return None
+
+
+def _queued_payload_file(outbox: Path, payload: bytes, content_hash: str, suffix: str) -> Path:
+    """Keep queued in-memory capture bytes as ``<outbox>/blobs/<hash><suffix>``.
+
+    One file per distinct content, written atomically once and never
+    rewritten, so the queued event's size, hash, and mtime stay valid.
+    """
+
+    safe_suffix = suffix if suffix.startswith(".") and suffix[1:].isalnum() else ".bin"
+    folder = Path(outbox) / QUEUED_PAYLOAD_DIRNAME
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / f"{content_hash}{safe_suffix.lower()}"
+    if not target.is_file():
+        partial = folder / f".{target.name}.{uuid.uuid4().hex}.partial"
+        partial.write_bytes(payload)
+        os.replace(partial, target)
+    return target
 
 
 def _resolve_capture_client(
@@ -1436,5 +1811,8 @@ def _reset_figure_capture_state_for_tests() -> None:
     _BREAKERS.clear()
     _WARNED.clear()
     _REFUSED_SESSION_TARGETS.clear()
+    _CAPTURE_NOTE_IDS.clear()
+    _PERSISTENT_UNBOUND_NOTICES[0] = False
     _reset_session_hints_for_tests()
+    _reset_worktree_tree_cache_for_tests()
     _RUN_CONTEXT.set(None)

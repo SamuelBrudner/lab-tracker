@@ -1,0 +1,4 @@
+export(autotrack)
+export(autotrack_status)
+export(capture_file)
+export(is_autotracking)

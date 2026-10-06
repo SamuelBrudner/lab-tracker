@@ -2,8 +2,9 @@
 
 Answers "which repos did lab-tracker touch here" so `lt doctor --all` can
 sweep them after a package upgrade. Pure metadata for suggestions — nothing
-reads it to auto-apply anything, and recording is fail-soft so it can never
-break the enrollment command that triggered it.
+reads it to auto-apply anything without explicit consent. `lt maintain --all
+--yes` selects these repos for a previewed refresh. Recording is fail-soft so
+it can never break the enrollment command that triggered it.
 """
 
 from __future__ import annotations

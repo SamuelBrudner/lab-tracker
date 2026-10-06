@@ -80,6 +80,16 @@ describe("buildCaptureMetadata", () => {
     expect(meta.captured_at).toBe("2023-11-14T22:13:20.000Z");
   });
 
+  it("names the bench capture channel only when one is given", () => {
+    expect(
+      buildCaptureMetadata({ captureMode: "text", kind: "text", captureChannel: "kiosk" })
+        .capture_channel
+    ).toBe("kiosk");
+    expect(buildCaptureMetadata({ captureMode: "text", kind: "text" })).not.toHaveProperty(
+      "capture_channel"
+    );
+  });
+
   it("uses the wall clock when no clock is injected", () => {
     const before = Date.now();
     const meta = buildCaptureMetadata({ captureMode: "text", kind: "text" });
@@ -127,6 +137,26 @@ describe("uploadOrQueueRawFile", () => {
     });
     expect(result).toEqual({ note_id: "n1" });
     expect(queue.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("reuses a caller's client capture id so a retry replays the same capture", async () => {
+    const fetchMock = installFetchMock([
+      { match: "/notes/upload-file", method: "POST", response: apiResponse({ note_id: "n1" }) },
+    ]);
+    const upload = () =>
+      uploadOrQueueRawFile({
+        token: "t",
+        projectId: "p1",
+        ownerId: "owner-1",
+        fileToUpload: new Blob(["x"]),
+        metadata: {},
+        queue: fakeQueue(),
+        clientCaptureId: "photo-1",
+      });
+    await upload();
+    await upload();
+    const ids = fetchMock.mock.calls.map(([, init]) => init.body.get("client_capture_id"));
+    expect(ids).toEqual(["photo-1", "photo-1"]);
   });
 
   it("queues offline when the request fails with no HTTP status", async () => {
@@ -271,6 +301,21 @@ describe("createOrQueueTextCapture", () => {
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
     expect(body.client_capture_id).toEqual(expect.any(String));
     expect(body.client_capture_id).not.toBe("");
+  });
+
+  it("queues under the caller's client capture id when one is given", async () => {
+    installFetchMock([]);
+    const queue = fakeQueue();
+    await createOrQueueTextCapture({
+      token: "t",
+      projectId: "p1",
+      ownerId: "owner-1",
+      rawContent: "ABC-123",
+      metadata: { capture_kind: "text" },
+      queue,
+      clientCaptureId: "scan-1",
+    });
+    expect(queue.enqueue.mock.calls[0][0].json.client_capture_id).toBe("scan-1");
   });
 
   it("queues the JSON body offline when the request never reaches the server", async () => {

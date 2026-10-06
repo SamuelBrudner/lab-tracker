@@ -22,6 +22,7 @@ import {
   migrateIncomingShares,
   shareInboxAvailable,
   shareTooLargeMessage,
+  withShareImportLock,
 } from "../shared/share-target-inbox.js";
 import {
   captureHint,
@@ -30,6 +31,23 @@ import {
   readRememberedCaptureContext,
   writeRememberedCaptureContext,
 } from "../features/mobile-capture/capture-helpers.js";
+import {
+  CAPTURE_CHANNEL,
+  sessionLabel,
+  sessionTargets,
+} from "../features/bench-capture/bench-helpers.js";
+import {
+  clearBookmarkletFragment,
+  clipComposerText,
+  clipMetadata,
+  readBookmarkletClip,
+} from "../features/bench-capture/bookmarklet.js";
+import {
+  SHARE_TRUST_KEY,
+  grantShareTrust,
+  readShareTrust,
+  revokeShareTrust,
+} from "../features/bench-capture/trusted-share.js";
 
 const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
@@ -88,7 +106,9 @@ function useMobileCapture({
   refreshRecentNotes,
   lockedCheckpointNoteId = "",
   launchSessionId = "",
+  launchCaptureChannel = "",
   returnPath = "",
+  now = Date.now,
 }) {
   const [captureMode, setCaptureMode] = useState("text");
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
@@ -131,6 +151,18 @@ function useMobileCapture({
   // only the latest one may set the listed shares.
   const shareReadSeqRef = useRef(0);
   const mountedRef = useRef(false);
+  // A trusted share window (see features/bench-capture/trusted-share.js): the
+  // person opened it for one session, so shares arriving while it lasts are
+  // imported into that session without the review step. `checkedAt` is the
+  // clock the remaining time is shown against.
+  const [shareTrustState, setShareTrustState] = useState({ checkedAt: 0, trust: null });
+  // Shares already handed to an automatic import; a failed one is left for
+  // manual review instead of being retried in a loop.
+  const autoImportedShareIdsRef = useRef(new Set());
+  const autoImportSharesRef = useRef(null);
+  // Page details a desktop bookmarklet put in the URL fragment; they prefill
+  // the composer and ride along as pointer metadata if the person saves.
+  const [clip, setClip] = useState(null);
   const activeQuestions = useMemo(
     () => questions.filter((question) => question.status === "active"),
     [questions]
@@ -278,13 +310,80 @@ function useMobileCapture({
     }
   }, [setFlash]);
 
+  useEffect(() => {
+    // Opened by the "Save to Lab Tracker" bookmarklet: prefill, never save.
+    const found = readBookmarkletClip();
+    if (!found) {
+      return;
+    }
+    clearBookmarkletFragment();
+    setClip(found);
+    setTextNote(clipComposerText(found));
+  }, []);
+
+  const refreshShareTrust = useCallback(() => {
+    setShareTrustState({
+      checkedAt: now(),
+      trust: readShareTrust({ ownerId, projectId: selectedProjectId, now: now() }),
+    });
+  }, [now, ownerId, selectedProjectId]);
+
+  useEffect(() => {
+    refreshShareTrust();
+  }, [refreshShareTrust]);
+
+  const shareTrust = shareTrustState.trust;
+  useEffect(() => {
+    // Count the window down on screen and close it when it expires.
+    if (!shareTrust) {
+      return undefined;
+    }
+    const timer = setInterval(refreshShareTrust, 30 * 1000);
+    return () => clearInterval(timer);
+  }, [refreshShareTrust, shareTrust]);
+
+  useEffect(() => {
+    // Another tab can open or stop the window (a `storage` event), and a phone
+    // resumed from the background may be past its expiry.
+    const handleStorage = (event) => {
+      if (!event.key || event.key === SHARE_TRUST_KEY) {
+        refreshShareTrust();
+      }
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        refreshShareTrust();
+      }
+    };
+    window.addEventListener("storage", handleStorage);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.removeEventListener("storage", handleStorage);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [refreshShareTrust]);
+
+  // The window only applies while its session is one of this project's active
+  // sessions: a closed session, or another project, gets nothing implicitly.
+  const trustedSession = useMemo(
+    () =>
+      shareTrust
+        ? sessions.find((session) => session.session_id === shareTrust.sessionId) || null
+        : null,
+    [sessions, shareTrust]
+  );
+
   const reloadIncomingShares = useCallback(async () => {
     if (!shareStorage) {
       return;
     }
     const readSeq = shareReadSeqRef.current + 1;
     shareReadSeqRef.current = readSeq;
-    const { expired, shares } = await listReviewableShares({ storage: shareStorage });
+    // Expiry reads the hook's clock, the same one the trust window reads.
+    const { expired, shares } = await listReviewableShares({
+      storage: shareStorage,
+      now: now(),
+    });
     if (expired > 0 && mountedRef.current) {
       // The expired shares are gone whichever read removed them; say so.
       setFlash("", expiredSharesMessage(expired));
@@ -292,7 +391,7 @@ function useMobileCapture({
     if (mountedRef.current && shareReadSeqRef.current === readSeq) {
       setIncomingShares(shares);
     }
-  }, [setFlash, shareStorage]);
+  }, [now, setFlash, shareStorage]);
 
   const reportShareInboxReadFailure = useCallback(
     (error) => {
@@ -404,34 +503,60 @@ function useMobileCapture({
       setFlash("", "Choose a project before importing shared items.");
       return;
     }
+    await importShares(incomingShares.map((share) => share.id));
+  }
+
+  // Imports the listed shares into the selected project, with a trusted share
+  // window's session target and capture_channel when `options` carry them.
+  // Imports from every open capture page take turns (Web Locks), each share
+  // carries its own idempotency key, and `stillAllowed` is asked again once
+  // this page's turn comes, so a trust window stopped meanwhile imports nothing.
+  async function importShares(
+    shareIds,
+    { targets = [], extraMetadata = {}, destination = "", stillAllowed = null } = {}
+  ) {
     const queue = getUploadQueue();
     if (!queue || !shareStorage) {
       setFlash("", "Shared items cannot be imported: this browser has no offline upload storage.");
-      return;
+      return false;
     }
     const projectId = selectedProjectId;
-    const shareIds = incomingShares.map((share) => share.id);
     setFlash("", "");
+    let imported = true;
     await runShareAction(async () => {
       let result;
       try {
-        result = await migrateIncomingShares({
-          createTextNote: ({ metadata, rawContent }) =>
-            apiRequest("/notes", {
-              body: {
-                metadata,
-                project_id: projectId,
-                raw_content: rawContent,
-                targets: [],
-              },
-              method: "POST",
-              token,
-            }),
-          projectId,
-          ownerId,
-          shareIds,
-          storage: shareStorage,
-          uploadQueue: queue,
+        result = await withShareImportLock(async () => {
+          if (stillAllowed && !stillAllowed()) {
+            imported = false;
+            return { migrated: 0, skipped: 0 };
+          }
+          return migrateIncomingShares({
+            createTextNote: ({
+              clientCaptureId,
+              metadata,
+              rawContent,
+              targets: noteTargets = [],
+            }) =>
+              apiRequest("/notes", {
+                body: {
+                  client_capture_id: clientCaptureId,
+                  metadata,
+                  project_id: projectId,
+                  raw_content: rawContent,
+                  targets: noteTargets,
+                },
+                method: "POST",
+                token,
+              }),
+            extraMetadata,
+            projectId,
+            ownerId,
+            shareIds,
+            storage: shareStorage,
+            targets,
+            uploadQueue: queue,
+          });
         });
       } catch (error) {
         // eslint-disable-next-line no-console
@@ -453,15 +578,109 @@ function useMobileCapture({
         return;
       }
       if (mountedRef.current) {
-        setFlash(
-          result.migrated === 1
-            ? "1 shared capture imported."
-            : `${result.migrated} shared captures imported.`
-        );
+        const count =
+          result.migrated === 1 ? "1 shared capture" : `${result.migrated} shared captures`;
+        setFlash(destination ? `${count} saved into ${destination}.` : `${count} imported.`);
       }
       await drainImportedShares(queue);
       await refreshImportedProject(projectId);
     });
+    return imported;
+  }
+
+  // The stored window, read now: another tab may have stopped it or it may
+  // have expired since this page last looked.
+  function currentTrustFor(sessionIdToMatch) {
+    const current = readShareTrust({ ownerId, projectId: selectedProjectId, now: now() });
+    return current && current.sessionId === sessionIdToMatch ? current : null;
+  }
+
+  async function autoImportTrustedShares() {
+    if (
+      !shareTrust ||
+      !trustedSession ||
+      !canWrite ||
+      shareActionInFlightRef.current ||
+      incomingShares.length === 0
+    ) {
+      return;
+    }
+    const fresh = incomingShares.filter(
+      (share) => !autoImportedShareIdsRef.current.has(share.id)
+    );
+    if (fresh.length === 0) {
+      return;
+    }
+    const sessionIdToMatch = trustedSession.session_id;
+    if (!currentTrustFor(sessionIdToMatch)) {
+      // Stopped elsewhere or expired: these shares wait for review.
+      refreshShareTrust();
+      return;
+    }
+    const freshIds = fresh.map((share) => share.id);
+    freshIds.forEach((id) => autoImportedShareIdsRef.current.add(id));
+    const imported = await importShares(freshIds, {
+      destination: shareTrust.sessionLabel || sessionLabel(trustedSession),
+      extraMetadata: { capture_channel: CAPTURE_CHANNEL.SHARE },
+      stillAllowed: () => Boolean(currentTrustFor(sessionIdToMatch)),
+      targets: sessionTargets(sessionIdToMatch),
+    });
+    if (!imported) {
+      // The window closed while waiting for another page's import: leave
+      // these for review, and for a later window if one is opened.
+      freshIds.forEach((id) => autoImportedShareIdsRef.current.delete(id));
+      if (mountedRef.current) {
+        refreshShareTrust();
+      }
+    }
+  }
+
+  useEffect(() => {
+    autoImportSharesRef.current = autoImportTrustedShares;
+  });
+
+  useEffect(() => {
+    // While a trusted share window is open, shares go straight into its
+    // session: no confirm step. Anything else waits for review as before.
+    Promise.resolve(autoImportSharesRef.current?.()).catch((error) => {
+      // eslint-disable-next-line no-console
+      console.error("Trusted share import failed:", error);
+    });
+  }, [canWrite, incomingShares, trustedSession]);
+
+  function trustShares(hours) {
+    const session = sessions.find((item) => item.session_id === sessionId) || null;
+    if (!canWrite || !selectedProjectId || !session) {
+      return;
+    }
+    if (!ownerId) {
+      setFlash("", "The signed-in account is not known yet; try trusting shares again in a moment.");
+      return;
+    }
+    const label = sessionLabel(session);
+    const trust = grantShareTrust({
+      hours,
+      now: now(),
+      ownerId,
+      projectId: selectedProjectId,
+      sessionId: session.session_id,
+      sessionLabel: label,
+    });
+    if (!trust) {
+      setFlash(
+        "",
+        "This browser would not keep a trusted share window, so shared items still wait here for review."
+      );
+      return;
+    }
+    setShareTrustState({ checkedAt: now(), trust });
+    setFlash(`Shares go straight into ${label} for the next ${hours} h.`);
+  }
+
+  function stopShareTrust() {
+    revokeShareTrust();
+    setShareTrustState({ checkedAt: now(), trust: null });
+    setFlash("Trusted shares stopped. Shared items wait here for review again.");
   }
 
   async function discardIncomingShares() {
@@ -501,7 +720,17 @@ function useMobileCapture({
   function captureMetadata({ kind, bundleId = "", file = null }) {
     // The checkpoint relationship is a retained note target, not client-authored
     // onboarding metadata. `member_onboarding_*` keys are server-reserved.
-    return buildCaptureMetadata({ captureMode, kind, bundleId, file, hint, voiceNoteType });
+    const fromClip = kind === "text" && clip;
+    const metadata = buildCaptureMetadata({
+      captureMode,
+      kind,
+      bundleId,
+      file,
+      hint,
+      voiceNoteType,
+      captureChannel: fromClip ? CAPTURE_CHANNEL.BOOKMARKLET : launchCaptureChannel,
+    });
+    return fromClip ? { ...metadata, ...clipMetadata(clip) } : metadata;
   }
 
   function clearUploadProgress() {
@@ -800,6 +1029,7 @@ function useMobileCapture({
       if (queuedOffline || noteCreated) {
         writeRememberedCaptureContext(selectedProjectId, { questionId, sessionId });
         setContextCarriedOver(false);
+        setClip(null);
       }
 
       if (queuedOffline) {
@@ -870,6 +1100,13 @@ function useMobileCapture({
     sharesBusy,
     importIncomingShares,
     discardIncomingShares,
+    // trusted share window (per device, per project + session, time-bounded)
+    shareTrust: trustedSession ? shareTrust : null,
+    shareTrustCheckedAt: shareTrustState.checkedAt,
+    trustShares,
+    stopShareTrust,
+    // page details prefilled by the desktop bookmarklet
+    clip,
     // pending-review queue
     pendingDrafts,
     pendingNotes,

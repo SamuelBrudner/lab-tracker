@@ -176,10 +176,12 @@ function createUploadQueue({
   const listeners = new Set();
   let activeDrain = null;
 
-  function notify() {
+  // Listeners get the drain's results after a drain (so a page can tell an
+  // uploaded job from a dropped one) and nothing after an enqueue.
+  function notify(drainResult = undefined) {
     listeners.forEach((listener) => {
       try {
-        listener();
+        listener(drainResult);
       } catch {
         // Listener errors should never break the queue itself.
       }
@@ -396,7 +398,7 @@ function createUploadQueue({
         results.stillQueued.push(queuedItem);
       }
     }
-    notify();
+    notify(results);
     return results;
   }
 

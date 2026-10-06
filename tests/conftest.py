@@ -55,6 +55,29 @@ def _isolate_lab_tracker_home(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("LAB_TRACKER_SKILLS_HOME", str(home / "skills"))
 
 
+@pytest.fixture
+def offline_server(monkeypatch):
+    """Report the Lab Tracker server as unreachable without any network I/O.
+
+    ``lt doctor`` now probes ``GET /health``; tests that only care about drift or
+    the install must not touch whatever happens to listen on the default
+    address (a developer's own dev server, for one).
+    """
+
+    from lab_tracker_client import setup as setup_helpers
+
+    monkeypatch.setattr(
+        setup_helpers,
+        "probe_health_diagnostics",
+        lambda _url: {
+            "reachable": False,
+            "diagnosis": "tcp_connection_failed",
+            "detail": "A TCP connection could not be established.",
+            "next_step": "Check the server address and port.",
+        },
+    )
+
+
 def _auth_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 

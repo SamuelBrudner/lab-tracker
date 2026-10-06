@@ -1343,10 +1343,18 @@ class ProvenanceLinkBasis(str, Enum):
     ``exact_id_match``: a capture's own metadata names exactly one session or
     committed analysis in the project (a session id, or a git commit that
     matches one committed ``code_version``).
+    ``worktree_tree_match``: a capture recorded the git tree of the working
+    copy it ran in, and a commit note records that same tree as its own: the
+    capture was made from exactly that commit's code.
+    ``time_window_match``: a capture that names no session was made (by its
+    ``format_acquired_at``, else its observed time) inside exactly one session
+    window of the project.
     """
 
     CONTENT_HASH_MATCH = "content_hash_match"
     EXACT_ID_MATCH = "exact_id_match"
+    WORKTREE_TREE_MATCH = "worktree_tree_match"
+    TIME_WINDOW_MATCH = "time_window_match"
 
 
 class ProvenanceLinkStatus(str, Enum):
@@ -1722,8 +1730,8 @@ class ProjectCoverageCaptureSource(_DomainModel):
       flagged.
     - Client release: whether the client that made the source's newest capture
       runs a release behind this server's (``release_status``), and whether that
-      gap is worth updating for (``update_recommended``: an older MAJOR.MINOR,
-      see ``docs/versioning.md``), spelled out as an ``update_notice`` on each
+      gap is worth updating for (``update_recommended``: any older release,
+      PATCH included, see ``docs/versioning.md``), spelled out as an ``update_notice`` on each
       such source that captured inside the quiet window (see
       ``lab_tracker.capture_client_release``).
     """

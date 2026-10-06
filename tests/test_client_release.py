@@ -11,11 +11,13 @@ import pytest
 
 from lab_tracker import _version, client_release
 from lab_tracker.client_release import (
+    MAX_RELEASE_VERSION_LENGTH,
     ReleaseComparison,
     ReleaseIdentity,
     client_install_command,
     project_install_command,
     project_update_steps,
+    recommends_update,
     release_from_health,
     release_key,
     update_steps,
@@ -23,6 +25,14 @@ from lab_tracker.client_release import (
 
 REVISION_A = "a" * 40
 REVISION_B = "b" * 40
+# Longer than CPython's default integer-string limit (4300 digits), which makes
+# ``int()`` raise ValueError instead of parsing.
+OVERSIZED_VERSIONS = [
+    pytest.param("9" * 5000, id="one-huge-segment"),
+    pytest.param("1." + "9" * 5000, id="huge-minor"),
+    pytest.param(".".join(["1"] * 2500), id="thousands-of-segments"),
+    pytest.param("0." + "0" * 4400 + "1", id="long-run-of-zeros"),
+]
 
 
 @pytest.mark.parametrize(
@@ -45,6 +55,34 @@ def test_release_key_ignores_trailing_zero_components() -> None:
 @pytest.mark.parametrize("version", [None, "", "0+unknown", "0.2.0rc1", "1.0.0+local", "v1.0"])
 def test_release_key_refuses_anything_but_a_plain_release(version: str | None) -> None:
     assert release_key(version) is None
+
+
+@pytest.mark.parametrize("version", OVERSIZED_VERSIONS)
+def test_release_key_treats_an_oversized_version_as_unreadable(version: str) -> None:
+    # Hostile input (a capture's stored version, a /health body) must degrade to
+    # "unknown" like any other unreadable version, never raise.
+    assert release_key(version) is None
+    assert recommends_update(version, "0.2.0") is False
+    assert recommends_update("0.1.0", version) is False
+    for client_version, server_version in [
+        (version, "0.2.0"),
+        ("0.1.0", version),
+        (version, version),
+    ]:
+        comparison = ReleaseComparison(
+            client=ReleaseIdentity(version=client_version),
+            server=ReleaseIdentity(version=server_version),
+        )
+        assert comparison.status == "unknown"
+        assert comparison.update_recommended is False
+        assert comparison.as_dict()["client_behind_server"] is False
+
+
+def test_release_key_accepts_a_version_up_to_the_length_limit() -> None:
+    at_limit = "9" * MAX_RELEASE_VERSION_LENGTH
+
+    assert release_key(at_limit) == (int(at_limit),)
+    assert release_key(at_limit + "9") is None
 
 
 @pytest.mark.parametrize(
@@ -73,10 +111,10 @@ def test_release_status_only_reports_behind_across_a_release_boundary(
 @pytest.mark.parametrize(
     ("client_version", "server_version", "status", "recommended"),
     [
-        # docs/versioning.md: PATCH is a backward-compatible fix, reported only.
-        ("0.1.0", "0.1.1", "behind", False),
-        ("1.2.0", "1.2.5", "behind", False),
-        # A MINOR (features, and on 0.y.z incompatibilities) or MAJOR gap nags.
+        # A PATCH release is where a fix for a broken install lands (docs/versioning.md).
+        ("0.1.0", "0.1.1", "behind", True),
+        ("1.2.0", "1.2.5", "behind", True),
+        # So is a MINOR (features, and on 0.y.z incompatibilities) or MAJOR gap.
         ("0.1.0", "0.2.0", "behind", True),
         ("0.1.9", "0.2.0", "behind", True),
         ("0.9.3", "1.0.0", "behind", True),
@@ -88,7 +126,7 @@ def test_release_status_only_reports_behind_across_a_release_boundary(
         ("0.1.0", "0.2.0rc1", "unknown", False),
     ],
 )
-def test_update_is_recommended_only_across_a_feature_release(
+def test_update_is_recommended_whenever_the_server_release_is_newer(
     client_version: str | None, server_version: str, status: str, recommended: bool
 ) -> None:
     comparison = ReleaseComparison(
@@ -99,6 +137,8 @@ def test_update_is_recommended_only_across_a_feature_release(
     assert comparison.status == status
     assert comparison.update_recommended is recommended
     assert comparison.as_dict()["update_recommended"] is recommended
+    # The nag and the truthful status can no longer disagree.
+    assert comparison.update_recommended is (comparison.status == "behind")
 
 
 def test_revision_drift_within_a_release_is_reported_but_not_behind() -> None:

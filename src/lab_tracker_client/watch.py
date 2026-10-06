@@ -15,6 +15,14 @@ from typing import Any
 
 from lab_tracker.file_watch import (
     FileFingerprint,
+    NotRegularFileError,
+    OversizeFileError,
+    WatchRootSymlinkError,
+    absolute_path_keeping_name,
+    fingerprint_within_root,
+    open_regular_file,
+    open_regular_file_within,
+    resolve_watch_root,
 )
 from lab_tracker.file_watch import (
     discover_files as _discover_files,
@@ -51,12 +59,14 @@ from lab_tracker_client.client import (
     declared_targets,
 )
 from lab_tracker_client.evidence_index import outbox_note_index
+from lab_tracker_client.format_sniffers import watch_format_fields
 from lab_tracker_client.session_context import (
     find_session_link_code,
     read_active_session,
     session_id_from_reference,
     session_target,
 )
+from lab_tracker_client.transport import MAX_UPLOAD_BYTES
 
 CONFIG_VERSION = 1
 EVENT_VERSION = 1
@@ -91,6 +101,21 @@ STALE_SYNC_STATE = "stale"
 # that was only touched, or finished settling), re-arms that same event back to
 # ``pending`` with the fresh fingerprint.
 TERMINAL_SYNC_STATES = {"synced", STALE_SYNC_STATE}
+# Reserved payload key: an ISO-8601 time before which a sync leaves a pending
+# event queued (a notebook's day page waits for its local day to end, so the
+# day's saves keep replacing it). Reported as skipped with NOT_DUE_REASON.
+DELIVER_AFTER_KEY = "deliver_after"
+NOT_DUE_REASON = "not_due"
+# Event source keys naming the local file a sync re-reads and, for a staged
+# note, uploads. Only a scan of that file records them: a manifest is a summary
+# that points at outputs, so these keys in a manifest's ``source`` are dropped
+# rather than letting whoever can write the manifest pick what is uploaded.
+FILE_IDENTITY_SOURCE_KEYS = frozenset(
+    {"path", "root", "root_uri", "relative_path", "content_hash", "size_bytes", "mtime"}
+)
+# A manifest is a small JSON summary; a larger one (or a sparse file named
+# like one) is refused before it is read into memory.
+MAX_MANIFEST_BYTES = 8 * 1024 * 1024
 
 JsonObject = dict[str, Any]
 
@@ -367,8 +392,10 @@ def file_sha256(path: str | Path, *, chunk_size: int = 1024 * 1024) -> str:
     return _file_sha256(path, chunk_size=chunk_size)
 
 
-def stable_file_fingerprint(path: str | Path) -> FileFingerprint | None:
-    return _stable_file_fingerprint(path)
+def stable_file_fingerprint(
+    path: str | Path, *, root: str | Path | None = None
+) -> FileFingerprint | None:
+    return _stable_file_fingerprint(path, root=root)
 
 
 def discover_files(
@@ -384,8 +411,22 @@ def discover_files(
             include_patterns=include_patterns,
             exclude_patterns=exclude_patterns,
             ignore_hidden=ignore_hidden,
+            refuse_symlinked_root=True,
         )
     except ValueError as exc:
+        raise LTValidationError(str(exc)) from exc
+
+
+def watch_root_path(root: str | Path) -> Path:
+    """The absolute path of a watch root (parents resolved, its own name kept).
+
+    A root that is itself a symlink is refused: following it would let
+    whoever can replace the watched file or folder point the watch elsewhere.
+    """
+
+    try:
+        return resolve_watch_root(root)
+    except WatchRootSymlinkError as exc:
         raise LTValidationError(str(exc)) from exc
 
 
@@ -394,12 +435,43 @@ def observe_file(
     *,
     root: str | Path,
     source_external_id: str | None = None,
+    within_root: bool = False,
+    max_bytes: int | None = None,
 ) -> FileObservation:
-    resolved_root = Path(root).expanduser().resolve()
-    resolved_path = Path(path).expanduser().resolve()
-    fingerprint = stable_file_fingerprint(resolved_path)
+    """Fingerprint ``path`` and describe it relative to ``root``.
+
+    With ``within_root`` (a watch scan) ``root`` must not be a symlink and
+    the file must be the root or lie below it. It is hashed without following
+    a symlink at or below the root, so a link swapped in after discovery, at
+    any path component or as the root itself, is refused rather than followed
+    out; ``max_bytes`` then refuses a larger file before it is hashed.
+    """
+
+    if within_root:
+        resolved_root = watch_root_path(root)
+        resolved_path = absolute_path_keeping_name(path)
+        try:
+            fingerprint = fingerprint_within_root(resolved_root, resolved_path, max_bytes=max_bytes)
+        except PermissionError as exc:
+            raise LTValidationError(
+                f"permission denied reading watched file: {resolved_path} ({exc.strerror or exc})"
+            ) from exc
+        except OversizeFileError as exc:
+            raise LTValidationError(
+                f"watched file is {exc.size_bytes} bytes, over the {exc.limit}-byte "
+                f"upload limit for a staged note: {resolved_path}"
+            ) from exc
+    else:
+        resolved_root = Path(root).expanduser().resolve()
+        resolved_path = Path(path).expanduser().resolve()
+        fingerprint = stable_file_fingerprint(resolved_path)
     if fingerprint is None:
-        raise LTValidationError(f"file is not stable enough to capture: {resolved_path}")
+        raise LTValidationError(
+            f"file is missing, not a regular file inside the watch root, or still changing: "
+            f"{resolved_path}"
+            if within_root
+            else f"file is not stable enough to capture: {resolved_path}"
+        )
     relative_path = _relative_posix(resolved_path, resolved_root)
     return FileObservation(
         path=resolved_path,
@@ -487,8 +559,16 @@ def event_from_file(
     title: str | None = None,
     status: str = "staged",
 ) -> JsonObject:
-    observation = observe_file(path, root=root)
     resolved_sink = _sink(sink)
+    # A staged note uploads the file, so one over the upload limit is refused
+    # before it is hashed (a sparse multi-GB file would stall every scan).
+    # Session outputs are only registered, so large ones are hashed as usual.
+    observation = observe_file(
+        path,
+        root=root,
+        within_root=True,
+        max_bytes=MAX_UPLOAD_BYTES if resolved_sink == SINK_STAGED_NOTE else None,
+    )
     resolved_capture_kind = capture_kind or (
         "acquisition_output" if resolved_sink == SINK_ACQUISITION_OUTPUT else "file"
     )
@@ -513,6 +593,8 @@ def event_from_file(
             "size_bytes": observation.size_bytes,
             "mtime": observation.mtime,
             **session.source_fields,
+            # Bounded, fail-soft instrument-header facts (format_kind, format_*).
+            **watch_format_fields(observation.path),
         },
         context={
             "project_id": _optional_str(project_id or config.project_id),
@@ -539,17 +621,43 @@ def event_from_manifest(
     dataset_ids: Sequence[str] | None = None,
     tags: Sequence[str] | None = None,
     session_id: str | None = None,
+    root: str | Path | None = None,
 ) -> JsonObject:
-    path = Path(manifest_path).expanduser().resolve()
+    """Build a staged-note event from the manifest at ``manifest_path``.
+
+    With ``root`` (the scanned watch root), the manifest is opened below it
+    without following any symlink, so a manifest or folder swapped for a link
+    after the scan listed it cannot pull in a JSON file from outside. Without
+    ``root`` only the manifest's own name is not followed.
+    """
+
+    resolved_root = watch_root_path(root) if root is not None else None
+    # Not resolved: the path the scan listed below the root is the one opened.
+    path = (
+        Path(manifest_path).expanduser().absolute()
+        if resolved_root is not None
+        else absolute_path_keeping_name(manifest_path)
+    )
+    raw = _read_manifest_bytes(path, root=resolved_root)
     try:
-        manifest = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
+        manifest = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise LTValidationError(f"Watch manifest is not valid JSON: {path}") from exc
     if not isinstance(manifest, dict):
         raise LTValidationError(f"Watch manifest must be a JSON object: {path}")
-    content_hash = file_sha256(path)
+    content_hash = hashlib.sha256(raw).hexdigest()
+    resolved_sink = _sink(sink or _optional_str(manifest.get("sink")) or SINK_STAGED_NOTE)
+    if resolved_sink == SINK_ACQUISITION_OUTPUT:
+        raise LTValidationError(
+            "acquisition-output watches need --mode files: a manifest cannot name "
+            f"the file a session output registers: {path}"
+        )
     manifest_context = _json_mapping(manifest.get("context") or {})
-    source = _json_mapping(manifest.get("source") or {})
+    source = {
+        key: value
+        for key, value in _json_mapping(manifest.get("source") or {}).items()
+        if key not in FILE_IDENTITY_SOURCE_KEYS
+    }
     source.update(
         {
             "provider": _optional_str(source.get("provider")) or "watch-manifest",
@@ -576,16 +684,14 @@ def event_from_manifest(
         event_id=_optional_str(manifest.get("event_id")) or f"manifest-{content_hash[:16]}",
         capture_kind=_optional_str(manifest.get("capture_kind")) or "analysis_evidence",
         adapter=_optional_str(manifest.get("adapter")) or "lt-watch-manifest",
-        sink=sink or _optional_str(manifest.get("sink")) or SINK_STAGED_NOTE,
+        sink=resolved_sink,
         observed_at=_optional_str(manifest.get("observed_at")),
         source=source,
         context={
-            "project_id": _optional_str(
-                project_id
-                or manifest_context.get("project_id")
-                or manifest.get("project_id")
-                or config.project_id
-            ),
+            # The scan (flag or watch entry) or the checkout binding picks the
+            # project, never the manifest: writing into a watched folder must
+            # not choose which project receives the note.
+            "project_id": _optional_str(project_id or config.project_id),
             "question_id": _optional_str(
                 question_id or manifest_context.get("question_id") or manifest.get("question_id")
             ),
@@ -602,6 +708,30 @@ def event_from_manifest(
         log_excerpt=_optional_str(manifest.get("log_excerpt")) or "",
         payload=payload,
     )
+
+
+def _read_manifest_bytes(path: Path, *, root: Path | None) -> bytes:
+    # One capped read for both the content hash and the parse; a FIFO or
+    # device named like a manifest is refused instead of blocking the scan.
+    try:
+        handle = (
+            open_regular_file(path, follow_symlinks=False)
+            if root is None
+            else open_regular_file_within(root, path)
+        )
+    except NotRegularFileError as exc:
+        raise LTValidationError(
+            f"Watch manifest is not a regular file inside the watch root: {path}"
+        ) from exc
+    with handle:
+        size = os.fstat(handle.fileno()).st_size
+        raw = b"" if size > MAX_MANIFEST_BYTES else handle.read(MAX_MANIFEST_BYTES + 1)
+    if size > MAX_MANIFEST_BYTES or len(raw) > MAX_MANIFEST_BYTES:
+        raise LTValidationError(
+            f"Watch manifest is {max(size, len(raw))} bytes, over the "
+            f"{MAX_MANIFEST_BYTES}-byte limit: {path}"
+        )
+    return raw
 
 
 def make_event(
@@ -796,14 +926,20 @@ def scan_watch(
     dry_run: bool = False,
 ) -> JsonObject:
     resolved_mode = _mode(mode)
-    resolved_root = Path(root).expanduser().resolve()
+    resolved_root = watch_root_path(root)
     if not resolved_root.exists():
         raise LTValidationError(f"watch root is not an existing path: {resolved_root}")
     matched: list[Path]
     if resolved_mode == MODE_MANIFEST:
         if not resolved_root.is_dir():
             raise LTValidationError(f"manifest watch root must be a directory: {resolved_root}")
-        matched = sorted(path for path in resolved_root.rglob(pattern) if path.is_file())
+        # Symlinked manifests are skipped, as discover_files skips symlinked
+        # files: a link could pull a JSON file from outside the root.
+        matched = sorted(
+            path
+            for path in resolved_root.rglob(pattern)
+            if not path.is_symlink() and path.is_file()
+        )
     else:
         matched = discover_files(
             resolved_root,
@@ -827,6 +963,7 @@ def scan_watch(
                     dataset_ids=dataset_ids,
                     tags=tags,
                     session_id=session_id,
+                    root=resolved_root,
                 )
             else:
                 event = event_from_file(
@@ -963,6 +1100,8 @@ def sync_outbox_path(
 
     def _is_actionable(event: JsonObject) -> bool:
         sync = event.get("sync", {})
+        if event_not_due(event) and not sync.get("note_id"):
+            return False
         already_synced = str(sync.get("status") or "") in TERMINAL_SYNC_STATES
         needs_draft = (
             (request_draft or _event_requests_draft(event))
@@ -997,6 +1136,8 @@ def sync_outbox_path(
             reason=(
                 STALE_SYNC_STATE
                 if str(sync.get("status") or "") == STALE_SYNC_STATE
+                else NOT_DUE_REASON
+                if event_not_due(event) and not sync.get("note_id")
                 else "already_synced"
             ),
         ).to_dict()
@@ -1024,6 +1165,22 @@ def sync_outbox_path(
         on_skipped=_skipped,
         on_failure=_failed,
     )
+
+
+def event_not_due(event: Mapping[str, Any], *, now: datetime | None = None) -> bool:
+    """Whether the event's reserved ``payload.deliver_after`` time is still ahead."""
+
+    payload = event.get("payload") if isinstance(event.get("payload"), Mapping) else {}
+    value = str(payload.get(DELIVER_AFTER_KEY) or "").strip()
+    if not value:
+        return False
+    try:
+        due = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if due.tzinfo is None:
+        due = due.replace(tzinfo=timezone.utc)
+    return (now or datetime.now(timezone.utc)) < due
 
 
 def render_event_note(event: Mapping[str, Any]) -> str:
@@ -1157,17 +1314,19 @@ def _sync_event(
     already_delivered = bool(sync.get("note_id") or sync.get("output_id"))
     # Staleness only guards the upload itself; an event already delivered and
     # revisited for a draft retry must keep its synced state.
-    stale_reason = "" if already_delivered else _stale_reason(event)
-    if stale_reason:
+    check = _SourceCheck() if already_delivered else _check_source(event)
+    if check.stale_reason:
         if not dry_run:
-            _record_sync_failure(path, event, stale_reason, dry_run=False, status=STALE_SYNC_STATE)
+            _record_sync_failure(
+                path, event, check.stale_reason, dry_run=False, status=STALE_SYNC_STATE
+            )
         return WatchSyncResult(
             action="stale",
             path=str(path),
             event_id=event["event_id"],
             capture_id=event["capture_id"],
             sink=event["sink"],
-            error=stale_reason,
+            error=check.stale_reason,
         )
     if event["sink"] == SINK_STAGED_NOTE:
         return _sync_staged_note(
@@ -1178,6 +1337,7 @@ def _sync_event(
             dry_run=dry_run,
             request_draft=request_draft,
             default_project_id=default_project_id,
+            source_payload=check.payload,
         )
     if event["sink"] == SINK_ACQUISITION_OUTPUT:
         return _sync_acquisition_output(client, path=path, event=event, dry_run=dry_run)
@@ -1193,8 +1353,9 @@ def _sync_staged_note(
     dry_run: bool,
     request_draft: bool,
     default_project_id: str | None = None,
+    source_payload: bytes | None = None,
 ) -> WatchSyncResult:
-    source_path = _optional_str(event["source"].get("path"))
+    source_path = _source_file_path(event["source"])
     note_id = _optional_str(event.get("sync", {}).get("note_id"))
     note: LTRecord | None = None
     change_set_id = _optional_str(event.get("sync", {}).get("change_set_id"))
@@ -1206,9 +1367,14 @@ def _sync_staged_note(
         )
     targets = _declared_targets(event, project_id=project_id)
     if not note_id and source_path:
+        if source_payload is None:
+            # The upload sends only bytes _check_source read and verified;
+            # re-reading the path here would reopen the check/read race.
+            raise LTValidationError(f"watched file was not verified before upload: {source_path}")
         result = client.import_evidence_file(
             project_id=project_id,
             file_path=source_path,
+            payload=source_payload,
             source_provider=str(event["source"].get("provider") or "local-folder"),
             source_external_id=_event_source_external_id(event),
             source_uri=str(event["source"].get("uri") or Path(source_path).as_uri()),
@@ -1445,27 +1611,128 @@ def _record_sync_failure(
     return event
 
 
+@dataclass(frozen=True)
+class _SourceCheck:
+    """An event's source re-checked against its scan before sync."""
+
+    stale_reason: str = ""
+    # A staged note's source file bytes: read once, verified against the scan,
+    # and uploaded as they are, so what is sent is exactly what was checked.
+    payload: bytes | None = None
+
+
 def _stale_reason(event: Mapping[str, Any]) -> str:
+    return _check_source(event).stale_reason
+
+
+def _check_source(event: Mapping[str, Any]) -> _SourceCheck:
     source = _json_mapping(event.get("source") or {})
-    path = _optional_str(source.get("path"))
+    if source.get("manifest_path") and event.get("sink") == SINK_ACQUISITION_OUTPUT:
+        # Queued by an older client, which let the manifest name the output's
+        # path and checksum. Scans now refuse that pairing; so does sync.
+        return _SourceCheck(
+            "a watch manifest cannot register a session output; rescan the folder "
+            f"with --mode files --sink acquisition-output: {source['manifest_path']}"
+        )
+    path = _source_file_path(source)
+    payload: bytes | None = None
     if path:
-        fingerprint = stable_file_fingerprint(path)
+        fingerprint: FileFingerprint | None
+        if event.get("sink") == SINK_STAGED_NOTE:
+            snapshot = _read_source_snapshot(path)
+            if isinstance(snapshot, str):
+                return _SourceCheck(snapshot)
+            payload, fingerprint = snapshot
+        else:
+            fingerprint = stable_file_fingerprint(path)
         if fingerprint is None:
-            return f"watched file is missing or still changing: {path}"
+            return _SourceCheck(_UNREADABLE_SOURCE_REASON.format(path=path))
         if (
             fingerprint.checksum != source.get("content_hash")
             or fingerprint.size_bytes != source.get("size_bytes")
-            or fingerprint.mtime != source.get("mtime")
+            # An adapter that cannot reproduce Python's float st_mtime bit for
+            # bit (the MATLAB offline queue) records none; hash and size still
+            # decide.
+            or ("mtime" in source and fingerprint.mtime != source.get("mtime"))
         ):
-            return f"watched file changed since scan: {path}"
+            return _SourceCheck(f"watched file changed since scan: {path}")
     manifest_path = _optional_str(source.get("manifest_path"))
     if manifest_path and source.get("manifest_content_hash"):
         manifest = Path(manifest_path)
-        if not manifest.exists():
-            return f"watch manifest is missing: {manifest}"
-        if file_sha256(manifest) != source.get("manifest_content_hash"):
-            return f"watch manifest changed since scan: {manifest}"
-    return ""
+        try:
+            # Its own name is not followed (the scan never reads a symlinked
+            # manifest), and one over the scan's size cap has changed anyway.
+            with open_regular_file(manifest, follow_symlinks=False) as handle:
+                too_large = os.fstat(handle.fileno()).st_size > MAX_MANIFEST_BYTES
+                manifest_hash = (
+                    ""
+                    if too_large
+                    else hashlib.sha256(handle.read(MAX_MANIFEST_BYTES + 1)).hexdigest()
+                )
+        except FileNotFoundError:
+            return _SourceCheck(f"watch manifest is missing: {manifest}")
+        except NotRegularFileError:
+            return _SourceCheck(f"watch manifest is not a regular file: {manifest}")
+        if manifest_hash != source.get("manifest_content_hash"):
+            return _SourceCheck(f"watch manifest changed since scan: {manifest}")
+    return _SourceCheck(payload=payload)
+
+
+def _source_file_path(source: Mapping[str, Any]) -> str | None:
+    """The local file a sync re-checks (and a staged note uploads), if any.
+
+    A manifest event has none: event_from_manifest drops file identity keys,
+    and one queued by an older client keeps any ``path`` it carries ignored.
+    """
+
+    if source.get("manifest_path"):
+        return None
+    return _optional_str(source.get("path"))
+
+
+_UNREADABLE_SOURCE_REASON = "watched file is missing, not a regular file, or still changing: {path}"
+
+
+def _read_source_snapshot(path: str) -> tuple[bytes, FileFingerprint] | str:
+    """Read a staged note's source file once, for the stale check and the upload.
+
+    Scans record resolved paths, so a symlink at ``path`` now was swapped in
+    since: the final component is opened without following it, and only a
+    regular file is read (a device or FIFO is refused without blocking). A
+    file with other hard links is refused too: a hard link inside the watched
+    folder can name any file its creator could link, such as a private key.
+    Returns the stale reason when the file is missing, refused, or changed
+    while read.
+    """
+
+    unreadable = _UNREADABLE_SOURCE_REASON.format(path=path)
+    try:
+        with open_regular_file(Path(path).expanduser(), follow_symlinks=False) as handle:
+            before = os.fstat(handle.fileno())
+            if before.st_nlink > 1:
+                return (
+                    "watched file has other hard links, so its bytes may belong to a "
+                    f"file outside the watch root; copy it in instead: {path}"
+                )
+            if before.st_size > MAX_UPLOAD_BYTES:
+                raise LTValidationError(
+                    f"Upload file is {before.st_size} bytes, over the "
+                    f"{MAX_UPLOAD_BYTES}-byte limit: {path}"
+                )
+            payload = handle.read(MAX_UPLOAD_BYTES + 1)
+            after = os.fstat(handle.fileno())
+    except (FileNotFoundError, PermissionError, NotRegularFileError):
+        return unreadable
+    if len(payload) != after.st_size or (before.st_size, before.st_mtime) != (
+        after.st_size,
+        after.st_mtime,
+    ):
+        return unreadable
+    return payload, FileFingerprint(
+        size_bytes=after.st_size,
+        mtime=after.st_mtime,
+        checksum=hashlib.sha256(payload).hexdigest(),
+    )
 
 
 def _event_metadata(
@@ -1506,7 +1773,9 @@ def _event_metadata(
         if source.get(key) is not None:
             metadata[f"watch_{key}"] = source[key]
     for key, value in source.items():
-        if str(key).startswith("git_") and isinstance(value, (str, bool, int, float)):
+        if str(key).startswith(("git_", "format_")) and isinstance(
+            value, (str, bool, int, float)
+        ):
             metadata[str(key)] = value
     host = payload.get("host") if isinstance(payload.get("host"), Mapping) else {}
     for key in CAPTURE_HOST_METADATA_KEYS:

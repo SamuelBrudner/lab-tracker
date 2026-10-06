@@ -12,11 +12,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import lab_tracker_client.agent_hooks as agent_hooks
 import lab_tracker_client.auth as auth_helpers
+import lab_tracker_client.autotrack_setup as autotrack_setup
+import lab_tracker_client.cli_agent as agent_cli
+import lab_tracker_client.cli_capture as cli_capture
 import lab_tracker_client.figure_autotrack as autotrack_helpers
 import lab_tracker_client.git_capture as git_capture
+import lab_tracker_client.hook_context as hook_context
 import lab_tracker_client.hooks as hook_install
+import lab_tracker_client.r_autotrack as r_autotrack
 import lab_tracker_client.registry as repo_registry
 import lab_tracker_client.repo as repo_capture
 import lab_tracker_client.schedule as schedule_helpers
@@ -27,6 +31,9 @@ from lab_tracker import repository_conventions as repo_context
 from lab_tracker.assistant_next_questions import is_research_facing_prompt
 from lab_tracker_client import outbox as _outbox
 from lab_tracker_client._version import __version__
+from lab_tracker_client.cli_hpc_epilog import add_hpc_epilog_parser
+from lab_tracker_client.cli_pipeline import add_pipeline_parsers
+from lab_tracker_client.cli_run import add_run_parsers
 from lab_tracker_client.client import (
     NOTE_STATUS_VALUES,
     EntityRef,
@@ -56,6 +63,8 @@ from lab_tracker_client.hpc import sync_outbox_path as hpc_sync_outbox_path
 JsonObject = dict[str, Any]
 # Every adapter outbox under <repo>/.lab-tracker/outbox, in reporting order.
 OUTBOX_ADAPTERS = ("watch", "repo", "hpc")
+# Probe fields `lt setup connect` surfaces as `server_diagnostic`.
+_SERVER_DIAGNOSTIC_KEYS = ("diagnosis", "detail", "next_step", "status_code")
 SKIP_NOTICE = (
     "lab-tracker: skipped commit {sha} ({reason}); {total} commit(s) skipped in this "
     "repo so far. 'lt outbox status' shows the count; 'lt repo report --force-capture' "
@@ -92,7 +101,15 @@ def main(argv: list[str] | None = None) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="lt", description="Lab Tracker consumer CLI.")
+    parser = argparse.ArgumentParser(
+        prog="lt",
+        description="Lab Tracker consumer CLI.",
+        epilog=(
+            "Start with 'lt setup status' (read-only) to see what capture is set up "
+            "here. Capture paths and their setup: docs/capture-guide.md in the Lab "
+            "Tracker repository, or the lab-tracker://setup-guide MCP resource."
+        ),
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
         "--debug",
@@ -116,7 +133,12 @@ def _build_parser() -> argparse.ArgumentParser:
     doctor_parser = subcommands.add_parser(
         "doctor",
         aliases=["check-idioms"],
-        help="Check managed Lab Tracker code-facing idiom blocks.",
+        help=(
+            "Check managed Lab Tracker code-facing idiom blocks, that lt-mcp "
+            "can start (a bounded import check in a child interpreter), and "
+            "whether this client is behind its server (one bounded /health "
+            "request; an unreachable server is a warning, not a failure)."
+        ),
     )
     doctor_parser.add_argument(
         "--target",
@@ -140,6 +162,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     doctor_parser.set_defaults(func=_cmd_doctor, needs_client=False)
 
+    from lab_tracker_client.maintenance import add_parser_options, maintain
+
+    maintain_parser = subcommands.add_parser(
+        "maintain",
+        help="Preview or apply a client upgrade, repo updates, and fresh doctor checks.",
+    )
+    add_parser_options(maintain_parser)
+    maintain_parser.set_defaults(func=maintain, needs_client=False)
+
     update_parser = subcommands.add_parser(
         "update",
         help=(
@@ -149,7 +180,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     update_parser.add_argument(
         "--target",
-        default=".",
+        default=None,
         help="Consumer repo path to update. Defaults to the current directory.",
     )
     update_parser.add_argument(
@@ -165,7 +196,22 @@ def _build_parser() -> argparse.ArgumentParser:
     update_parser.add_argument(
         "--install-skills",
         action="store_true",
-        help="Also refresh the lab-tracker-setup skill in the Claude and Codex homes.",
+        help=(
+            "Also refresh the lab-tracker-setup skill in the Claude and Codex "
+            "homes, in addition to updating the repo (use --skills-only to leave "
+            "the repo alone)."
+        ),
+    )
+    update_parser.add_argument(
+        "--skills-only",
+        action="store_true",
+        help=(
+            "Install or refresh only the lab-tracker-setup skill in the Claude and "
+            "Codex homes, machine-wide; implies --install-skills and touches no "
+            "repo or file in the current directory, unless LAB_TRACKER_SKILLS_HOME "
+            "is a relative path (use an absolute one). Cannot be combined with "
+            "--yes or --target; --dry-run previews."
+        ),
     )
     update_parser.set_defaults(func=_cmd_update, needs_client=False)
 
@@ -175,6 +221,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_git_parsers(subcommands)
     _add_hooks_parsers(subcommands)
     _add_agent_context_parsers(subcommands)
+    agent_cli.add_agent_parsers(subcommands)
 
     prime_parser = subcommands.add_parser(
         "prime",
@@ -279,9 +326,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     _add_watch_parsers(subcommands)
     _add_outbox_parsers(subcommands)
+    cli_capture.add_capture_parsers(subcommands)
     _add_session_parsers(subcommands)
     _add_hpc_parsers(subcommands)
     _add_repo_parsers(subcommands)
+    add_pipeline_parsers(subcommands)
+    add_run_parsers(subcommands)
 
     export_parser = subcommands.add_parser(
         "export",
@@ -457,7 +507,10 @@ def _add_setup_parsers(subcommands: argparse._SubParsersAction) -> None:
     verify_mcp_parser.add_argument(
         "--command",
         default="lt-mcp",
-        help="MCP executable to launch. Defaults to lt-mcp on PATH.",
+        help=(
+            "MCP executable to launch. Defaults to the lt-mcp installed beside "
+            "this lt, else lt-mcp on PATH."
+        ),
     )
     verify_mcp_parser.add_argument(
         "--timeout",
@@ -474,17 +527,40 @@ def _add_setup_parsers(subcommands: argparse._SubParsersAction) -> None:
             "startup file that calls lab_tracker_client.autotrack(). Only saves whose "
             "project comes from autotrack(project_id=...), LAB_TRACKER_PROJECT_ID, or "
             "the checkout's lt_ids.json are captured; any other save is skipped with a "
-            "notice."
+            "notice. With --r, manage the R profile block instead (ggsave() and the "
+            "png/jpeg/tiff/bmp/pdf devices, same rule)."
         ),
     )
     autotrack_parser.add_argument(
         "--uninstall", action="store_true", help="Remove the managed IPython startup file."
     )
     autotrack_parser.add_argument(
+        "--r",
+        dest="r_profile",
+        action="store_true",
+        help="Manage the R autotrack block in ~/.Rprofile (or R_PROFILE_USER) instead.",
+    )
+    autotrack_parser.add_argument(
         "--dry-run", action="store_true", help="Show the change without writing it."
     )
     autotrack_parser.add_argument(
         "--yes", action="store_true", help="Consent to writing the IPython startup file."
+    )
+    autotrack_parser.add_argument(
+        "--jupyter",
+        action="store_true",
+        help=(
+            "Instead, enable the Jupyter Server save hook: each bound notebook's saves "
+            "become one staged lab-notebook page per day."
+        ),
+    )
+    autotrack_parser.add_argument(
+        "--scripts",
+        action="store_true",
+        help=(
+            "Instead, add a .pth file to this Python environment so plain scripts "
+            "capture figures they save or plt.show()."
+        ),
     )
     autotrack_parser.set_defaults(func=_cmd_setup_autotrack, needs_client=False)
 
@@ -527,6 +603,7 @@ def _add_setup_parsers(subcommands: argparse._SubParsersAction) -> None:
         help="Consent to modifying the OS scheduler.",
     )
     schedule_parser.set_defaults(func=_cmd_setup_schedule, needs_client=False)
+    agent_cli.add_setup_agent_hooks_parser(setup_commands)
 
 
 def _add_project_parsers(subcommands: argparse._SubParsersAction) -> None:
@@ -937,6 +1014,7 @@ def _add_watch_parsers(subcommands: argparse._SubParsersAction) -> None:
         help="Suppress errors and error exit codes for scheduler runs.",
     )
     run_parser.set_defaults(func=_cmd_watch_run)
+    agent_cli.add_watch_touch_parser(watch_commands)
 
 
 def _add_outbox_parsers(subcommands: argparse._SubParsersAction) -> None:
@@ -1048,7 +1126,9 @@ def _add_auth_parsers(subcommands: argparse._SubParsersAction) -> None:
         "doctor",
         help=(
             "Enumerate every lab-tracker MCP registration and flag deprecated "
-            "username/password auth (drift that causes silent 401s)."
+            "username/password auth (drift that causes silent 401s). For a Claude "
+            "Desktop entry, also report its command and warn when an absolute "
+            "command path is not an existing file."
         ),
     )
     doctor_parser.add_argument(
@@ -1161,6 +1241,7 @@ def _add_hpc_parsers(subcommands: argparse._SubParsersAction) -> None:
     sync_parser.add_argument("--request-draft", action="store_true")
     sync_parser.add_argument("--limit", type=int, help="Maximum events to process.")
     sync_parser.set_defaults(func=_cmd_hpc_sync)
+    add_hpc_epilog_parser(hpc_commands)
 
 
 def _add_capture_context_args(parser: argparse.ArgumentParser) -> None:
@@ -1544,11 +1625,11 @@ def _cmd_watch_remove(args: argparse.Namespace) -> Any:
 
 
 def _cmd_setup_status(args: argparse.Namespace) -> Any:
-    hook = agent_hooks.read_piped_hook_payload(sys.stdin) if args.brief else None
+    hook = hook_context.read_piped_hook_payload(sys.stdin) if args.brief else None
     status = setup_helpers.setup_status(args.target, brief=args.brief)
     if hook is None:
         return status
-    return agent_hooks.context_output(hook, agent_hooks.status_context(status))
+    return hook_context.context_output(hook, hook_context.status_context(status))
 
 
 def _cmd_setup_init(args: argparse.Namespace) -> Any:
@@ -1599,8 +1680,20 @@ def _cmd_setup_connect(args: argparse.Namespace) -> Any:
     except setup_helpers.ConnectionProfileSecurityError as exc:
         raise SystemExit(str(exc)) from None
     if args.base_url:
-        payload["server_reachable"] = setup_helpers.probe_health(args.base_url)
+        payload.update(_server_probe_fields(args.base_url))
     return payload
+
+
+def _server_probe_fields(base_url: str) -> JsonObject:
+    """`server_reachable` plus, only when the probe explains a failure, `server_diagnostic`."""
+
+    probe = setup_helpers.probe_health_diagnostics(base_url)
+    fields: JsonObject = {"server_reachable": probe["reachable"]}
+    if "diagnosis" in probe:
+        fields["server_diagnostic"] = {
+            key: probe[key] for key in _SERVER_DIAGNOSTIC_KEYS if key in probe
+        }
+    return fields
 
 
 def _cmd_setup_verify_client(args: argparse.Namespace) -> Any:
@@ -1944,6 +2037,25 @@ def _cmd_watch_run(client: LabTracker, args: argparse.Namespace) -> Any:
 
 
 def _cmd_setup_autotrack(args: argparse.Namespace) -> Any:
+    if args.r_profile and (args.jupyter or args.scripts):
+        raise SystemExit(
+            "lt setup autotrack: run --r on its own, separately from --jupyter/--scripts."
+        )
+    if args.jupyter or args.scripts:
+        return autotrack_setup.setup_autotrack_targets(
+            jupyter=args.jupyter,
+            scripts=args.scripts,
+            yes=args.yes,
+            dry_run=args.dry_run,
+            uninstall=args.uninstall,
+        )
+    if args.r_profile:
+        if not (args.yes or args.dry_run):
+            raise SystemExit(
+                "lt setup autotrack --r edits your R profile (~/.Rprofile); "
+                "pass --yes to consent or --dry-run to preview."
+            )
+        return r_autotrack.install_rprofile(dry_run=args.dry_run, uninstall=args.uninstall)
     if not (args.yes or args.dry_run):
         raise SystemExit(
             "lt setup autotrack writes an IPython startup file; "
@@ -2221,11 +2333,11 @@ def _cmd_quick(client: LabTracker, args: argparse.Namespace) -> Any:
 
 def _cmd_prime(client: LabTracker, args: argparse.Namespace) -> Any:
     prompt = args.prompt
-    hook: agent_hooks.HookPayload | None = None
+    hook: hook_context.HookPayload | None = None
     if prompt is None and args.if_research_facing:
-        stdin = agent_hooks.read_stdin(sys.stdin)
-        if isinstance(stdin, agent_hooks.HookPayload):
-            hook, prompt = stdin, agent_hooks.hook_prompt(stdin)
+        stdin = hook_context.read_stdin(sys.stdin)
+        if isinstance(stdin, hook_context.HookPayload):
+            hook, prompt = stdin, hook_context.hook_prompt(stdin)
         else:
             prompt = stdin
     if args.if_research_facing and not is_research_facing_prompt(prompt or ""):
@@ -2233,7 +2345,7 @@ def _cmd_prime(client: LabTracker, args: argparse.Namespace) -> Any:
     result = client.next_questions(project_id=args.project, limit=args.limit)
     if hook is None:
         return result
-    return agent_hooks.context_output(hook, agent_hooks.prime_context(result))
+    return hook_context.context_output(hook, hook_context.prime_context(result))
 
 
 def _cmd_export(client: LabTracker, args: argparse.Namespace) -> Any:
@@ -2466,6 +2578,7 @@ def _cmd_doctor(args: argparse.Namespace) -> Any:
     if not getattr(args, "all", False):
         payload = _doctor(args.target)
         payload["lt_mcp"] = setup_helpers.mcp_startup_check()
+        payload.update(setup_helpers.doctor_release_check())
         return payload
     repos = []
     pruned = []
@@ -2502,6 +2615,7 @@ def _cmd_doctor(args: argparse.Namespace) -> Any:
         "repos": repos,
         # One install serves every registered repo, so check it once per sweep.
         "lt_mcp": setup_helpers.mcp_startup_check(),
+        **setup_helpers.doctor_release_check(),
     }
     if pruned:
         result["pruned"] = pruned
@@ -2509,11 +2623,20 @@ def _cmd_doctor(args: argparse.Namespace) -> Any:
 
 
 def _cmd_update(args: argparse.Namespace) -> Any:
-    from lab_tracker.cli import update_consumer_repo
+    from lab_tracker.cli import (
+        refresh_setup_skills,
+        reject_skills_only_conflicts,
+        update_consumer_repo,
+    )
 
+    if args.skills_only:
+        # Before resolving the MCP URL: skills-only never uses it, so a
+        # malformed LAB_TRACKER_BASE_URL must not break the command.
+        reject_skills_only_conflicts("lt", yes=args.yes, target=args.target)
+        return refresh_setup_skills(dry_run=args.dry_run).as_dict()
     mcp_base_url, _ = setup_helpers.resolved_base_url_for_setup()
     result = update_consumer_repo(
-        args.target,
+        args.target or ".",
         mcp_base_url=mcp_base_url,
         yes=args.yes,
         dry_run=args.dry_run,
@@ -2567,6 +2690,8 @@ def _jsonable(value: Any) -> Any:
 
 
 def _payload_exit_code(payload: Any) -> int:
+    if isinstance(payload, dict) and payload.get("command") == "maintain":
+        return 0 if payload.get("ok") is True else 1
     if (
         isinstance(payload, dict)
         and payload.get("command") == "import-folder"

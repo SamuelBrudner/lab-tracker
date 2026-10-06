@@ -11,22 +11,19 @@ swallowed health probe.
 from __future__ import annotations
 
 import difflib
-import importlib
 import json
-import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-import traceback
-from collections.abc import Iterator
-from contextlib import contextmanager, suppress
+from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 
@@ -55,7 +52,9 @@ from lab_tracker_client.client import (
 )
 from lab_tracker_client.connection_diagnostics import ConnectionTrace
 from lab_tracker_client.hooks import HOOK_BLOCK_BEGIN, hook_lt_path, hook_path_for_repo
+from lab_tracker_client.redaction import redact_capture_text
 from lab_tracker_client.repo import HOOK_BEGIN_MARKER as REPO_HOOK_BLOCK_BEGIN
+from lab_tracker_client.transport import HEALTH_PROBE_DEADLINE_SECONDS, request_within_deadline
 
 JsonObject = dict[str, Any]
 
@@ -66,7 +65,50 @@ _MCP_PROBE_POLL_INTERVAL_SECONDS = 0.02
 _MCP_PROBE_SHUTDOWN_GRACE_SECONDS = 2.0
 _MCP_SERVER_MODULE = "lab_tracker.mcp_server"
 _MCP_IMPORT_TRACEBACK_LIMIT = 2000
+# The smoke check gives a cold import (slow disk, first run after an install)
+# this long before it calls the server module unimportable.
+_MCP_IMPORT_TIMEOUT_SECONDS = 15.0
+# Sentinel exit status of a child whose import raised, so a raise is told apart
+# from the child dying on its own.
+_MCP_IMPORT_FAILED_EXIT_CODE = 111
+# Longest error the one-line --brief suggestion carries; `lt doctor` has the rest.
+_BRIEF_ERROR_LIMIT = 160
+_MCP_IMPORT_CHILD_CODE = """\
+import sys
+
+# ``-c`` puts the working directory first on sys.path; a console script does not,
+# so drop it and let a folder in the current directory never shadow the install.
+# This comes before every other import, this harness's own included.
+if sys.path and sys.path[0] == "":
+    del sys.path[0]
+
+import importlib
+import traceback
+
+try:
+    importlib.import_module(sys.argv[1])
+except BaseException as exc:  # SystemExit and KeyboardInterrupt are import failures too.
+    traceback.print_exc()
+    # ASCII only, so a message no stdout encoding can write cannot lose the line.
+    line = " ".join(f"{type(exc).__name__}: {exc}".split())
+    print(line.encode("ascii", "backslashreplace").decode("ascii"))
+    sys.exit(int(sys.argv[2]))
+"""
+_MCP_IMPORT_FAILED_NEXT_STEP = (
+    "lt-mcp cannot start in this environment, so agents see the Lab "
+    "Tracker MCP server fail to connect. Reinstalling the client with "
+    "the install command on the server's Agents page replaces the "
+    "broken dependencies; `lt doctor` then confirms the fix."
+)
+_MCP_IMPORT_TIMEOUT_NEXT_STEP = (
+    "The lt-mcp server module did not finish importing within the check's time "
+    "limit, so agents may see the Lab Tracker MCP server time out while it "
+    "connects. A hung or very slow dependency import can cause this; rerun "
+    "`lt doctor` to see whether it repeats, and if it does, the install "
+    "command on the server's Agents page reinstalls the client."
+)
 _FULL_GIT_REVISION = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
+_SKILLS_ONLY_SCOPE_NOTE = "and leaves this repository's files alone (`--dry-run` previews)."
 
 _SCAFFOLD_FILES = (
     ".mcp.json",
@@ -221,12 +263,7 @@ def setup_status(target: str | Path = ".", *, brief: bool = False) -> JsonObject
 
     root = Path(target).expanduser().resolve()
     profile = load_connection_profile()
-    base_url, base_url_source = _resolve_base_url(profile)
-    server: JsonObject = {
-        "base_url": base_url,
-        "source": base_url_source,
-        **probe_health_diagnostics(base_url),
-    }
+    server = _server_status(profile)
     payload: JsonObject = {
         "command": "setup-status",
         "target": str(root),
@@ -248,7 +285,9 @@ def setup_status(target: str | Path = ".", *, brief: bool = False) -> JsonObject
         "hooks": _hooks_status(root),
         "skills": _skills_status(),
         "autotrack": _autotrack_status(),
+        "autotrack_r": _autotrack_r_status(),
         "session": _session_status(root),
+        "agent_hooks": _agent_hooks_status(root),
     }
     payload["suggestions"] = _suggestions(payload)
     if not brief:
@@ -269,6 +308,94 @@ def setup_status(target: str | Path = ".", *, brief: bool = False) -> JsonObject
     }
 
 
+def _server_status(profile: dict[str, str]) -> JsonObject:
+    """Resolve the server address and probe its ``/health`` once (bounded, fail-soft)."""
+
+    base_url, base_url_source = _resolve_base_url(profile)
+    return {
+        "base_url": base_url,
+        "source": base_url_source,
+        **probe_health_diagnostics(base_url),
+    }
+
+
+def doctor_release_check() -> JsonObject:
+    """``lt doctor``'s client/server release check: it tries to connect and never raises.
+
+    One bounded ``GET /health``, the same probe ``lt setup status`` uses. A server
+    that cannot be reached or read, or an address that does not parse, becomes a
+    warning and the check is skipped; drift and the ``lt-mcp`` import check stay
+    the only things that decide ``lt doctor``'s exit code.
+    """
+
+    try:
+        server = _server_status(load_connection_profile())
+    except Exception as exc:  # noqa: BLE001 - fail soft: a warning, never a doctor failure.
+        server = _unusable_server(exc)
+    client = _client_release_status(server)
+    return {"server": server, "client": client, "warnings": _release_warnings(server, client)}
+
+
+def _unusable_server(exc: Exception) -> JsonObject:
+    """The ``server`` block when the check itself could not run (a bad address, a crash)."""
+
+    reason = _brief_error(redact_capture_text(f"{type(exc).__name__}: {exc}"))
+    return {
+        "base_url": None,
+        "source": None,
+        "reachable": False,
+        "diagnosis": "server_check_failed",
+        "detail": f"The server check could not run ({reason}).",
+        "next_step": (
+            "Check LAB_TRACKER_BASE_URL and the saved connection profile; "
+            "`lt setup status` shows both."
+        ),
+    }
+
+
+def _release_warnings(server: JsonObject, client: JsonObject) -> list[str]:
+    """At most one soft warning: the server was unusable, unreadable, or is ahead."""
+
+    if server.get("diagnosis"):
+        return [_server_check_skipped_warning(server)]
+    if client.get("status") == "unknown":
+        return [_unreadable_release_warning(client)]
+    if client.get("update_recommended"):
+        return [_behind_server_message(client)]
+    return []
+
+
+def _server_check_skipped_warning(server: JsonObject) -> str:
+    where = server.get("base_url") or "the configured server"
+    explanation = " ".join(
+        str(server[key]) for key in ("detail", "next_step") if server.get(key)
+    )
+    return (
+        f"Could not check this client's release against the Lab Tracker server at {where} "
+        f"({server['diagnosis']}), so the client/server release check was skipped. {explanation}"
+    ).rstrip()
+
+
+def _unreadable_release_warning(client: JsonObject) -> str:
+    client_version = client["client"]["version"] or "unknown"
+    server_version = client["server"]["version"] or "unknown"
+    return (
+        f"Could not compare this client's release ({client_version}) with the server's "
+        f"({server_version}), so the client/server release check was skipped."
+    )
+
+
+def _behind_server_message(client: JsonObject) -> str:
+    server = ReleaseIdentity.from_values(
+        client["server"]["version"],
+        client["server"]["revision"],
+    )
+    return (
+        f"This lab-tracker client (release {client['client']['version']}) is behind "
+        f"its server (release {server.version}); {update_steps(server)}."
+    )
+
+
 def _client_release_status(server: JsonObject) -> JsonObject:
     """Compare this client's installed release with the one ``/health`` reported."""
 
@@ -285,24 +412,49 @@ def _install_suggestions(status: JsonObject) -> list[str]:
     suggestions: list[str] = []
     lt_mcp = status["lt_mcp"]
     if lt_mcp.get("importable") is False:
-        suggestions.append(
-            f"lt-mcp cannot start in this environment ({lt_mcp.get('error')}); the "
-            "install command on the server's Agents page reinstalls the client, and "
-            "`lt doctor` shows the full traceback."
-        )
+        suggestions.append(_lt_mcp_suggestion(lt_mcp))
     client = status["client"]
-    # Only a newer server (MAJOR, MINOR) is worth a suggestion; a PATCH-only
-    # gap stays in the ``client`` report as information.
+    # Any newer server release is worth a suggestion, a PATCH release included;
+    # revision drift within one release is not (it stays in the ``client`` report).
     if client.get("update_recommended"):
-        server = ReleaseIdentity.from_values(
-            client["server"]["version"],
-            client["server"]["revision"],
-        )
-        suggestions.append(
-            f"This lab-tracker client (release {client['client']['version']}) is behind "
-            f"its server (release {server.version}); {update_steps(server)}."
-        )
+        suggestions.append(_behind_server_message(client))
     return suggestions
+
+
+def _lt_mcp_suggestion(lt_mcp: JsonObject) -> str:
+    """The one-line suggestion for a failed smoke check, worded for what it can promise.
+
+    Only an import that raised or crashed leaves a traceback for ``lt doctor`` to
+    show. A timeout has none, and its own next step is to rerun ``lt doctor``
+    before reinstalling; an interpreter that could not start has none either.
+    """
+
+    error = _brief_error(lt_mcp.get("error"))
+    reinstall = "the install command on the server's Agents page reinstalls the client"
+    if lt_mcp.get("next_step") == _MCP_IMPORT_TIMEOUT_NEXT_STEP:
+        return (
+            f"lt-mcp did not finish importing in time ({error}); a hung or very slow "
+            f"dependency import can cause this, so rerun `lt doctor` to see whether it "
+            f"repeats, and if it does, {reinstall}."
+        )
+    if not str(lt_mcp.get("traceback") or "").strip():
+        return (
+            f"lt-mcp may not be able to start in this environment ({error}); rerun "
+            f"`lt doctor` to see whether it repeats, and if it does, {reinstall}."
+        )
+    return (
+        f"lt-mcp cannot start in this environment ({error}); {reinstall}, and "
+        "`lt doctor` shows the full traceback."
+    )
+
+
+def _brief_error(error: object) -> str:
+    """One line, at most ``_BRIEF_ERROR_LIMIT`` characters, for the SessionStart line."""
+
+    line = " ".join(str(error or "unknown error").split())
+    if len(line) <= _BRIEF_ERROR_LIMIT:
+        return line
+    return line[: _BRIEF_ERROR_LIMIT - 3] + "..."
 
 
 def _suggestions(status: JsonObject) -> list[str]:
@@ -372,23 +524,27 @@ def _suggestions(status: JsonObject) -> list[str]:
         for target in skill_targets
         if target.get("installed") and target.get("up_to_date") is not True
     ]
+    # Skill state is machine-wide, so the fix must not depend on (or write
+    # into) the current directory: `lt update --skills-only` touches only the
+    # agent skill homes, unlike `lt setup init`/`lt update --install-skills`,
+    # which also scaffold or refresh this repository.
     if missing_skill_targets:
         names = ", ".join(missing_skill_targets)
         suggestions.append(
             f"The lab-tracker-setup skill is missing from: {names}; "
-            "`lt setup init --install-skills` installs it."
+            f"`lt update --skills-only` installs it {_SKILLS_ONLY_SCOPE_NOTE}"
         )
     elif stale_skill_targets:
         suggestions.append(
             "One or more installed lab-tracker-setup skills are stale; "
-            "`lt update --install-skills` refreshes them."
+            f"`lt update --skills-only` refreshes them {_SKILLS_ONLY_SCOPE_NOTE}"
         )
     elif not skill_targets and skills.get("installed") and skills.get("up_to_date") is False:
         # Backward-compatible fallback for status payloads produced before
         # multi-agent skill targets were exposed.
         suggestions.append(
             "The installed lab-tracker-setup skill is stale; "
-            "`lt update --install-skills` refreshes it."
+            f"`lt update --skills-only` refreshes it {_SKILLS_ONLY_SCOPE_NOTE}"
         )
     return suggestions
 
@@ -483,7 +639,13 @@ def probe_health_diagnostics(base_url: str) -> JsonObject:
     try:
         normalized = normalize_instance_base_url(base_url)
         with httpx.Client(timeout=_HEALTH_PROBE_TIMEOUT_SECONDS) as client:
-            response = client.get(normalized + "/health", extensions={"trace": trace})
+            response = request_within_deadline(
+                client,
+                "GET",
+                normalized + "/health",
+                deadline_seconds=HEALTH_PROBE_DEADLINE_SECONDS,
+                extensions={"trace": trace},
+            )
         payload: JsonObject = {"reachable": response.status_code < 500}
         if response.status_code >= 400:
             payload.update(
@@ -501,49 +663,122 @@ def probe_health_diagnostics(base_url: str) -> JsonObject:
 
 
 def mcp_startup_check() -> JsonObject:
-    """Offline smoke check that this Python environment can start ``lt-mcp``.
+    """Offline, bounded smoke check that this Python environment can start ``lt-mcp``.
 
     Importing the server module also builds its default server object and
     registers every tool, which catches dependency breakage (an ``mcp`` release
     without ``mcp.server.fastmcp``, a missing package) right after an install
-    instead of when an agent first launches ``lt-mcp``. In-process keeps it
-    cheap enough for the SessionStart hook: no stdio session, no network I/O.
-    ``lt setup verify-mcp`` stays the deeper, opt-in connectivity check.
+    instead of when an agent first launches ``lt-mcp``.
+
+    The import runs in a child interpreter (``sys.executable``, the environment
+    ``lt`` itself runs from), because an import can hang, call ``sys.exit``, or
+    crash the interpreter, and none of that may hang or kill ``lt doctor`` or
+    the SessionStart hook's ``lt setup status --brief --fail-silent``. A
+    timeout, a non-zero exit (including a signal), and an import error are all
+    reported as ``importable: false``. No stdio MCP session, network I/O, or
+    credential is involved; ``lt setup verify-mcp`` stays the deeper, opt-in
+    connectivity check.
     """
 
     payload: JsonObject = {"module": _MCP_SERVER_MODULE, "python": sys.executable}
-    try:
-        with _preserved_root_logging():
-            importlib.import_module(_MCP_SERVER_MODULE)
-    except Exception as exc:  # noqa: BLE001 - any import failure means lt-mcp cannot start.
-        traceback_text = "".join(traceback.format_exception(exc))
-        payload.update(
-            importable=False,
-            error=f"{type(exc).__name__}: {exc}",
-            traceback=traceback_text[-_MCP_IMPORT_TRACEBACK_LIMIT:],
-            next_step=(
-                "lt-mcp cannot start in this environment, so agents see the Lab "
-                "Tracker MCP server fail to connect. Reinstalling the client with "
-                "the install command on the server's Agents page replaces the "
-                "broken dependencies; `lt doctor` then confirms the fix."
-            ),
-        )
+    failure = _mcp_import_failure()
+    if failure is None:
+        payload["importable"] = True
         return payload
-    payload["importable"] = True
+    payload.update(
+        importable=False,
+        error=failure.error,
+        traceback=_bounded_child_output(failure.stderr),
+        next_step=(
+            _MCP_IMPORT_TIMEOUT_NEXT_STEP if failure.timed_out else _MCP_IMPORT_FAILED_NEXT_STEP
+        ),
+    )
     return payload
 
 
-@contextmanager
-def _preserved_root_logging() -> Iterator[None]:
-    """Keep FastMCP's constructor-time ``logging.basicConfig`` out of ``lt``'s output."""
+class _ImportFailure(NamedTuple):
+    error: str
+    stderr: str
+    timed_out: bool
 
-    root = logging.getLogger()
-    handlers, level = list(root.handlers), root.level
+
+def _mcp_import_failure() -> _ImportFailure | None:
+    """Import the server module in a child interpreter; ``None`` when it imported.
+
+    When the import raises (anything, a ``SystemExit`` included) the child
+    prints one normalised ``Type: message`` line last on stdout and exits with
+    ``_MCP_IMPORT_FAILED_EXIT_CODE``; any other non-zero status is the child
+    dying on its own.
+    """
+
     try:
-        yield
-    finally:
-        root.handlers[:] = handlers
-        root.setLevel(level)
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                _MCP_IMPORT_CHILD_CODE,
+                _MCP_SERVER_MODULE,
+                str(_MCP_IMPORT_FAILED_EXIT_CODE),
+            ],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            stdin=subprocess.DEVNULL,
+            timeout=_MCP_IMPORT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        error = (
+            f"TimeoutError: importing {_MCP_SERVER_MODULE} did not finish within "
+            f"{_MCP_IMPORT_TIMEOUT_SECONDS:g} seconds"
+        )
+        return _ImportFailure(error, _decoded_output(exc.stderr), timed_out=True)
+    except OSError as exc:  # the interpreter itself could not start
+        return _ImportFailure(f"{type(exc).__name__}: {exc}", "", timed_out=False)
+    if completed.returncode == 0:
+        return None
+    stdout_lines = completed.stdout.splitlines()
+    if completed.returncode == _MCP_IMPORT_FAILED_EXIT_CODE and stdout_lines:
+        error = _bounded_error_line(stdout_lines[-1])
+    else:
+        died = _describe_child_exit(completed.returncode)
+        error = f"the interpreter importing {_MCP_SERVER_MODULE} {died}"
+    return _ImportFailure(error, completed.stderr, timed_out=False)
+
+
+def _describe_child_exit(returncode: int) -> str:
+    if returncode >= 0:
+        return f"exited with status {returncode}"
+    try:
+        name = signal.Signals(-returncode).name
+    except ValueError:
+        name = f"signal {-returncode}"
+    return f"was killed by {name}"
+
+
+def _decoded_output(value: str | bytes | None) -> str:
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value or ""
+
+
+def _bounded_error_line(line: str) -> str:
+    """The redacted first ``_MCP_IMPORT_TRACEBACK_LIMIT`` characters of the child's error line."""
+
+    # Redact before cutting, so a secret at the cut is replaced whole instead of
+    # leaving a prefix the redactor no longer recognises. Trim first, with extra
+    # tail, so a huge line cannot make the redactor scan megabytes.
+    head = line[: _MCP_IMPORT_TRACEBACK_LIMIT * 2]
+    return redact_capture_text(head)[:_MCP_IMPORT_TRACEBACK_LIMIT]
+
+
+def _bounded_child_output(output: str) -> str:
+    """The redacted last ``_MCP_IMPORT_TRACEBACK_LIMIT`` characters of the child's stderr."""
+
+    # Trim before redacting so a noisy child cannot make the redactor scan
+    # megabytes; the extra head keeps a secret at the cut from being split.
+    recent = output[-_MCP_IMPORT_TRACEBACK_LIMIT * 2 :]
+    return redact_capture_text(recent)[-_MCP_IMPORT_TRACEBACK_LIMIT:]
 
 
 def verify_client_revision(expected_revision: str) -> JsonObject:
@@ -1098,11 +1333,24 @@ def _hpc_status(root: Path) -> JsonObject:
 
 
 def _autotrack_status() -> JsonObject:
+    from lab_tracker_client.autotrack_setup import autotrack_hook_status
     from lab_tracker_client.figure_autotrack import ipython_startup_status
 
+    status: JsonObject = {"startup_file": None, "installed": False, "up_to_date": None}
     with suppress(Exception):
-        return ipython_startup_status()
-    return {"startup_file": None, "installed": False, "up_to_date": None}
+        status = ipython_startup_status()
+    # The Jupyter save hook and the scripts .pth, next to the IPython startup file.
+    with suppress(Exception):
+        status.update(autotrack_hook_status())
+    return status
+
+
+def _autotrack_r_status() -> JsonObject:
+    from lab_tracker_client.r_autotrack import rprofile_status
+
+    with suppress(Exception):
+        return rprofile_status()
+    return {"rprofile": None, "installed": False, "up_to_date": None}
 
 
 def _session_status(root: Path) -> JsonObject:
@@ -1113,6 +1361,16 @@ def _session_status(root: Path) -> JsonObject:
         status.pop("command", None)
         return status
     return {"present": False, "active": False}
+
+
+def _agent_hooks_status(root: Path) -> JsonObject:
+    """Whether `lt setup agent-hooks` entries are present; an opt-in, never suggested."""
+
+    from lab_tracker_client.agent_hooks import agent_hooks_status
+
+    with suppress(Exception):
+        return agent_hooks_status(root)
+    return {"installed": False, "session_end": False, "watch_touch": False, "files": []}
 
 
 def _hooks_status(root: Path) -> JsonObject:

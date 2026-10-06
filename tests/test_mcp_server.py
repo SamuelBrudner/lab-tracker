@@ -3160,6 +3160,10 @@ def test_draft_tool_hints_steer_a_curate_token_through_the_queue() -> None:
     run_batch = tools_by_name["lab_tracker_run_graph_draft_batch"].description or ""
     assert "pending" in run_batch
     assert "lab_tracker_list_my_drafts" in run_batch
+    # Capture-setup tips are advice for the person: report them, never act on them.
+    get_draft = tools_by_name["lab_tracker_get_graph_draft"].description or ""
+    assert "context_packet.capture_setup" in get_draft
+    assert "never run" in get_draft
 
 
 def test_request_graph_draft_tool_posts_and_hints_review_queue(monkeypatch) -> None:

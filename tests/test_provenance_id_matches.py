@@ -300,6 +300,18 @@ def _links(
     return response.json()["data"]
 
 
+def _exact_id_links(
+    client: TestClient, headers: dict[str, str], project_id: str
+) -> list[dict[str, Any]]:
+    """Proposed links minus the time-window detector's (sessions here are open)."""
+
+    return [
+        link
+        for link in _links(client, headers, project_id)
+        if link["basis"] != ProvenanceLinkBasis.TIME_WINDOW_MATCH.value
+    ]
+
+
 def test_batch_run_proposes_exact_id_links_on_the_provenance_review_surface(
     client: TestClient, admin_auth_headers: dict[str, str]
 ) -> None:
@@ -317,7 +329,7 @@ def test_batch_run_proposes_exact_id_links_on_the_provenance_review_surface(
 
     run = _run_batch(client, admin_auth_headers, project_id)
     assert run["status"] == "ready"
-    links = _links(client, admin_auth_headers, project_id)
+    links = _exact_id_links(client, admin_auth_headers, project_id)
 
     assert {(link["target"]["entity_type"], link["target"]["entity_id"]) for link in links} == {
         ("session", session_id),
@@ -414,7 +426,7 @@ def test_exact_id_detector_stays_silent_when_unsure_or_already_linked(
 
     _run_batch(client, admin_auth_headers, project_id)
 
-    assert _links(client, admin_auth_headers, project_id) == []
+    assert _exact_id_links(client, admin_auth_headers, project_id) == []
 
 
 def test_exact_id_detector_failure_never_fails_the_batch_or_the_hash_detector(

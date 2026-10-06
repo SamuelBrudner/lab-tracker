@@ -37,6 +37,7 @@ from lab_tracker.services.question_service import QuestionRefactorResult, Questi
 from lab_tracker.services.record_export_service import RecordExportService
 from lab_tracker.services.review_email_service import ReviewEmailService
 from lab_tracker.services.session_service import SessionService
+from lab_tracker.services.session_suggestions import SessionSuggestionService
 from lab_tracker.services.supervision_service import SupervisionService
 from lab_tracker.services.visualization_service import VisualizationService
 
@@ -75,6 +76,7 @@ __all__ = [
     "ReviewEmailService",
     "ServiceContext",
     "SessionService",
+    "SessionSuggestionService",
     "VisualizationService",
     "SupervisionService",
     "BatchSchedulingCoordinator",

@@ -1,6 +1,8 @@
 import * as React from "react";
 
 import { useApiResource } from "../../hooks/useApiResource.js";
+import { kioskRoute } from "../bench-capture/KioskLaunchPanel.jsx";
+import { NfcTagWriter } from "../bench-capture/NfcTagWriter.jsx";
 
 function captureRoute(session) {
   return `/app/capture?project_id=${encodeURIComponent(
@@ -44,6 +46,7 @@ function SessionCaptureLinkSection({ token, session, navigate }) {
       ) : null}
       {link?.capture_url ? <div className="mono session-capture-url">{link.capture_url}</div> : null}
       {error ? <p className="subtle">{error}</p> : null}
+      {link?.capture_url ? <NfcTagWriter captureUrl={link.capture_url} /> : null}
       <div className="inline">
         <button
           type="button"
@@ -51,6 +54,15 @@ function SessionCaptureLinkSection({ token, session, navigate }) {
           onClick={() => navigate(captureRoute(session))}
         >
           Capture on this device
+        </button>
+        <button
+          type="button"
+          className="btn-secondary"
+          onClick={() =>
+            navigate(kioskRoute({ projectId: session.project_id, sessionId: session.session_id }))
+          }
+        >
+          Open bench kiosk
         </button>
       </div>
     </section>

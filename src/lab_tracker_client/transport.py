@@ -23,6 +23,8 @@ authority and re-checks Content-Length.
 from __future__ import annotations
 
 import os
+import threading
+import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, BinaryIO, Protocol
@@ -37,6 +39,137 @@ JsonObject = dict[str, Any]
 # from the server config (which would pull starlette into the consumer package)
 # so a client can reject an oversize file locally before transferring it.
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+
+
+# The advisory /health probes (`lt setup status`, the `lt-mcp` startup check) must
+# not hold a session. httpx timeouts apply to each connect, write, and read on its
+# own, so a server that answers and then trickles its headers or body a byte at a
+# time never trips them; this is the wall-clock limit on the response.
+HEALTH_PROBE_DEADLINE_SECONDS = 4.0
+# /health answers with a small JSON document; anything larger is cut, not read.
+HEALTH_PROBE_MAX_BODY_BYTES = 64 * 1024
+# Headers that describe the bytes on the wire, which the returned response no longer has.
+_WIRE_ENCODING_HEADERS = frozenset({"content-encoding", "content-length", "transfer-encoding"})
+# What a stalled read raises once the watchdog has closed its connection. Connect
+# and proxy failures are not in it: they keep their own, more specific diagnosis.
+_READ_FAILURES = (httpx.ReadError, httpx.RemoteProtocolError)
+
+
+def request_within_deadline(
+    client: httpx.Client,
+    method: str,
+    url: str,
+    *,
+    deadline_seconds: float,
+    max_body_bytes: int = HEALTH_PROBE_MAX_BODY_BYTES,
+    **kwargs: Any,
+) -> httpx.Response:
+    """Send one request, giving up once its response has taken ``deadline_seconds``.
+
+    The body is streamed, so a slow or endless one is noticed as it arrives
+    instead of after ``read()`` returns, and it is cut at ``max_body_bytes``
+    (a cut body no longer parses as JSON, so it reads as an unusable reply).
+    The result is an ordinary, fully read :class:`httpx.Response` with the
+    body decoded, so callers use it exactly as they would ``client.request``'s.
+
+    The deadline runs from the call and covers the wait for the response
+    headers as well as the body. It is checked as each chunk arrives, and a
+    watchdog timer closes ``client`` when it expires, which fails a read still
+    waiting on a server that trickles its headers or body a byte at a time.
+    That read notices the close when its next byte or per-phase timeout
+    arrives, so the deadline can be overrun by one read, which httpx's own
+    per-phase timeout bounds. Getting connected is not covered: the watchdog
+    cannot interrupt name resolution or a connect in progress, resolution has no
+    limit of its own, and httpx's connect timeout applies to each address a name
+    resolves to, not to all of them together. Exceeding the deadline raises
+    :class:`httpx.ReadTimeout`, like any stalled response.
+
+    An expired deadline leaves ``client`` closed, so pass one that serves this
+    request alone.
+    """
+
+    started = time.monotonic()
+    expired = threading.Event()
+
+    def out_of_time() -> httpx.ReadTimeout:
+        return httpx.ReadTimeout(
+            f"The response did not finish within {deadline_seconds:g} seconds."
+        )
+
+    def check_deadline() -> None:
+        if time.monotonic() - started > deadline_seconds:
+            raise out_of_time()
+
+    def close_client() -> None:
+        expired.set()
+        client.close()
+
+    watchdog = threading.Timer(deadline_seconds, close_client)
+    watchdog.daemon = True
+    watchdog.start()
+    try:
+        return _read_response(
+            client, method, url, max_body_bytes, check_deadline=check_deadline, **kwargs
+        )
+    except _READ_FAILURES as exc:
+        # The watchdog closed the connection under a read that was still waiting;
+        # a plain socket reports that as a read error, a TLS one as a disconnect.
+        if expired.is_set():
+            raise out_of_time() from exc
+        raise
+    finally:
+        watchdog.cancel()
+
+
+def _read_response(
+    client: httpx.Client,
+    method: str,
+    url: str,
+    max_body_bytes: int,
+    *,
+    check_deadline: Callable[[], None],
+    **kwargs: Any,
+) -> httpx.Response:
+    body = bytearray()
+    with client.stream(method, url, **kwargs) as response:
+        check_deadline()
+        for chunk in response.iter_bytes():
+            body += chunk
+            if len(body) >= max_body_bytes:
+                break
+            check_deadline()
+        headers = [
+            (name, value)
+            for name, value in response.headers.multi_items()
+            if name.lower() not in _WIRE_ENCODING_HEADERS
+        ]
+        return httpx.Response(
+            response.status_code,
+            headers=headers,
+            content=bytes(body[:max_body_bytes]),
+            request=response.request,
+        )
+
+
+_SENTENCE_END = (".", "!", "?")
+# A part that ends in a colon introduces the next part (the wrapped error text
+# was empty, e.g. ``httpx.PoolTimeout()``), so a full stop would be stray.
+_SENTENCE_OR_INTRODUCER_END = (*_SENTENCE_END, ":")
+
+
+def _join_sentences(*parts: str) -> str:
+    """Join message parts with spaces, ending each non-final part with a full stop.
+
+    Blank parts are dropped, and a part that already ends a sentence or ends in a
+    colon is left as it is.
+    """
+
+    kept = [part.rstrip() for part in parts if part.strip()]
+    last = len(kept) - 1
+    return " ".join(
+        part if part.endswith(_SENTENCE_OR_INTRODUCER_END) or index == last else part + "."
+        for index, part in enumerate(kept)
+    )
 
 
 class TransportAuth(Protocol):
@@ -119,8 +252,21 @@ class HttpTransport:
     def close(self) -> None:
         self._client.close()
 
-    def send(self, method: str, path: str, *, timeout: Any = None, **kwargs: Any) -> httpx.Response:
-        """Raw send with connection-error wrapping; no auth header, no retry."""
+    def send(
+        self,
+        method: str,
+        path: str,
+        *,
+        timeout: Any = None,
+        deadline_seconds: float | None = None,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        """Raw send with connection-error wrapping; no auth header, no retry.
+
+        ``deadline_seconds`` also limits the whole response, headers included (see
+        :func:`request_within_deadline`), and an expired one closes this transport's
+        client; ``None`` keeps httpx's per-phase timeouts.
+        """
 
         # Only forward an explicit per-request timeout; passing timeout=None to
         # httpx would disable the timeout rather than use the client default.
@@ -129,14 +275,18 @@ class HttpTransport:
         trace = ConnectionTrace(self._base_url)
         kwargs["extensions"] = {"trace": trace}
         try:
-            return self._client.request(method, path, **kwargs)
+            if deadline_seconds is None:
+                return self._client.request(method, path, **kwargs)
+            return request_within_deadline(
+                self._client, method, path, deadline_seconds=deadline_seconds, **kwargs
+            )
         except httpx.HTTPError as exc:
             diagnostic = trace.diagnose(exc)
             wrapped = self._auth.wrap_transport_error(method, path, exc)
             # Keep each facade's public exception type while attaching safe metadata.
             setattr(wrapped, "connection_diagnostic", diagnostic)  # noqa: B010
             wrapped.args = (
-                f"{wrapped} {diagnostic['detail']} {diagnostic['next_step']}",
+                _join_sentences(str(wrapped), diagnostic["detail"], diagnostic["next_step"]),
             )
             raise wrapped from exc
 
@@ -153,6 +303,7 @@ class HttpTransport:
         retry_on_unauthorized: bool = True,
         preserve_json_nulls: bool = False,
         timeout: Any = None,
+        deadline_seconds: float | None = None,
     ) -> httpx.Response:
         """Send with the surface header + bearer auth and a single 401 retry.
 
@@ -173,6 +324,7 @@ class HttpTransport:
             files=files,
             headers=headers,
             timeout=timeout,
+            deadline_seconds=deadline_seconds,
         )
         if response.status_code == 401 and authenticated and retry_on_unauthorized:
             headers["Authorization"] = f"Bearer {self._auth.refresh_bearer(response)}"
@@ -185,6 +337,7 @@ class HttpTransport:
                 files=files,
                 headers=headers,
                 timeout=timeout,
+                deadline_seconds=deadline_seconds,
             )
         return response
 

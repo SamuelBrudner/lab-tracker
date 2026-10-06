@@ -21,6 +21,7 @@ from lab_tracker.artifact_resolution_admission import (
     MAX_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT,
 )
 from lab_tracker.bounded_subprocess import MAX_PROCESS_DEADLINE_SECONDS
+from lab_tracker.capture_channels.settings import validate_capture_channel_settings
 from lab_tracker.instance_url import (
     BASE_URL_ENV,
     LEGACY_CANONICAL_BASE_URL_ENV,
@@ -55,6 +56,8 @@ BootstrapAdminTokenDisclosure = Literal["local", "first_run", "never"]
 DEFAULT_AUTH_SESSION_MAX_AGE_HOURS = 7 * 24
 MAX_AUTH_SESSION_MAX_AGE_HOURS = 365 * 24
 MAX_COMBINED_HOST_IO_IN_FLIGHT_LIMIT = 32
+# Upper bound on the per-photo QR/barcode decode budget an upload may wait for.
+MAX_DECODE_PHOTO_CODES_TIMEOUT_SECONDS = 10.0
 INSECURE_AUTH_SECRET_KEYS = {
     DEFAULT_AUTH_SECRET_KEY,
     "replace-with-a-strong-secret",
@@ -186,6 +189,10 @@ class Settings(BaseSettings):
         ),
     )
     auto_transcribe_voice_captures: bool = False
+    # Local, deterministic QR/barcode decoding on photo uploads (not OCR);
+    # a no-op unless the optional `decode` extra is installed.
+    decode_photo_codes: bool = True
+    decode_photo_codes_timeout_seconds: float = 1.5
     review_email_enabled: bool = False
     review_email_transport: Literal["external", "smtp"] = "external"
     review_email_worker_poll_seconds: float = 10.0
@@ -199,6 +206,26 @@ class Settings(BaseSettings):
     review_email_smtp_from_address: str = ""
     review_email_smtp_tls_mode: Literal["none", "starttls", "implicit"] = "starttls"
     review_email_smtp_timeout_seconds: float = 10.0
+    # Server capture channels (docs/server-capture-channels.md); all off until set.
+    integrations_poller_enabled: bool = False
+    integrations_poll_min_interval_seconds: float = 300.0
+    integrations_state_path: str = ""
+    capture_user_emails: str = Field(default="", repr=False)
+    slack_signing_secret: str = Field(default="", repr=False)
+    slack_workspace_url: str = ""
+    slack_channel_projects: str = ""
+    slack_users: str = Field(default="", repr=False)
+    email_capture_address: str = ""
+    email_capture_imap_host: str = ""
+    email_capture_imap_port: int = 993
+    email_capture_imap_username: str = Field(default="", repr=False)
+    email_capture_imap_password: str = Field(default="", repr=False)
+    email_capture_imap_password_file: str = ""
+    email_capture_imap_folder: str = "INBOX"
+    email_capture_processed_folder: str = ""
+    booking_calendars: str = Field(default="", repr=False)
+    store_scans: str = ""
+    store_scan_hash_max_bytes: int = 64 * 1024 * 1024
     openai_api_key: str = Field(default="", repr=False)
     openai_model: str = "gpt-4o-mini"
     openai_reasoning_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] | None = None
@@ -509,6 +536,12 @@ class Settings(BaseSettings):
             )
         if self.max_upload_bytes < 1:
             raise ValueError("LAB_TRACKER_MAX_UPLOAD_BYTES must be at least 1.")
+        decode_budget = self.decode_photo_codes_timeout_seconds
+        if not 0 < decode_budget <= MAX_DECODE_PHOTO_CODES_TIMEOUT_SECONDS:
+            raise ValueError(
+                "LAB_TRACKER_DECODE_PHOTO_CODES_TIMEOUT_SECONDS must be greater than 0 and at "
+                f"most {MAX_DECODE_PHOTO_CODES_TIMEOUT_SECONDS}."
+            )
         if self.backup_keep < 1:
             raise ValueError("LAB_TRACKER_BACKUP_KEEP must be at least 1.")
         if not 1 <= self.auth_session_max_age_hours <= MAX_AUTH_SESSION_MAX_AGE_HOURS:
@@ -643,6 +676,10 @@ class Settings(BaseSettings):
                         "LAB_TRACKER_REVIEW_EMAIL_SMTP_USERNAME and "
                         "LAB_TRACKER_REVIEW_EMAIL_SMTP_PASSWORD must be configured together."
                     )
+        validate_capture_channel_settings(
+            self,
+            auth_secret_is_placeholder=auth_secret_key in INSECURE_AUTH_SECRET_KEYS,
+        )
         return self
 
     model_config = SettingsConfigDict(

@@ -2,10 +2,11 @@ import * as React from "react";
 
 import { formatDate, sessionTypeClass } from "../../shared/formatters.js";
 import { AppLink } from "../../shared/routing.jsx";
+import { SessionDebrief } from "../bench-capture/SessionDebrief.jsx";
 import { captureRoute } from "./SessionCaptureLinkSection.jsx";
 import { SessionLinkCode } from "./SessionLinkCode.jsx";
 
-const { useMemo } = React;
+const { useMemo, useState } = React;
 
 function SessionPanel({
   canWrite,
@@ -25,7 +26,20 @@ function SessionPanel({
   onCreateSession,
   onCloseSession,
   navigate,
+  token = "",
+  ownerId = "",
 }) {
+  // The session just closed from this list, offered a one-tap-skippable
+  // debrief. It is kept here because the closed session leaves the list.
+  const [debriefSession, setDebriefSession] = useState(null);
+
+  async function closeSession(session) {
+    const closed = await onCloseSession(session.session_id, session.project_id);
+    if (closed) {
+      setDebriefSession(typeof closed === "object" ? closed : session);
+    }
+  }
+
   const activeSessions = useMemo(() => {
     const items = Array.isArray(sessions)
       ? sessions.filter((session) => session.status === "active")
@@ -66,6 +80,18 @@ function SessionPanel({
         Start acquisition sessions (scientific or operational) and share the link code with
         instruments via QR or direct entry.
       </p>
+
+      {debriefSession && canWrite ? (
+        <SessionDebrief
+          token={token}
+          ownerId={ownerId}
+          projectId={debriefSession.project_id}
+          session={debriefSession}
+          canWrite={canWrite}
+          heading="Session closed. Record a quick debrief?"
+          onDone={() => setDebriefSession(null)}
+        />
+      ) : null}
 
       <form className="form" onSubmit={onCreateSession}>
         <label>
@@ -202,7 +228,7 @@ function SessionPanel({
                     type="button"
                     className="btn-danger"
                     disabled={!canWrite || busy}
-                    onClick={() => onCloseSession(session.session_id, session.project_id)}
+                    onClick={() => closeSession(session)}
                   >
                     Close session
                   </button>

@@ -535,3 +535,80 @@ def test_postgres_identifier_carriers_filter_metadata_keys_in_sql(
         carriers = repository.provenance_links.list_identifier_carriers(project_id, keys)
 
     assert [str(note.note_id) for note in carriers] == created[:2]
+
+
+def test_postgres_time_window_candidates_exclude_session_carriers_in_sql(
+    postgres_client: TestClient,
+    postgres_admin_auth_headers: dict[str, str],
+) -> None:
+    """The time-window detector reads only recent notes that name no session."""
+
+    from datetime import datetime, timedelta, timezone
+
+    from lab_tracker.services.provenance_time_windows import (
+        TIME_WINDOW_EXCLUDED_METADATA_KEYS,
+        TIME_WINDOW_NOTE_ORIGINS,
+    )
+    from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
+
+    project_id = _create_project(
+        postgres_client,
+        postgres_admin_auth_headers,
+        label="Time window candidates",
+    )
+    session = postgres_client.post(
+        "/sessions",
+        json={"project_id": str(project_id), "session_type": "operational"},
+        headers=postgres_admin_auth_headers,
+    )
+    assert session.status_code == 201, session.text
+    session_id = session.json()["data"]["session_id"]
+    created: dict[str, str] = {}
+    for label, metadata, targets in (
+        ("plain", {"capture_host_label": "rig-2"}, None),
+        ("hinted", {"watch_session_id": session_id}, None),
+        ("targeted", None, [{"entity_type": "session", "entity_id": session_id}]),
+    ):
+        payload: dict[str, object] = {
+            "project_id": str(project_id),
+            "raw_content": f"{label} note",
+        }
+        if metadata:
+            payload["metadata"] = metadata
+        if targets:
+            payload["targets"] = targets
+        response = postgres_client.post(
+            "/notes", json=payload, headers=postgres_admin_auth_headers
+        )
+        assert response.status_code == 201, response.text
+        created[label] = response.json()["data"]["note_id"]
+    # decoded_session_link_code is server-stamped: the carrier is a photo
+    # upload whose decoded LT- code names a session outside the project.
+    from lab_tracker.models import encode_session_link_code
+    from lab_tracker.photo_codes import DecodedCode, PhotoCodeDecoder
+
+    label = f"LT-{encode_session_link_code(uuid4())}"
+    decoder = PhotoCodeDecoder(reader=lambda _data, _type: [DecodedCode(label, "QRCode")])
+    postgres_client.app.state.photo_code_decoder = decoder
+    try:
+        photo = postgres_client.post(
+            "/notes/upload-file",
+            data={"project_id": str(project_id)},
+            files={"file": ("session-qr.png", b"photo", "image/png")},
+            headers=postgres_admin_auth_headers,
+        )
+    finally:
+        decoder.close()
+    assert photo.status_code == 201, photo.text
+    assert photo.json()["data"]["metadata"]["decoded_session_link_code"] == label
+
+    with postgres_client.app.state.db_session_factory() as session:
+        repository = SQLAlchemyLabTrackerRepository(session)
+        candidates = repository.provenance_links.list_time_window_candidates(
+            project_id,
+            created_since=datetime.now(timezone.utc) - timedelta(days=1),
+            excluded_metadata_keys=TIME_WINDOW_EXCLUDED_METADATA_KEYS,
+            origins=sorted(origin.value for origin in TIME_WINDOW_NOTE_ORIGINS),
+        )
+
+    assert [str(note.note_id) for note in candidates] == [created["plain"]]

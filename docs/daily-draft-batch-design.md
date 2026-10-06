@@ -85,3 +85,40 @@ Practical sequence inside the epic:
 
 These resolutions are reflected in the bd descriptions for `jdy`,
 `641`, `249`, `zv9`, and `283` and need no further amendment.
+
+## Day-log grouping (deterministic stage, added later)
+
+A heavy bench day used to turn into many per-capture proposals. Each batch
+draft now ends with one extra, **deterministic** proposal per session that had
+at least three short bench captures (typed text, transcribed voice, photo) in
+the batch: a `create_note` whose body is a timestamped log (`HH:MM — <first
+line of text/transcript, or file name>`) targeting the session, so a reviewer
+can accept one legible log instead of N items. The individual capture
+proposals stay in the draft.
+
+Design choices:
+
+- **Where it runs.** Inside batch generation, after the model's patch
+  validates and before the draft is marked ready, so it lands atomically with
+  the draft and the delegated-curation pass sees it like any other proposal
+  (admitted by `full`, never by `organize`). It needs no migration: it is an
+  ordinary operation row.
+- **Honest provenance.** The rationale says "grouped N captures from
+  <session>" and that it is a deterministic grouping, not model output; it has
+  no confidence score; `source_refs` cite every capture. The change set
+  records the appended operation ids under `context_packet.day_logs` (written
+  by the server after the model call, so the model cannot claim the label),
+  which the review page uses to label it and the applier uses to stamp the
+  committed note `origin_provider=lab_tracker`,
+  `origin_model=deterministic_day_log` instead of the batch's model.
+- **Nothing external.** It reads only the batch's own notes and the project's
+  sessions after the provider call; the external-context policy has nothing to
+  govern.
+- **Idempotent.** The draft is keyed by the batch; a log whose `day_log_key`
+  (session plus the exact capture set) already exists as a note is not
+  proposed again.
+- **Best effort.** A failure is logged and the batch keeps the model's
+  proposals. Because the log rides on the batch draft, a batch whose model
+  call fails (or a deployment with no provider) gets no day log.
+
+Details, bounds, and the capture rules: [session-suggestions.md](session-suggestions.md).

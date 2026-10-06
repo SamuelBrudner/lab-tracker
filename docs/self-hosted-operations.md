@@ -80,6 +80,106 @@ services:
 A proxy container on the Compose network reaches `app:8000` directly and needs
 no published port at all.
 
+## Publishing Through Tailscale Funnel
+
+Nothing in this repository configures Tailscale. A Funnel is host state that
+lives outside the compose files, so this section is a checklist of what to
+inspect on the Lab Tracker host, not a description of a shipped setup. Tailscale
+flags differ between client versions; the commands below follow Tailscale's
+Funnel documentation, and `tailscale funnel --help` on your host is
+authoritative.
+
+**A Funnel origin is publicly reachable.** Anyone on the internet who can
+resolve the name can send requests to the app, whether or not they are on your
+tailnet. Publish only an instance whose `LAB_TRACKER_ENVIRONMENT` is not
+`local`. Outside `local`, `LAB_TRACKER_AUTH_ENABLED` is on and cannot be
+disabled, public viewer self-registration is off unless you turn it on with
+`LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED=true` (leave it unset or
+`false` for a public origin; when it is on, any caller can create a viewer
+account), and `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE` defaults to
+`never` (see [Configuration](configuration.md)).
+
+Authentication being on is not enough in the `local` environment. There
+`LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED` defaults to `true`, so a
+`local` instance published with auth on still lets any internet caller register
+a viewer account, and `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE` defaults to
+`local`, which trusts the connection's peer address (behind a proxy that is a
+private address for every client). If you must publish a `local` instance, set
+`LAB_TRACKER_AUTH_ENABLED=true`,
+`LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED=false`, and
+`LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE=never` first, and never publish
+one with auth off.
+
+Funnel's requirements, per Tailscale's documentation: MagicDNS and HTTPS
+certificates enabled for the tailnet, a `funnel` node attribute in the tailnet
+policy file that covers the node, and a Tailscale client that supports Funnel.
+Funnel can listen only on ports 443, 8443, and 10000. Publish the app's
+loopback port (see the loopback-only `ports` override above); Tailscale
+documents `http://127.0.0.1` as the supported reverse-proxy target:
+
+```bash
+tailscale funnel --bg --https=8443 http://127.0.0.1:<host-port>
+```
+
+`--bg` runs the Funnel persistently in the background; Tailscale documents that
+it then resumes after a reboot or a Tailscale restart. Public DNS records for a
+new Funnel name can take up to ten minutes to appear.
+
+### When a client cannot connect
+
+`lt health` prints the failing stage, and `lt setup status` and
+`lt setup connect --base-url <url> --dry-run` return the same `diagnosis`,
+`detail`, and `next_step` (see
+[Diagnose an unavailable connection](agent-setup.md#diagnose-an-unavailable-connection)).
+The client sees only which stage failed. Work through these on the host:
+
+1. **Test the public path, not the host's own view.** From a machine that is not
+   on the tailnet (Tailscale stopped, or a phone on cellular), run `lt health`
+   or `curl -v --max-time 10 https://<host>.<tailnet>.ts.net:<port>/health`,
+   once per published port. In one recorded incident the same name resolved to
+   a tailnet address on the host and passed health checks while the public path
+   timed out in TLS, so a passing check run on the host does not show that the
+   public endpoint works. The dedicated-instance release workflow probes
+   `DEDICATED_PUBLIC_BASE_URL` with `curl` from wherever the script runs,
+   normally that host, so it shares that blind spot.
+2. **Tell a TLS stall from a 502.** Tailscale documents that the node terminates
+   TLS for Funnel traffic and passes the decrypted request to the local
+   service. So a stopped backend is expected to appear as an HTTP error after
+   the handshake completes (one recorded incident with nothing listening on the
+   backend port returned a 502), whereas a handshake that never completes
+   happens before the request reaches Lab Tracker, so the node or its public
+   ingress path is a plausible place to look. This is an inference from the
+   documented design and two recorded incidents (one 502, and one stall whose
+   cause was not confirmed), not a rule and not a diagnosis of your instance.
+   As a further hint, not a rule: if every published port stalls, look at
+   node-level Tailscale state first; if only one does, look at that port's
+   mapping.
+3. **Check the node and the mapping.** `tailscale status` should show the node
+   connected to the expected tailnet. `tailscale funnel status` (add `--json`
+   for machine-readable output) should list the published port and its target,
+   `http://127.0.0.1:<host-port>`; confirm it is exposed through Funnel and not
+   only through a tailnet-only `tailscale serve` mapping. Tailscale changed the
+   Funnel and Serve commands in client version 1.52, so read the output against
+   `tailscale funnel --help` for your version.
+4. **Rule out the backend.** On the host, run
+   `curl http://127.0.0.1:<host-port>/health` and `docker compose ps`. This is
+   cheap to check, though a dead backend is expected to show as an HTTP error
+   rather than a stalled handshake (step 2).
+5. **Check persistence and prerequisites.** Confirm the Funnel was started with
+   `--bg` and is still listed after a reboot or Tailscale restart. Re-check
+   MagicDNS, HTTPS certificates, and the `funnel` node attribute in the admin
+   console, and that the port is one of 443, 8443, or 10000.
+6. **Last resort: reconnect the node.** If steps 3 to 5 look healthy and the
+   public path still stalls, `tailscale down` followed by `tailscale up` on the
+   host restored the public ports in one recorded incident where refreshing the
+   mapping and reconnecting the relay did not. The root cause there was not
+   confirmed, so treat it as a workaround, not an explanation. `tailscale down`
+   disconnects the host from the tailnet, so do not run it over a session that
+   itself travels over Tailscale. Save `tailscale status` and
+   `tailscale funnel status` before and after so the cause can be investigated.
+7. **Verify from outside.** Repeat step 1 from a client that is not on the
+   tailnet.
+
 ## Process Reaping
 
 The image entrypoint runs under `tini`, which reaps orphaned grandchildren of
@@ -110,6 +210,51 @@ Keep that namespace under deployment-operator control:
 If an untrusted principal can mutate that topology, disable local resolution
 or isolate the service in a namespace the principal cannot change. Directory handles make one operation resistant to pathname
 replacement; they are not a durable mount-topology lease.
+
+## Server Capture Channels
+
+The optional Slack, email, instrument-calendar, and store-scan channels
+([`server-capture-channels.md`](server-capture-channels.md)) are configured
+with the `LAB_TRACKER_SLACK_*`, `LAB_TRACKER_EMAIL_CAPTURE_*`,
+`LAB_TRACKER_BOOKING_CALENDARS`, and `LAB_TRACKER_STORE_SCANS` variables in
+`.env`; see [`configuration.md`](configuration.md#server-capture-channels).
+Operational notes for this deployment:
+
+- **Poll state** lives at
+  `/app/data/note_storage/.integrations-poll-state.json` in the `app_data`
+  volume unless `LAB_TRACKER_INTEGRATIONS_STATE_PATH` moves it. It holds each
+  poller's last run and each store scan's baseline; back it up with the volume.
+  Losing it only resets rate limits and makes each scan record a fresh
+  baseline.
+- **Scheduling**: the simplest option is
+  `LAB_TRACKER_INTEGRATIONS_POLLER_ENABLED=true`, which lets the app poll. An
+  external scheduler can instead call `POST /integrations/run-due` with the
+  admin `batch_run_due` token it already uses for `/batches/run-due`. To run
+  the CLI from the host's cron inside the container, supply the auth secret
+  the entrypoint generated (an `exec` does not run the entrypoint; skip the
+  prefix when `.env` sets `LAB_TRACKER_AUTH_SECRET_KEY` itself):
+
+  ```bash
+  */5 * * * * cd /srv/lab-tracker && docker compose exec -T app sh -c 'LAB_TRACKER_AUTH_SECRET_KEY="$(cat /app/data/runtime-env/auth-secret-key)" lab-tracker integrations poll'
+  ```
+
+  All three share the poll state, so combining them never double-polls.
+- **Secrets**: prefer `LAB_TRACKER_EMAIL_CAPTURE_IMAP_PASSWORD_FILE` pointing
+  at a file mounted read-only into the container (it is re-read at every
+  poll). The Slack signing secret and the feed URLs (which often embed tokens)
+  are never logged. Capture addresses are derived from
+  `LAB_TRACKER_AUTH_SECRET_KEY`, so rotating it changes every address.
+- **Network**: Slack must reach `/integrations/slack/*` over public HTTPS
+  through the reverse proxy; those two paths authenticate by Slack's request
+  signature, not a bearer token. The IMAP poller needs outbound TLS to the
+  mail server, and calendar feeds follow the outbound HTTP policy (a feed on a
+  private network needs `LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES` and
+  `LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS`).
+- **Store scans** read only what resolution may read: a `local_fs` store must
+  sit inside `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` (mount it into the container,
+  read-only where possible, as described above), and an rclone store's remote
+  must be in `LAB_TRACKER_RCLONE_ALLOWED_REMOTES` with its `rclone.conf`
+  available to the app container.
 
 ## Backup
 

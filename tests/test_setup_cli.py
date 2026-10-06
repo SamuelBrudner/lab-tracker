@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import os
 import sys
@@ -466,7 +467,7 @@ def test_installed_source_revision_reads_pep610_commit_id(monkeypatch) -> None:
         assert name == "lab-tracker"
         return SimpleNamespace(read_text=lambda _filename: direct_url)
 
-    monkeypatch.setattr(setup_helpers.importlib.metadata, "distribution", distribution)
+    monkeypatch.setattr(importlib.metadata, "distribution", distribution)
 
     assert setup_helpers.installed_source_revision() == SOURCE_REVISION
 

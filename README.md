@@ -24,7 +24,7 @@ visualizations.
 [**Deploy to Render**](https://render.com/deploy?repo=https://github.com/SamuelBrudner/lab-tracker) ·
 [**Documentation**](#documentation) · [**Run locally**](#run-locally)
 
-> **Status:** Lab Tracker is at `0.1.0` and under active development. It is
+> **Status:** Lab Tracker is at `0.2.0` and under active development. It is
 > intended for evaluation and early research use; interfaces and deployment
 > defaults may still change. The
 > [supported v1 surface](docs/retained-v1-surface.md) is authoritative.
@@ -47,12 +47,17 @@ prose remains a draft to verify against the underlying graph.
 The core loop is deliberately small:
 
 1. **Capture.** Send a text note, photo, voice note, or photo-and-voice bundle
-   from the browser or a paired phone. In Python, `lab_tracker_client.savefig`,
-   `capture_figures()`, and `run_context()` stage figures with content hashes
-   and git context; MATLAB has `labtracker.savefig`. The `lt watch`, `lt repo`,
-   and `lt hpc` adapters keep durable local outboxes for folder, repository,
-   and Slurm evidence, then sync compact records when the API is reachable.
-   Large source artifacts can remain in their original data store.
+   from the browser or a paired phone; at the bench, a kiosk scan station, NFC
+   session tags, a hands-free voice shortcut, and a voice debrief cut the taps
+   per capture. After a one-time setup, figures from IPython, Jupyter, plain
+   Python scripts, R, and MATLAB are captured as they are saved or displayed,
+   `lt run` and the pipeline adapters record analysis and Snakemake, Nextflow,
+   Kedro, or DVC runs, and the `lt watch`, `lt repo`, and `lt hpc` adapters
+   keep durable local outboxes for folder, repository, and Slurm evidence.
+   Operators can add Slack, email, instrument-calendar, and data-store
+   channels. Large source artifacts can remain in their original data store.
+   The [capture guide](docs/capture-guide.md) maps each way of working to its
+   setup.
 2. **AI proposes.** For an individual image note, the configured vision-capable
    model receives the image itself and can use visible text, handwriting, plots,
    and diagrams as context—there is no separate OCR-to-transcript step first.
@@ -172,9 +177,18 @@ every historical record arrived fully connected.
 - **Research context:** projects and lab groups, role-based access, question
   graphs, notes, sessions, datasets, analyses, claims, visualizations, goals,
   and exploration records for decisions, dead ends, and pivots.
-- **Evidence capture:** browser and paired-device capture, raw files and
-  editable voice transcripts, Python and MATLAB figure capture, and
-  offline-first watch-folder, repository, and HPC adapters.
+- **Evidence capture:** browser and paired-device capture with bench
+  shortcuts (kiosk scanning, NFC session tags, trusted share windows, photo
+  import, voice debriefs, a hands-free shortcut, and a desktop bookmarklet);
+  raw files and editable voice transcripts; figure capture from Python,
+  notebooks, scripts, R, and MATLAB; `lt run`, pipeline, CI, and Slurm epilog
+  capture; offline-first watch-folder, repository, and HPC adapters with
+  instrument file headers; coding-agent session retrospectives; and opt-in
+  server channels for Slack, email, instrument calendars, registered-store
+  scans, and barcodes in photos. See the [capture guide](docs/capture-guide.md).
+- **Linking without typing:** proposed links for captures made during a
+  session, from the same code as a commit, or sharing bytes; session
+  suggestions; and day logs that group a busy bench day into one proposal.
 - **Human-gated drafting:** note-scoped and batch graph drafts, scheduled or
   run-now drafting, accept/edit/reject review, and durable curation provenance.
 - **Ongoing-project onboarding:** an attributed current-state checkpoint,
@@ -253,9 +267,22 @@ MCP, and verification.
 - **Start and deploy:** [local setup](docs/setup.md) ·
   [deployment options](docs/deployment-options.md) ·
   [configuration](docs/configuration.md)
-- **Capture and integrate:** [phone capture](docs/phone-capture-quickstart.md) ·
+- **Capture and integrate:** start with the
+  [capture guide](docs/capture-guide.md) ·
+  [phone capture](docs/phone-capture-quickstart.md) ·
+  [bench capture](docs/bench-capture.md) ·
+  [photographed labels and file headers](docs/decoded-labels-and-file-headers.md) ·
   [watch folders](docs/watch-folder-capture.md) ·
+  [notebooks and scripts](docs/notebook-and-script-capture.md) ·
+  [R integration](docs/lab-tracker-r.md) ·
   [MATLAB integration](docs/lab-tracker-matlab.md) ·
+  [command runs](docs/run-capture.md) ·
+  [pipelines and CI](docs/pipeline-capture.md) ·
+  [HPC](docs/hpc-analysis-capture.md) ·
+  [repository commits](docs/repo-report-capture.md) ·
+  [coding-agent sessions](docs/agent-session-capture.md) ·
+  [server capture channels](docs/server-capture-channels.md) ·
+  [session suggestions](docs/session-suggestions.md) ·
   [provenance export](docs/provenance-export.md)
 - **Understand the model:** [vision](docs/vision.md) ·
   [review and commit](docs/review-and-commit-model.md) ·

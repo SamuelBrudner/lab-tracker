@@ -120,9 +120,10 @@ The release:
 The `version` in `pyproject.toml` is the release that clients compare against:
 `GET /health` reports it as `app.version`. Bump it as
 [versioning.md](../../docs/versioning.md) requires for every release. `lt setup
-status`, `lt-mcp`, and the Daily review recommend an update only when a
-client's `MAJOR.MINOR` is older than the server's; a PATCH release is reported
-to clients as information and never nags
+status`, `lt doctor`, `lt-mcp`, and the Daily review recommend an update
+whenever a client's release is older than the server's, a PATCH release
+included, so a release that fixes a broken install reaches clients. The same
+release at a different commit is reported but never suggested
 ([client update awareness](../../docs/setup.md#know-when-a-client-install-is-broken-or-behind-its-server)).
 
 If a post-cutover gate fails, the script restarts the previous immutable image

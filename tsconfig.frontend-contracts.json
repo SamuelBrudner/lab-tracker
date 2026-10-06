@@ -21,6 +21,7 @@
     "src/lab_tracker/frontend_src/shared/gateways/graph-drafts.js",
     "src/lab_tracker/frontend_src/shared/gateways/index.js",
     "src/lab_tracker/frontend_src/shared/gateways/notes.js",
-    "src/lab_tracker/frontend_src/shared/gateways/projects.js"
+    "src/lab_tracker/frontend_src/shared/gateways/projects.js",
+    "src/lab_tracker/frontend_src/shared/gateways/sessions.js"
   ]
 }

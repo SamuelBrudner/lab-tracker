@@ -9,6 +9,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from lab_tracker.api import LabTrackerAPI
+from lab_tracker.photo_codes import ensure_no_client_decoded_code_keys
 from lab_tracker.schemas import (
     Envelope,
     EvidenceBundleCreateAnalysis,
@@ -65,6 +66,8 @@ def build_evidence_bundles_router(api: LabTrackerAPI) -> APIRouter:
     def record_evidence_bundle(payload: EvidenceBundleRequest, request: Request):
         actor = actor_from_request(request)
         ensure_scope_allows_evidence_bundle(actor, dry_run=payload.dry_run)
+        if isinstance(payload.source_note, EvidenceBundleCreateSourceNote):
+            ensure_no_client_decoded_code_keys(payload.source_note.metadata)
         stamp = origin_stamp(actor, payload.origin)
         result = api_from_request(request, api).record_evidence_bundle(
             _command_from_request(payload, stamp),

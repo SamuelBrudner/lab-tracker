@@ -1710,6 +1710,90 @@ describe("GraphDraftDetailCard keyboard review", () => {
     expect(within(section).getByText("session session-1")).toBeInTheDocument();
   });
 
+  it("labels a worktree-tree proposal from a capture to its commit note", async () => {
+    const draft = draftFixture();
+    renderDraft(draft, {
+      routes: [
+        {
+          match: /^\/provenance-links\?/,
+          response: apiResponse([
+            {
+              basis: "worktree_tree_match",
+              content_hash: null,
+              link_id: "link-3",
+              project_id: "project-1",
+              relation: "was_derived_from",
+              source: { entity_id: "note-figure", entity_type: "note" },
+              status: "proposed",
+              target: { entity_id: "note-commit", entity_type: "note" },
+            },
+          ]),
+        },
+      ],
+    });
+
+    const section = await screen.findByRole("region", { name: "Proposed provenance links" });
+    expect(within(section).getByText(/same code tree as a commit/)).toBeInTheDocument();
+    expect(within(section).queryByText(/worktree_tree_match/)).not.toBeInTheDocument();
+    expect(within(section).getByText("note note-commit")).toBeInTheDocument();
+  });
+
+  it("labels a time-window provenance proposal in the reviewer's words", async () => {
+    const draft = draftFixture();
+    renderDraft(draft, {
+      routes: [
+        {
+          match: /^\/provenance-links\?/,
+          response: apiResponse([
+            {
+              basis: "time_window_match",
+              content_hash: null,
+              link_id: "link-3",
+              project_id: "project-1",
+              relation: "was_derived_from",
+              source: { entity_id: "note-d", entity_type: "note" },
+              status: "proposed",
+              target: { entity_id: "session-2", entity_type: "session" },
+            },
+          ]),
+        },
+      ],
+    });
+
+    const section = await screen.findByRole("region", { name: "Proposed provenance links" });
+    expect(within(section).getByText(/made during this session/)).toBeInTheDocument();
+    expect(within(section).queryByText(/time_window_match/)).not.toBeInTheDocument();
+    expect(within(section).getByText("session session-2")).toBeInTheDocument();
+  });
+
+  it("says a server-appended day log is a deterministic grouping, not model inference", async () => {
+    const dayLog = {
+      ...draftFixture().operations[0],
+      confidence: null,
+      entity_type: "note",
+      operation_id: "44444444-4444-4444-8444-444444444444",
+      payload: { project_id: "project-1", raw_content: "Day log — operational session LT-ABC" },
+      rationale: "grouped 3 captures from operational session LT-ABC.",
+      semantic_type: "create_note",
+    };
+    const draft = draftFixture({
+      context_packet: {
+        day_logs: [{ operation_id: dayLog.operation_id, origin: "deterministic" }],
+      },
+      operations: [draftFixture().operations[0], dayLog],
+    });
+    renderDraft(draft, {
+      routes: [{ match: /^\/provenance-links\?/, response: apiResponse([]) }],
+    });
+
+    const grouped = await screen.findByText(/grouped 3 captures from operational session/);
+    expect(grouped).toHaveTextContent("Deterministic grouping (no model)");
+    expect(grouped).not.toHaveTextContent("confident");
+    expect(
+      screen.getByText(/The capture states this as the next comparison/)
+    ).toHaveTextContent("Model inference");
+  });
+
   it("gives claim statements and falsification criteria typed editors", async () => {
     const draft = draftFixture({
       operations: [
@@ -1741,6 +1825,174 @@ describe("GraphDraftDetailCard keyboard review", () => {
       falsification_criteria: "No change in courtship index",
       primary_question_id: "q-1",
     });
+  });
+});
+
+describe("GraphDraftDetailCard capture-setup tips", () => {
+  const sessionId = "66666666-6666-4666-8666-666666666666";
+  const noteIds = [
+    "70000000-0000-4000-8000-000000000001",
+    "70000000-0000-4000-8000-000000000002",
+    "70000000-0000-4000-8000-000000000003",
+    "70000000-0000-4000-8000-000000000004",
+    "70000000-0000-4000-8000-000000000005",
+    "70000000-0000-4000-8000-000000000006",
+  ];
+
+  function tipsDraft(captureSetup) {
+    const first = draftFixture().operations[0];
+    return draftFixture({
+      context_packet: { capture_setup: captureSetup },
+      operations: [
+        first,
+        {
+          ...first,
+          operation_id: "44444444-4444-4444-8444-444444444444",
+          payload: { text: "Does temperature change courtship?" },
+        },
+      ],
+    });
+  }
+
+  const recordedTips = {
+    version: "capture_setup/v1",
+    offered: [`closed_without_debrief:${sessionId}`, "sessionless_watch_files"],
+    returned: 2,
+    dropped: 0,
+    recommendations: [
+      {
+        recommendation_id: `closed_without_debrief:${sessionId}`,
+        kind: "session_debrief",
+        gap: "closed_without_debrief",
+        detected: true,
+        note_ids: noteIds,
+        note_count: noteIds.length,
+        session_id: sessionId,
+        session_label: "operational session LT-ABC",
+        explanation: "The six photos carry no words, so their purpose is unclear.",
+        explanation_source: "model",
+        guide: {
+          title: "Record a debrief for this session",
+          steps: ["Open the session and use Debrief.", "Record it when you close a session."],
+          app_path: `/app/sessions/${sessionId}`,
+          command: null,
+          doc: "docs/bench-capture.md#voice-debrief",
+        },
+      },
+      {
+        recommendation_id: "sessionless_watch_files",
+        kind: "watch_folder_link_code",
+        gap: "sessionless_watch_files",
+        detected: true,
+        note_ids: [noteIds[0]],
+        note_count: 1,
+        session_id: null,
+        session_label: null,
+        explanation: "Files synced from a watched folder (1) named no session.",
+        explanation_source: "server",
+        guide: {
+          title: "Put the session's link code in the folder name",
+          steps: ["Name the folder with the link code."],
+          app_path: "/app",
+          command: "lt watch add <folder> --session LT-<code> --dry-run",
+          doc: "docs/watch-folder-capture.md#sessions-from-folder-names",
+        },
+      },
+    ],
+  };
+
+  function tipsRegion() {
+    return screen.getByRole("region", { name: "Help future captures" });
+  }
+
+  function expectTipsShown() {
+    const region = tipsRegion();
+    expect(region).not.toHaveAttribute("role");
+    expect(within(region).queryAllByRole("status")).toHaveLength(0);
+    expect(region).toHaveTextContent("Nothing here changes this draft.");
+    expect(region).toHaveTextContent("Record a debrief for this session");
+    expect(region).toHaveTextContent("operational session LT-ABC");
+    expect(region).toHaveTextContent(
+      "Drafter: The six photos carry no words, so their purpose is unclear."
+    );
+    expect(region).toHaveTextContent(
+      "Lab Tracker check: Files synced from a watched folder (1) named no session."
+    );
+    expect(region).toHaveTextContent("Based on 6 captures:");
+    expect(within(region).getByText("Record it when you close a session.")).toBeInTheDocument();
+    expect(
+      within(region).getByText("lt watch add <folder> --session LT-<code> --dry-run")
+    ).toHaveClass("mono");
+    expect(region).toHaveTextContent("Guide: docs/bench-capture.md#voice-debrief");
+    // Nothing in a tip is a decision.
+    for (const name of [/accept/i, /reject/i, /defer/i, /commit/i]) {
+      expect(within(region).queryAllByRole("button", { name })).toHaveLength(0);
+    }
+    return region;
+  }
+
+  it("shows the recorded tips read-only in both views and opens their pages", async () => {
+    const navigate = vi.fn();
+    renderDraft(tipsDraft(recordedTips), { navigate });
+    await screen.findAllByText("Does sleep change courtship behavior?");
+
+    let region = expectTipsShown();
+    const captureLinks = within(region).getAllByRole("button", { name: /^Capture \d$/ });
+    expect(captureLinks).toHaveLength(6);
+    expect(captureLinks.map((button) => button.textContent)).toEqual([
+      "Capture 1",
+      "Capture 2",
+      "Capture 3",
+      "Capture 4",
+      "Capture 5",
+      "Capture 1",
+    ]);
+    fireEvent.click(within(region).getByRole("button", { name: "Open the session" }));
+    expect(navigate).toHaveBeenLastCalledWith(`/app/sessions/${sessionId}`);
+    fireEvent.click(captureLinks[1]);
+    expect(navigate).toHaveBeenLastCalledWith(`/app/notes/${noteIds[1]}`);
+    fireEvent.click(within(region).getByRole("button", { name: "Open Home" }));
+    expect(navigate).toHaveBeenLastCalledWith("/app");
+    expect(screen.getByText("0 of 2 kept")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Narrative" }));
+    region = expectTipsShown();
+    fireEvent.click(within(region).getByRole("button", { name: "Open the session" }));
+    expect(navigate).toHaveBeenLastCalledWith(`/app/sessions/${sessionId}`);
+  });
+
+  it("keeps the tips out of the keyboard loop, the tally, and the spoken review", async () => {
+    const draft = tipsDraft(recordedTips);
+    const { container } = renderDraft(draft);
+    await screen.findAllByText("Does sleep change courtship behavior?");
+    const region = tipsRegion();
+
+    for (let press = 0; press < 4; press += 1) {
+      fireEvent.keyDown(document, { key: "j" });
+      expect(region.contains(document.activeElement)).toBe(false);
+    }
+    const current = container.querySelector('[aria-current="true"]');
+    expect(current).toHaveAttribute("id", `review-op-${draft.operations[1].operation_id}`);
+    expect(region.querySelector("[aria-current]")).toBeNull();
+    expect(screen.getByText("0 of 2 kept")).toBeInTheDocument();
+    expect(screen.getByText(/0 rejected · 2 undecided/)).toBeInTheDocument();
+    expect(spokenReviewScript(draft)).not.toMatch(/debrief|future captures|link code/i);
+  });
+
+  it("shows no section for a malformed or empty packet", async () => {
+    for (const captureSetup of [
+      null,
+      "tips",
+      { recommendations: "tips" },
+      { recommendations: [{ guide: { title: "No steps" } }] },
+      { ...recordedTips, recommendations: [] },
+    ]) {
+      const { unmount } = renderDraft(tipsDraft(captureSetup));
+      await screen.findAllByText("Does sleep change courtship behavior?");
+      expect(screen.queryByRole("region", { name: "Help future captures" })).toBeNull();
+      expect(screen.queryByText("Help future captures")).toBeNull();
+      unmount();
+    }
   });
 });
 

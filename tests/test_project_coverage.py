@@ -726,6 +726,42 @@ def test_project_coverage_names_the_stale_machine_on_postgres(
     )
 
 
+def test_project_coverage_reads_a_note_whose_client_version_is_oversized(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One hostile stored version must not take the whole coverage read down.
+
+    ``POST /notes`` stores any metadata string, so a capture source's version
+    is untrusted; a digit run past CPython's integer-string limit made
+    ``int()`` raise inside the release comparison and the read returned 500.
+    """
+
+    monkeypatch.setattr(capture_client_release, "installed_version", lambda: "0.5.0")
+    project_id = _project(client, admin_auth_headers, "Oversized version")
+    hostile_metadata = _host(INSTALL_A, "rig-7", "9" * 5000, adapter=FIGURE_ADAPTER)
+    _note(client, admin_auth_headers, project_id, "hostile", metadata=hostile_metadata)
+    stale_metadata = _watch_metadata(INSTALL_B, "rig-8", "0.3.0")
+    stale = _note(client, admin_auth_headers, project_id, "stale", metadata=stale_metadata)
+    _backdate(client, str(stale["note_id"]), days=1)
+
+    response = client.get(f"/projects/{project_id}/coverage", headers=admin_auth_headers)
+
+    assert response.status_code == 200, response.text
+    sources = {
+        (source["evidence_adapter"], source["capture_host_label"]): source
+        for source in response.json()["data"]["capture_sources"]
+    }
+    hostile = sources[(FIGURE_ADAPTER, "rig-7")]
+    assert hostile["release_status"] == "unknown"
+    assert hostile["update_recommended"] is False
+    assert hostile["update_notice"] is None
+    # The other sources are still judged on their own.
+    assert sources[("lt-watch", "rig-8")]["release_status"] == "behind"
+    assert sources[("lt-watch", "rig-8")]["update_notice"] is not None
+
+
 def _assert_source_row_is_its_newest_capture(
     client: TestClient,
     headers: dict[str, str],

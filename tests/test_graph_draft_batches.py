@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from concurrent.futures import (
     ThreadPoolExecutor,
 )
@@ -18,6 +19,14 @@ from lab_tracker.api import LabTrackerAPI
 from lab_tracker.app import create_app
 from lab_tracker.app_parts.middleware import system_auth_context
 from lab_tracker.auth import AuthContext, PrincipalType, Role
+from lab_tracker.capture_setup_catalog import (
+    CANDIDATES_PACKET_KEY,
+    CAPTURE_SETUP_GUIDES,
+    CAPTURE_SETUP_VERSION,
+    RESPONSE_FIELD,
+    RESULT_PACKET_KEY,
+    CaptureSetupGap,
+)
 from lab_tracker.db_models import (
     GraphChangeSetModel,
     GraphDraftBatchRunModel,
@@ -38,6 +47,7 @@ from lab_tracker.models import (
     utc_now,
 )
 from lab_tracker.services import graph_draft_batch_policy as batch_policy
+from lab_tracker.services import graph_draft_capture_setup
 from lab_tracker.sqlalchemy_repository_parts.repository import SQLAlchemyLabTrackerRepository
 
 
@@ -2726,3 +2736,201 @@ def test_capture_marked_exclude_via_patch_stays_out_of_run_now_batch(
     change_set_id = run.json()["data"]["change_set_id"]
     draft = client.get(f"/batches/{change_set_id}", headers=admin_auth_headers)
     assert draft.json()["data"]["source_note_ids"] == [kept]
+
+
+# --- Capture-setup tips: the drafter's picks, recorded after generation -----------
+
+_APP_CAPTURE = {"capture_source": "mobile_capture", "capture_mode": "text"}
+_TIP_EXPLANATION = "Three phone notes named no session, so the drafter could not place them."
+
+
+def _phone_capture(client: TestClient, headers: dict[str, str], project_id: str, text: str) -> str:
+    response = client.post(
+        "/notes",
+        json={
+            "project_id": project_id,
+            "raw_content": text,
+            "status": "staged",
+            "metadata": _APP_CAPTURE,
+        },
+        headers=headers,
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["data"]["note_id"]
+
+
+def _sessionless_phone_project(
+    client: TestClient, headers: dict[str, str]
+) -> tuple[str, list[str]]:
+    project_id = _project(client, headers)
+    note_ids = [
+        _phone_capture(client, headers, project_id, f"Rig 2 Fly {index}") for index in range(3)
+    ]
+    return project_id, note_ids
+
+
+def _run_with(
+    client: TestClient,
+    headers: dict[str, str],
+    project_id: str,
+    fake_client: FakeBatchDraftClient,
+) -> dict[str, Any]:
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+    response = client.post("/batches/run-now", json={"project_id": project_id}, headers=headers)
+    assert response.status_code == 201, response.text
+    return response.json()["data"]
+
+
+def _stored_packet(client: TestClient, headers: dict[str, str], change_set_id: str) -> dict:
+    response = client.get(f"/batches/{change_set_id}", headers=headers)
+    assert response.status_code == 200, response.text
+    return response.json()["data"]["context_packet"]
+
+
+def _tip_patch(project_id: str, note_ids: list[str], **extra: Any) -> dict[str, Any]:
+    pick = {
+        "candidate_id": CaptureSetupGap.SESSIONLESS_APP_CAPTURES.value,
+        "note_ids": note_ids,
+        "explanation": _TIP_EXPLANATION,
+    }
+    return {**_batch_patch(project_id), RESPONSE_FIELD: [pick], **extra}
+
+
+def test_batch_draft_records_the_drafters_capture_setup_tip(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id, note_ids = _sessionless_phone_project(client, admin_auth_headers)
+    fake_client = FakeBatchDraftClient(_tip_patch(project_id, note_ids))
+
+    run = _run_with(client, admin_auth_headers, project_id, fake_client)
+
+    assert run["status"] == "ready"
+    (call,) = fake_client.calls
+    (offered,) = call["batch_context"][CANDIDATES_PACKET_KEY]
+    assert offered["candidate_id"] == "sessionless_app_captures"
+    assert sorted(offered["note_ids"]) == sorted(note_ids)
+    guide = CAPTURE_SETUP_GUIDES[CaptureSetupGap.SESSIONLESS_APP_CAPTURES]
+    expected = {
+        "version": CAPTURE_SETUP_VERSION,
+        "offered": ["sessionless_app_captures"],
+        "returned": 1,
+        "dropped": 0,
+        "recommendations": [
+            {
+                "recommendation_id": "sessionless_app_captures",
+                "kind": "session_capture_link",
+                "gap": "sessionless_app_captures",
+                "detected": True,
+                "note_ids": offered["note_ids"],
+                "note_count": 3,
+                "session_id": None,
+                "session_label": None,
+                "explanation": _TIP_EXPLANATION,
+                "explanation_source": "model",
+                "guide": {
+                    "title": guide.title,
+                    "steps": list(guide.steps),
+                    "app_path": "/app",
+                    "command": None,
+                    "doc": guide.doc,
+                },
+            }
+        ],
+    }
+    batch = client.get(f"/batches/{run['change_set_id']}", headers=admin_auth_headers)
+    draft = client.get(f"/graph-drafts/{run['change_set_id']}", headers=admin_auth_headers)
+    for response in (batch, draft):
+        assert response.status_code == 200, response.text
+        payload = response.json()["data"]
+        assert payload["context_packet"][RESULT_PACKET_KEY] == expected
+        # A tip is not a proposal: operations and clarifications are the model's own.
+        assert [operation["semantic_type"] for operation in payload["operations"]] == [
+            "suggest_new_question"
+        ]
+        assert payload["clarification_requests"] == []
+    listed = client.get(f"/batches?project_id={project_id}", headers=admin_auth_headers)
+    (item,) = listed.json()["data"]
+    assert "context_packet" not in item
+    assert item["operation_count"] == 1
+
+
+def test_batch_draft_without_picks_records_only_what_was_offered(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id, _note_ids = _sessionless_phone_project(client, admin_auth_headers)
+
+    run = _run_with(client, admin_auth_headers, project_id, FakeBatchDraftClient())
+
+    assert run["status"] == "ready"
+    assert _stored_packet(client, admin_auth_headers, run["change_set_id"])[RESULT_PACKET_KEY] == {
+        "version": CAPTURE_SETUP_VERSION,
+        "offered": ["sessionless_app_captures"],
+        "returned": 0,
+        "dropped": 0,
+        "recommendations": [],
+    }
+
+    # No candidates and no picks: nothing is recorded at all.
+    _note(client, admin_auth_headers, project_id, "A typed note with no capture source.")
+    quiet = _run_with(client, admin_auth_headers, project_id, FakeBatchDraftClient())
+    packet = _stored_packet(client, admin_auth_headers, quiet["change_set_id"])
+    assert CANDIDATES_PACKET_KEY not in packet
+    assert RESULT_PACKET_KEY not in packet
+
+
+def test_a_malformed_tip_field_never_costs_a_retry(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id, _note_ids = _sessionless_phone_project(client, admin_auth_headers)
+    fake_client = FakeBatchDraftClient({**_batch_patch(project_id), RESPONSE_FIELD: "garbage"})
+
+    run = _run_with(client, admin_auth_headers, project_id, fake_client)
+
+    assert run["status"] == "ready"
+    assert len(fake_client.calls) == 1
+    recorded = _stored_packet(client, admin_auth_headers, run["change_set_id"])[RESULT_PACKET_KEY]
+    assert (recorded["returned"], recorded["recommendations"]) == (0, [])
+
+
+def test_a_failed_batch_records_no_capture_setup(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id, note_ids = _sessionless_phone_project(client, admin_auth_headers)
+    fake_client = FakeBatchDraftClient(_tip_patch(project_id, note_ids), fail_attempts=3)
+
+    run = _run_with(client, admin_auth_headers, project_id, fake_client)
+
+    assert run["status"] == "failed"
+    packet = _stored_packet(client, admin_auth_headers, run["change_set_id"])
+    assert CANDIDATES_PACKET_KEY in packet
+    assert RESULT_PACKET_KEY not in packet
+
+
+def test_capture_setup_recording_failures_are_logged_and_leave_the_batch_ready(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    project_id, note_ids = _sessionless_phone_project(client, admin_auth_headers)
+
+    def explode(_candidates: object, _items: object) -> dict[str, Any] | None:
+        raise RuntimeError("resolver bug")
+
+    monkeypatch.setattr(graph_draft_capture_setup, "resolve_capture_setup", explode)
+    fake_client = FakeBatchDraftClient(_tip_patch(project_id, note_ids))
+    with caplog.at_level(logging.ERROR, logger=graph_draft_capture_setup.__name__):
+        run = _run_with(client, admin_auth_headers, project_id, fake_client)
+
+    assert run["status"] == "ready"
+    packet = _stored_packet(client, admin_auth_headers, run["change_set_id"])
+    assert RESULT_PACKET_KEY not in packet
+    [record] = [item for item in caplog.records if item.name == graph_draft_capture_setup.__name__]
+    assert record.levelno == logging.ERROR
+    assert record.getMessage() == (
+        f"capture-setup tips failed for change set {run['change_set_id']}"
+    )

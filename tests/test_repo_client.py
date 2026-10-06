@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
+from pathlib import Path
 
 import httpx
 import pytest
@@ -11,9 +13,12 @@ from lab_tracker_client import LabTracker
 from lab_tracker_client.client import LTValidationError
 from lab_tracker_client.gitinfo import CommitFilter
 from lab_tracker_client.repo import (
+    ALREADY_CAPTURED_REASON,
+    RECAPTURED_REASON,
     artifact_from_path,
     capture_commit,
     environment_fingerprint,
+    event_client_capture_id,
     event_metadata,
     event_source_external_id,
     init_config,
@@ -25,6 +30,7 @@ from lab_tracker_client.repo import (
     render_event_note,
     resolve_outbox_path,
     sync_outbox,
+    sync_outbox_path,
     validate_event,
 )
 
@@ -471,6 +477,413 @@ def test_sync_outbox_dry_run_makes_no_changes(tmp_path, monkeypatch) -> None:
 
     assert summary["results"][0]["action"] == "skipped"
     assert read_event(path)["sync"]["status"] == "pending"
+
+
+# --- capture keys: one commit, several events ---------------------------------
+
+CAPTURE_ID_REUSED = (
+    "Note client_capture_id 'example.com/org/repo@abc' was already used with "
+    "different field(s): raw_asset, metadata."
+)
+
+
+def _form_field(request: httpx.Request, name: str) -> str:
+    body = request.content.decode("utf-8", errors="replace")
+    match = re.search(rf'name="{name}"\r\n\r\n(.*?)\r\n--', body, re.S)
+    assert match, f"{name} missing from the upload"
+    return match.group(1)
+
+
+def _upload_handler(respond):
+    """MockTransport handler: an empty note index, uploads answered by ``respond``."""
+
+    uploads: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/notes":
+            return _json_response(
+                200, {"data": [], "meta": {"limit": 200, "offset": 0, "total": 0}}
+            )
+        if request.method == "POST" and request.url.path == "/notes/upload-file":
+            uploads.append(request)
+            return respond(request)
+        return _json_response(500, {"error": {"message": "unexpected request"}})
+
+    return handler, uploads
+
+
+def _staged(request: httpx.Request) -> httpx.Response:
+    note_id = f"note-{hashlib.sha256(request.content).hexdigest()[:8]}"
+    return _json_response(
+        201, {"data": {"note_id": note_id, "project_id": "project-1", "status": "staged"}}
+    )
+
+
+def _conflict(message: str = CAPTURE_ID_REUSED):
+    def respond(_request: httpx.Request) -> httpx.Response:
+        return _json_response(409, {"error": {"code": "conflict", "message": message}})
+
+    return respond
+
+
+def _identity_taken(request: httpx.Request) -> httpx.Response:
+    """Another capture holds the commit identity key; every other key is new."""
+
+    if ":" in _form_field(request, "client_capture_id").rsplit("@", 1)[1]:
+        return _staged(request)
+    return _conflict()(request)
+
+
+def _mark_synced(path) -> None:
+    event = read_event(path)
+    event["sync"] = {"status": "synced", "attempts": 1, "note_id": "note-1"}
+    path.write_text(json.dumps(event), encoding="utf-8")
+
+
+def test_only_the_commit_capture_uses_the_commit_identity_as_capture_id(
+    tmp_path, monkeypatch
+) -> None:
+    _clear_repo_env(monkeypatch)
+    commit = _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    identity = f"example.com/org/repo@{commit}"
+
+    hook, hook_path, _ = capture_commit(config)
+    finish, _, _ = capture_commit(config, event_type="finish", summary="Run one.")
+    report, _, _ = capture_commit(config, event_type="report")
+    _mark_synced(hook_path)
+    recaptured, _, action = capture_commit(config, summary="Post-sync annotation")
+
+    assert action == "recaptured"
+    events = (hook, finish, report, recaptured)
+    # One evidence identity for the commit; one capture key per intended note.
+    assert {event_source_external_id(event) for event in events} == {identity}
+    assert [event_client_capture_id(event) for event in events] == [
+        identity,
+        f"{identity}:finish:{finish['event_id']}",
+        f"{identity}:report:{report['event_id']}",
+        f"{identity}:commit:{recaptured['event_id']}",
+    ]
+
+
+def test_event_capture_ids_stay_distinct_within_the_server_bound(tmp_path, monkeypatch) -> None:
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    source = {"repo_remote_url": "https://example.com/" + "lab/" * 40 + "repo.git"}
+
+    runs = [make_event(config, event_type="finish", source=source) for _ in range(2)]
+    keys = [event_client_capture_id(event) for event in runs]
+
+    assert all(len(key) <= 120 for key in keys)
+    assert keys[0] != keys[1]
+
+
+def test_sync_uploads_each_event_at_one_commit_under_its_own_capture_id(
+    tmp_path, monkeypatch
+) -> None:
+    _clear_repo_env(monkeypatch)
+    commit = _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    identity = f"example.com/org/repo@{commit}"
+    handler, uploads = _upload_handler(_staged)
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        capture_commit(config)
+        first = sync_outbox(lt, config)
+        finish, _, _ = capture_commit(config, event_type="finish", summary="Run one.")
+        second = sync_outbox(lt, config)
+
+    assert first["errors"] == second["errors"] == []
+    assert [_form_field(request, "client_capture_id") for request in uploads] == [
+        identity,
+        f"{identity}:finish:{finish['event_id']}",
+    ]
+    metadata = [json.loads(_form_field(request, "metadata")) for request in uploads]
+    assert {item["evidence_source_external_id"] for item in metadata} == {identity}
+
+
+def test_sync_settles_a_bare_commit_capture_already_captured_elsewhere(
+    tmp_path, monkeypatch
+) -> None:
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    # A config-default question is not an annotation: the hook adds it to every capture.
+    config = init_config(project_id="project-1", default_question_id="q-default")
+    _event, path, _action = capture_commit(config)
+    handler, uploads = _upload_handler(_conflict())
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        first = sync_outbox(lt, config)
+        second = sync_outbox(lt, config)
+
+    assert first["errors"] == []
+    [result] = first["results"]
+    assert (result["action"], result["reason"]) == ("skipped", ALREADY_CAPTURED_REASON)
+    assert "note_id" not in result
+    sync = read_event(path)["sync"]
+    assert (sync["status"], sync["reason"]) == ("synced", ALREADY_CAPTURED_REASON)
+    assert "note_id" not in sync
+    assert "last_error" not in sync
+    status = outbox_status(config.outbox_path())
+    assert (status["synced"], status["failed"]) == (1, 0)
+    assert status["events"][0]["sync_reason"] == ALREADY_CAPTURED_REASON
+    # Settled means terminal: the next drain neither re-uploads nor re-fails it.
+    assert second["results"][0]["reason"] == "already_synced"
+    assert len(uploads) == 1
+
+
+@pytest.mark.parametrize(
+    ("capture_kwargs", "field"),
+    [
+        ({"summary": "Sweep over latency window"}, "summary"),
+        ({"question_id": "q-explicit"}, "question_id"),
+        ({"dataset_ids": ["ds-1"]}, "dataset_ids"),
+        ({"tags": ["pilot"]}, "tags"),
+        ({"artifacts": [{"uri": "file:///results/out.csv", "title": "out.csv"}]}, "artifacts"),
+    ],
+)
+def test_sync_recaptures_an_annotated_commit_capture_already_captured_elsewhere(
+    tmp_path, monkeypatch, capture_kwargs, field
+) -> None:
+    """Marking it synced would drop the annotation, so it lands as a note of its own."""
+
+    _clear_repo_env(monkeypatch)
+    commit = _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    identity = f"example.com/org/repo@{commit}"
+    event, path, _action = capture_commit(config, **capture_kwargs)
+    handler, uploads = _upload_handler(_identity_taken)
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        first = sync_outbox(lt, config)
+        second = sync_outbox(lt, config)
+
+    assert first["errors"] == second["errors"] == []
+    [result] = first["results"]
+    assert (result["action"], result["reason"]) == ("imported", RECAPTURED_REASON)
+    recaptured = read_event(Path(result["path"]))
+    assert recaptured["sync"]["note_id"] == result["note_id"]
+    assert recaptured[field] == event[field]
+    settled = read_event(path)["sync"]
+    assert (settled["status"], settled["reason"]) == ("synced", ALREADY_CAPTURED_REASON)
+    assert settled["recaptured_event_id"] == recaptured["event_id"]
+    # Both events are terminal after one sync: the next drain uploads nothing.
+    assert [_form_field(request, "client_capture_id") for request in uploads] == [
+        identity,
+        f"{identity}:commit:{recaptured['event_id']}",
+    ]
+
+
+def test_an_interrupted_recapture_resumes_as_the_same_event(tmp_path, monkeypatch) -> None:
+    """A sync that died before settling the capture finds its recapture, not a new one."""
+
+    _clear_repo_env(monkeypatch)
+    commit = _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    _event, path, _action = capture_commit(config, tags=["pilot"])
+    unsettled = path.read_text(encoding="utf-8")
+    handler, uploads = _upload_handler(_identity_taken)
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        sync_outbox(lt, config)
+        path.write_text(unsettled, encoding="utf-8")
+        again = sync_outbox(lt, config)
+
+    assert again["errors"] == []
+    assert len(list(config.outbox_path().glob("*.json"))) == 2
+    keys = [_form_field(request, "client_capture_id") for request in uploads]
+    assert keys.count(f"example.com/org/repo@{commit}") == 2
+    assert len(keys) == 3
+    assert read_event(path)["sync"]["reason"] == ALREADY_CAPTURED_REASON
+
+
+def test_a_failed_recapture_retries_without_reopening_the_settled_capture(
+    tmp_path, monkeypatch
+) -> None:
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    _event, path, _action = capture_commit(config, tags=["pilot"])
+    outage = [True]
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if outage[0] and ":" in _form_field(request, "client_capture_id").rsplit("@", 1)[1]:
+            return _json_response(503, {"error": {"message": "maintenance"}})
+        return _identity_taken(request)
+
+    handler, uploads = _upload_handler(respond)
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        failed = sync_outbox(lt, config)
+        outage[0] = False
+        retried = sync_outbox(lt, config)
+
+    [error] = failed["errors"]
+    assert (error["action"], error["reason"]) == ("failed", RECAPTURED_REASON)
+    assert "maintenance" in error["error"]
+    assert Path(error["path"]) != path
+    assert read_event(path)["sync"]["status"] == "synced"
+    assert retried["errors"] == []
+    assert read_event(Path(error["path"]))["sync"]["status"] == "synced"
+    # The settled capture is never uploaded again; only the recapture retries.
+    assert len(uploads) == 3
+
+
+@pytest.mark.parametrize(
+    ("default_question_id", "capture_kwargs", "recaptured"),
+    [
+        (None, {}, False),
+        (None, {"summary": "Sweep over latency window"}, True),
+        # Without question_id_source a config default may have been explicit.
+        ("q-default", {}, True),
+    ],
+)
+def test_sync_judges_a_capture_recorded_before_annotation_flags_by_content(
+    tmp_path, monkeypatch, default_question_id, capture_kwargs, recaptured
+) -> None:
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1", default_question_id=default_question_id)
+    _event, path, _action = capture_commit(config, **capture_kwargs)
+    legacy = read_event(path)
+    legacy.pop("question_id_source")
+    legacy["payload"].pop("summary_is_explicit")
+    path.write_text(json.dumps(legacy), encoding="utf-8")
+    handler, uploads = _upload_handler(_identity_taken)
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        summary = sync_outbox(lt, config)
+
+    assert summary["errors"] == []
+    assert read_event(path)["sync"]["reason"] == ALREADY_CAPTURED_REASON
+    assert len(uploads) == (2 if recaptured else 1)
+
+
+@pytest.mark.parametrize(
+    ("event_type", "message"),
+    [
+        # A per-event key refused: the same event was uploaded with other content.
+        ("finish", CAPTURE_ID_REUSED),
+        ("report", CAPTURE_ID_REUSED),
+        # Any other conflict is not evidence that the commit was captured.
+        ("commit", "Project is archived."),
+    ],
+)
+def test_sync_keeps_other_capture_conflicts_failed(
+    tmp_path, monkeypatch, event_type, message
+) -> None:
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    _event, path, _action = capture_commit(config, event_type=event_type)
+    handler, _uploads = _upload_handler(_conflict(message))
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        summary = sync_outbox(lt, config)
+
+    [error] = summary["errors"]
+    assert message in error["error"]
+    assert read_event(path)["sync"]["status"] == "failed"
+
+
+def _clone(source, destination, *, remote: str) -> None:
+    subprocess.run(["git", "clone", "-q", str(source), str(destination)], check=True)
+    subprocess.run(
+        ["git", "-C", str(destination), "remote", "set-url", "origin", remote], check=True
+    )
+
+
+def test_every_event_at_one_commit_syncs_against_the_real_server(
+    tmp_path, monkeypatch, client, admin_auth_headers
+) -> None:
+    _clear_repo_env(monkeypatch)
+    project = client.post("/projects", json={"name": "Repo keys"}, headers=admin_auth_headers)
+    assert project.status_code in (200, 201), project.text
+    project_id = project.json()["data"]["project_id"]
+    token = admin_auth_headers["Authorization"].split(" ", 1)[1]
+    laptop = tmp_path / "laptop"
+    laptop.mkdir()
+    _init_git_repo(laptop)
+    results = tmp_path / "results"
+    results.mkdir()
+    (results / "decoding.csv").write_text("trial,score\n1,0.9\n", encoding="utf-8")
+
+    def sync(checkout):
+        with LabTracker(
+            base_url="http://testserver", access_token=token, transport=client._transport
+        ) as lt:
+            return sync_outbox_path(lt, checkout / ".lab-tracker" / "outbox" / "repo")
+
+    def configure(checkout):
+        return init_config(
+            project_id=project_id, config_path=checkout / ".lab-tracker" / "repo.json"
+        )
+
+    monkeypatch.setenv("LAB_TRACKER_CAPTURE_HOST", "laptop")
+    config = configure(laptop)
+    capture_commit(config, cwd=laptop)
+    hook = sync(laptop)
+    artifact = artifact_from_path(results / "decoding.csv", root=results)
+    _finish, finish_path, _ = capture_commit(
+        config, event_type="finish", cwd=laptop, artifacts=[artifact]
+    )
+    run_finish = sync(laptop)
+    _annotated, _, recapture_action = capture_commit(
+        config, cwd=laptop, summary="Sweep over latency window"
+    )
+    annotation = sync(laptop)
+
+    for summary in (hook, run_finish, annotation):
+        assert summary["errors"] == []
+        assert [item["action"] for item in summary["results"] if item["action"] != "skipped"] == [
+            "imported"
+        ]
+    assert recapture_action == "recaptured"
+
+    # A lost upload response, replayed without the evidence index: the server's
+    # capture key alone returns the note it already made instead of a second one.
+    finish_note_id = read_event(finish_path)["sync"]["note_id"]
+    replayed = read_event(finish_path)
+    replayed["sync"] = {"status": "pending", "attempts": 1}
+    finish_path.write_text(json.dumps(replayed), encoding="utf-8")
+    with monkeypatch.context() as patch:
+        patch.setattr("lab_tracker_client.repo.outbox_note_index", lambda *a, **k: {})
+        replay = sync(laptop)
+    assert replay["errors"] == []
+    assert read_event(finish_path)["sync"]["note_id"] == finish_note_id
+
+    # Another machine's bare hook capture of the same commit settles; an
+    # annotated one keeps its tag as a note of its own.
+    for name, tags in (("ci", None), ("desk", ["pilot"])):
+        checkout = tmp_path / name
+        _clone(laptop, checkout, remote="git@example.com:org/repo.git")
+        monkeypatch.setenv("LAB_TRACKER_CAPTURE_HOST", name)
+        capture_commit(configure(checkout), cwd=checkout, tags=tags)
+    ci, desk = sync(tmp_path / "ci"), sync(tmp_path / "desk")
+
+    assert ci["errors"] == desk["errors"] == []
+    assert [item["reason"] for item in ci["results"]] == [ALREADY_CAPTURED_REASON]
+    assert [item["reason"] for item in desk["results"]] == [RECAPTURED_REASON]
+    notes = client.get(
+        "/notes", params={"project_id": project_id}, headers=admin_auth_headers
+    ).json()["data"]
+    assert sorted(note["metadata"]["repo_event_type"] for note in notes) == [
+        "commit",
+        "commit",
+        "commit",
+        "finish",
+    ]
+    assert [note["metadata"].get("repo_tags") for note in notes].count("pilot") == 1
 
 
 # --- declared targets --------------------------------------------------------

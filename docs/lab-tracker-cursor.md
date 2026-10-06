@@ -137,3 +137,13 @@ destructive and write tools behind explicit approval.
 The product rule is unchanged: AI can suggest; only a person commits — unless a
 project owner has granted delegated curation, in which case the delegated
 tools apply what that grant admits ([delegated-curation.md](delegated-curation.md)).
+
+## Capture Paths
+
+Cursor's MCP connection reads and writes the record; capture that runs on its
+own comes from the `lt` CLI and the app. The [capture guide](capture-guide.md)
+lists every path, and the `lab-tracker://setup-guide` MCP resource gives an
+agent the same list with the consent-gated setup commands. The coding-agent
+session hooks (`lt setup agent-hooks`) are for Claude Code; Cursor's hook
+points are described but unsupported in [agent session capture](agent-session-
+capture.md).

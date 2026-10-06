@@ -16,9 +16,9 @@ to the Git tag and is not part of the package version.
 The automated release path currently accepts stable releases only. Do not use
 pre-release or build suffixes until their mapping between SemVer and Python's
 package-version rules is designed and added to `scripts/verify_release.py`.
-Adopting this policy does not itself publish or tag a release; `0.1.0` remains
-the initial baseline until a maintainer intentionally completes the release
-steps below.
+Adopting this policy does not itself publish or tag a release; a release exists
+only once a maintainer completes the steps below. `0.1.0` was the untagged
+baseline, and `v0.2.0` is the first tagged release.
 
 The public compatibility surface is:
 
@@ -54,6 +54,15 @@ When a release contains several kinds of change, use the largest required bump.
 A released version is immutable; corrections get a new PATCH release rather
 than a moved or rebuilt tag.
 
+Clients are told about every release, not only feature releases: a client whose
+release is older than its server's, a PATCH release included, gets an update
+notice from `lt setup status`, `lt doctor`, `lt-mcp` and the coverage read. Cut
+a PATCH release for a fix that consumers should take, such as a dependency
+bound that breaks `lt-mcp`, and a MINOR release for features. The same release
+at a different commit is reported but never suggested, so unreleased commits
+notify nobody. See
+[setup.md](setup.md#know-when-a-client-install-is-broken-or-behind-its-server).
+
 ## Preparing and publishing a release
 
 1. Start from a clean branch based on `main`, with CI green. Review merged work
@@ -82,18 +91,31 @@ than a moved or rebuilt tag.
    uv build --no-sources
    ```
 
-5. Commit the version preparation as `chore(release): prepare vX.Y.Z`, merge it
-   to `main`, and confirm CI is green on that exact commit.
-6. Create and push an annotated tag on the merged commit:
+5. Commit the version preparation as `chore(release): prepare vX.Y.Z` and merge
+   it to `main`. Merging is the release: nothing else needs pushing.
 
-   ```bash
-   git tag -a vX.Y.Z -m "Lab Tracker vX.Y.Z"
-   git push origin vX.Y.Z
-   ```
+The `auto-release` GitHub Actions workflow runs after each `ci` run on `main`.
+When that run passed and its commit's `project.version` has no `vX.Y.Z` tag
+yet, it calls the `release` workflow for that commit. So the first `main`
+commit to pass CI after a version bump is the one released, and a version
+that already has its tag is never released again. A red `main` releases
+nothing until a later commit passes.
 
-The `release` GitHub Actions workflow rejects a tag that does not exactly match
+The `release` workflow rejects a tag that does not exactly match
 `project.version`, reruns the Python quality gates, builds a wheel and source
-distribution, checks the installed wheel's runtime version, and creates a
-GitHub Release with generated notes and both artifacts. It deliberately does
-not publish to PyPI; adding package-index publication requires a separate
-decision and trusted-publisher configuration.
+distribution, and checks the installed wheel's runtime version. Only then does
+it create the annotated tag and a GitHub Release with generated notes and both
+artifacts. If a check fails, no tag is created, and the next green `main` run
+tries again. If only the GitHub Release step fails, the tag already exists, so
+no later run retries it: re-run that failed job from the Actions page, and it
+keeps the tag when it names the same commit. It deliberately does not publish
+to PyPI; adding package-index publication requires a separate decision and
+trusted-publisher configuration.
+
+A maintainer can still release by hand. Push an annotated tag on a commit
+whose CI is green, and the `release` workflow runs for that tag directly:
+
+```bash
+git tag -a vX.Y.Z -m "Lab Tracker vX.Y.Z"
+git push origin vX.Y.Z
+```

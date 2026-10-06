@@ -1,5 +1,6 @@
 """Failure stages use observed connections, not assumptions about tailnets."""
 
+import json
 import socket
 import ssl
 import threading
@@ -11,7 +12,9 @@ import pytest
 from lab_tracker.mcp_api_client import LabTrackerAPIClient, MCPSettings
 from lab_tracker.mcp_tools import read
 from lab_tracker_client import LabTracker, LTAPIError, setup
+from lab_tracker_client import cli as lt_cli
 from lab_tracker_client.connection_diagnostics import ConnectionTrace
+from lab_tracker_client.transport import _join_sentences
 
 
 @contextmanager
@@ -86,10 +89,15 @@ def test_stage_and_conditional_funnel_guidance(kind, expected):
     assert result["diagnosis"] == expected
     assert "secret" not in str(result)
     assert ("tailscale funnel status" in result["next_step"]) == (kind == "tls")
+    assert ("`tailscale status`" in result["next_step"]) == (kind == "tls")
+    assert ("Publishing Through Tailscale Funnel" in result["next_step"]) == (kind == "tls")
     if kind == "tls":
         assert "If this host uses" in result["detail"]
         assert "cannot confirm" in result["detail"]
         assert "do not need to join" in result["next_step"]
+        # The installed wheel does not ship docs/, so name the guide, not a path.
+        assert "guide in the Lab Tracker repository" in result["next_step"]
+        assert "docs/" not in result["next_step"]
 
 
 @pytest.mark.parametrize(
@@ -115,11 +123,11 @@ def test_unobserved_timeout_does_not_claim_tls_or_funnel():
 def test_health_http_status_preserves_reachability_contract(monkeypatch, status, reachable):
     calls = []
 
-    def get(_self, url, **kwargs):
-        calls.append(url)
-        return httpx.Response(status)
+    def send(_self, request, **_kwargs):
+        calls.append(str(request.url))
+        return httpx.Response(status, request=request)
 
-    monkeypatch.setattr(httpx.Client, "get", get)
+    monkeypatch.setattr(httpx.Client, "send", send)
     result = setup.probe_health_diagnostics("https://origin.ts.net")
     assert result["reachable"] is reachable
     assert calls == ["https://origin.ts.net/health"]
@@ -132,12 +140,14 @@ def test_health_http_status_preserves_reachability_contract(monkeypatch, status,
 
 
 def test_health_probe_reports_the_server_release(monkeypatch):
-    def get(_self, _url, **_kwargs):
+    def send(_self, request, **_kwargs):
         return httpx.Response(
-            200, json={"status": "ok", "app": {"version": "0.9.0", "source_revision": "B" * 40}}
+            200,
+            json={"status": "ok", "app": {"version": "0.9.0", "source_revision": "B" * 40}},
+            request=request,
         )
 
-    monkeypatch.setattr(httpx.Client, "get", get)
+    monkeypatch.setattr(httpx.Client, "send", send)
 
     result = setup.probe_health_diagnostics("https://origin.ts.net")
 
@@ -145,10 +155,10 @@ def test_health_probe_reports_the_server_release(monkeypatch):
 
 
 def test_health_probe_without_a_json_body_stays_reachable_without_a_release(monkeypatch):
-    def get(_self, _url, **_kwargs):
-        return httpx.Response(200, text="<html>ok</html>")
+    def send(_self, request, **_kwargs):
+        return httpx.Response(200, text="<html>ok</html>", request=request)
 
-    monkeypatch.setattr(httpx.Client, "get", get)
+    monkeypatch.setattr(httpx.Client, "send", send)
 
     result = setup.probe_health_diagnostics("https://origin.ts.net")
 
@@ -179,6 +189,49 @@ def test_mcp_health_keeps_fail_soft_and_exposes_diagnostic(monkeypatch):
     assert result["next_action"]["action"] == "proceed_without_graph_context"
 
 
+SOCKS_WITHOUT_SOCKSIO = (
+    "Using SOCKS proxy, but the 'socksio' package is not installed. "
+    "Make sure to install httpx using `pip install httpx[socks]`."
+)
+
+
+def test_health_probe_stays_fail_soft_when_the_http_client_cannot_be_built(monkeypatch):
+    # httpx reads the proxy variables while building the client; a SOCKS proxy
+    # without the optional socksio package raises ImportError there, and the
+    # session-start status must still report instead of crashing. Simulated so
+    # the result does not depend on whether socksio is installed.
+    def unbuildable(*_args, **_kwargs):
+        raise ImportError(SOCKS_WITHOUT_SOCKSIO)
+
+    monkeypatch.setattr(httpx, "Client", unbuildable)
+
+    result = setup.probe_health_diagnostics("http://127.0.0.1:9")
+
+    assert result["reachable"] is False
+    assert result["diagnosis"] == "transport_error"
+    assert result["detail"]
+    assert result["next_step"]
+
+
+def test_health_probe_stays_fail_soft_under_a_socks_proxy_setting(monkeypatch):
+    # The real client, whichever way this environment goes: without socksio httpx
+    # rejects the setting while building the client (transport_error); with it the
+    # probe reaches for the unreachable proxy (tcp_connection_failed, or a
+    # proxy_connection_failed where httpx names the proxy). It must never raise.
+    monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:9")
+
+    result = setup.probe_health_diagnostics("http://127.0.0.1:9")
+
+    assert result["reachable"] is False
+    assert result["diagnosis"] in {
+        "transport_error",
+        "proxy_connection_failed",
+        "tcp_connection_failed",
+    }
+    assert result["detail"]
+    assert result["next_step"]
+
+
 def test_malformed_health_url_stays_fail_soft():
     assert setup.probe_health_diagnostics("https://[invalid")["reachable"] is False
 
@@ -187,3 +240,146 @@ def test_read_timeout_is_not_reported_as_tls_stall():
     result = ConnectionTrace("https://origin.ts.net").diagnose(httpx.ReadTimeout(""))
     assert result["diagnosis"] == "http_response_timeout"
     assert "Funnel" not in str(result)
+
+
+def _setup_connect_dry_run(monkeypatch, tmp_path, capsys, base_url):
+    """Run ``lt setup connect --dry-run`` and return (payload, config dir)."""
+    config_dir = tmp_path / "lt-home"
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(config_dir))
+    lt_cli.main(["setup", "connect", "--base-url", base_url, "--dry-run"])
+    return json.loads(capsys.readouterr().out), config_dir
+
+
+def test_setup_connect_reports_actual_tls_stall(monkeypatch, tmp_path, capsys):
+    # NO_PROXY keeps the loopback probe off any sandbox/CI proxy.
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    monkeypatch.setattr(setup, "_HEALTH_PROBE_TIMEOUT_SECONDS", 0.1)
+    with stalled_tls_server() as url:
+        payload, config_dir = _setup_connect_dry_run(monkeypatch, tmp_path, capsys, url)
+    assert payload["command"] == "setup-connect"
+    assert payload["server_reachable"] is False
+    diagnostic = payload["server_diagnostic"]
+    assert diagnostic["diagnosis"] == "tls_handshake_stalled"
+    assert "TLS handshake did not complete" in diagnostic["detail"]
+    assert diagnostic["next_step"]
+    assert "status_code" not in diagnostic
+    assert "Funnel" not in json.dumps(diagnostic)  # 127.0.0.1 is not a .ts.net name
+    assert not config_dir.exists()
+
+
+@pytest.mark.parametrize("status,reachable", [(200, True), (401, True), (503, False)])
+def test_setup_connect_reports_health_http_status(
+    monkeypatch, tmp_path, capsys, status, reachable
+):
+    monkeypatch.setattr(
+        httpx.Client,
+        "send",
+        lambda _self, request, **_kwargs: httpx.Response(status, request=request),
+    )
+    payload, _ = _setup_connect_dry_run(monkeypatch, tmp_path, capsys, "https://origin.ts.net")
+    assert payload["server_reachable"] is reachable
+    if status < 400:
+        assert "server_diagnostic" not in payload
+    else:
+        diagnostic = payload["server_diagnostic"]
+        assert diagnostic["diagnosis"] == "http_error"
+        assert diagnostic["status_code"] == status
+        assert set(diagnostic) == {"diagnosis", "detail", "next_step", "status_code"}
+        assert "Funnel" not in json.dumps(diagnostic)
+
+
+@pytest.mark.parametrize("failed_event", ["start_tls", "connect_tcp"])
+def test_setup_connect_funnel_guidance_only_for_an_observed_tls_stall(
+    monkeypatch, tmp_path, capsys, failed_event
+):
+    def send(_self, request, **_kwargs):
+        trace = request.extensions["trace"]
+        if failed_event == "start_tls":
+            trace("connection.start_tls.started", {"server_hostname": b"origin.ts.net"})
+        trace(f"connection.{failed_event}.failed", {})
+        raise httpx.ConnectTimeout("secret handshake detail")
+
+    monkeypatch.setattr(httpx.Client, "send", send)
+    payload, _ = _setup_connect_dry_run(monkeypatch, tmp_path, capsys, "https://origin.ts.net")
+    assert payload["server_reachable"] is False
+    diagnostic = payload["server_diagnostic"]
+    assert "secret" not in json.dumps(payload)
+    if failed_event == "start_tls":
+        assert diagnostic["diagnosis"] == "tls_handshake_stalled"
+        assert "cannot confirm" in diagnostic["detail"]
+        assert "tailscale funnel status" in diagnostic["next_step"]
+    else:
+        assert diagnostic["diagnosis"] == "tcp_connection_failed"
+        assert "Funnel" not in json.dumps(diagnostic)
+
+
+def test_setup_connect_without_a_base_url_does_not_probe(monkeypatch, tmp_path, capsys):
+    def send(_self, _request, **_kwargs):
+        raise AssertionError("no --base-url, so no health probe")
+
+    monkeypatch.setattr(httpx.Client, "send", send)
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(tmp_path / "lt-home"))
+    lt_cli.main(["setup", "connect", "--project", "p-1", "--dry-run"])
+    payload = json.loads(capsys.readouterr().out)
+    assert "server_reachable" not in payload
+    assert "server_diagnostic" not in payload
+
+
+@pytest.mark.parametrize("cause", ["handshake timed out", "handshake timed out."])
+def test_error_message_separates_the_cause_from_the_diagnostic(cause):
+    def handler(request):
+        trace = request.extensions["trace"]
+        trace("connection.start_tls.started", {"server_hostname": b"origin.example"})
+        trace("connection.start_tls.failed", {})
+        raise httpx.ConnectTimeout(cause, request=request)
+
+    with (
+        LabTracker(base_url="https://origin.example", transport=httpx.MockTransport(handler)) as lt,
+        pytest.raises(LTAPIError) as caught,
+    ):
+        lt.health()
+    message = str(caught.value)
+    assert "failed: handshake timed out. The TCP connection succeeded" in message
+    assert ".." not in message
+
+
+@pytest.mark.parametrize(
+    ("cause", "expected"),
+    [
+        ("", "failed: The request failed; its connection stage"),
+        ("boom:", "failed: boom: The request failed; its connection stage"),
+    ],
+    ids=["empty", "trailing-colon"],
+)
+def test_error_message_has_no_stray_full_stop_after_an_empty_or_colon_cause(cause, expected):
+    # httpx.PoolTimeout() has an empty message, so the wrapped text ends in "failed: ".
+    def handler(request):
+        raise httpx.PoolTimeout(cause, request=request)
+
+    with (
+        LabTracker(base_url="https://origin.example", transport=httpx.MockTransport(handler)) as lt,
+        pytest.raises(LTAPIError) as caught,
+    ):
+        lt.health()
+    message = str(caught.value)
+    assert expected in message
+    assert ": ." not in message
+    assert ":." not in message
+    assert ".." not in message
+
+
+@pytest.mark.parametrize(
+    ("parts", "expected"),
+    [
+        (("failed:", "One.", "Two."), "failed: One. Two."),
+        (("failed: ", "One.", "Two."), "failed: One. Two."),
+        (("failed", "One.", "Two."), "failed. One. Two."),
+        (("Done!", "One?", "Two"), "Done! One? Two"),
+        (("", "One.", "Two."), "One. Two."),
+        (("   ", "One", "Two"), "One. Two"),
+        (("Only",), "Only"),
+        ((), ""),
+    ],
+)
+def test_join_sentences_punctuates_only_where_a_full_stop_belongs(parts, expected):
+    assert _join_sentences(*parts) == expected

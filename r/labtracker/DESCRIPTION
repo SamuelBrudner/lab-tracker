@@ -1,0 +1,18 @@
+Package: labtracker
+Type: Package
+Title: Fail-Soft Lab Tracker Figure Capture for R
+Version: 0.1.0
+Authors@R: person("Samuel", "Brudner", role = c("aut", "cre"),
+    email = "samuel.brudner@gmail.com")
+Description: Captures figures saved with ggplot2::ggsave() and the png(),
+    jpeg(), tiff(), bmp() and pdf() file devices into Lab Tracker as staged
+    evidence notes by running the Python client's 'lt capture file' command
+    in the background. Captures only saves whose project is bound (an
+    explicit project, LAB_TRACKER_PROJECT_ID, or the checkout's lt_ids.json)
+    and never raises an error into the R session.
+License: file LICENSE
+Encoding: UTF-8
+Depends: R (>= 4.0.0)
+Imports: grDevices
+Suggests: ggplot2, testthat (>= 3.0.0), withr
+Config/testthat/edition: 3
