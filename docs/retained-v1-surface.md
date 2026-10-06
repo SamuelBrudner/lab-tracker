@@ -213,12 +213,14 @@ research record:
     email-to-capture through a per-(user, project) HMAC plus-address accepted
     only from the mapped sender and shown only to that person (Devices →
     Email capture), instrument-calendar (ICS) bookings, and
-    registered-store scans. Bookings and store files become SYSTEM-authored
-    staged notes; channel principals are non-interactive and can never accept
-    or commit. Pollers run from the optional ticker, `POST
-    /integrations/run-due`, or `lab-tracker integrations poll`, each at most
-    once per minimum interval. See
-    [server-capture-channels.md](server-capture-channels.md).
+    registered-store scans (rclone-backed stores only, each run revalidating
+    the store's operator grant and its `list` capability before any listing;
+    `local_fs` scans are refused until the local-use slice). Bookings and
+    store files become SYSTEM-authored staged notes; channel principals are
+    non-interactive and can never accept or commit. Pollers run from the
+    optional ticker, `POST /integrations/run-due`, or
+    `lab-tracker integrations poll`, each at most once per minimum interval.
+    See [server-capture-channels.md](server-capture-channels.md).
   - **New deterministic proposals.** Each batch execution also runs a
     worktree-tree detector (`basis: worktree_tree_match`, a capture to the
     earliest note whose `repo_git_tree` is the same tree) and a time-window

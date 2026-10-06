@@ -250,11 +250,14 @@ Operational notes for this deployment:
   mail server, and calendar feeds follow the outbound HTTP policy (a feed on a
   private network needs `LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES` and
   `LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS`).
-- **Store scans** read only what resolution may read: a `local_fs` store must
-  sit inside `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` (mount it into the container,
-  read-only where possible, as described above), and an rclone store's remote
-  must be in `LAB_TRACKER_RCLONE_ALLOWED_REMOTES` with its `rclone.conf`
-  available to the app container.
+- **Store scans** read only what resolution may read: each run revalidates
+  the store's grant in `LAB_TRACKER_STORE_AUTHORITY_GRANTS_JSON` (it needs
+  `list`, plus `bytes_by_path` to hash), so revoking a grant takes effect for
+  scans once every worker has restarted. An rclone store's remote must also be
+  in `LAB_TRACKER_RCLONE_ALLOWED_REMOTES` with its `rclone.conf` available to
+  the app container. `local_fs` scans are refused in this build; to watch a
+  synced folder, register its cloud side (for example `onedrive` or `dropbox`)
+  as an rclone-backed store instead.
 
 ## Backup
 

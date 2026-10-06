@@ -8,20 +8,33 @@ could be streamed through the existing bounded adapter under
 ``LAB_TRACKER_STORE_SCAN_HASH_MAX_BYTES`` (otherwise ``content_hash_pending``;
 a SHA-256 is never guessed). Bytes are never copied into Lab Tracker.
 
-* ``local_fs``: the registered root must lie inside the operator's
-  ``LAB_TRACKER_RESOLVER_ALLOWED_ROOTS`` both lexically and after resolving
-  aliases; the listing never follows a symlink, and hashing reads through the
-  same retained-handle helper that artifact resolution uses.
+Before any adapter exists, the dispatcher detaches the store's persisted
+authority grant binding under the database scope, releases that scope, and
+revalidates the binding against one operator registry snapshot
+(:mod:`lab_tracker.store_authority_use`). Listing requires the grant's ``list``
+capability and hashing its ``bytes_by_path`` capability; every adapter input
+comes from the resulting use-time proof, never from the released store row.
+
 * rclone-backed kinds: ``rclone lsjson`` and ``rclone cat`` through the bounded
-  process executor and the exact ``LAB_TRACKER_RCLONE_ALLOWED_REMOTES`` policy.
+  process executor and the exact ``LAB_TRACKER_RCLONE_ALLOWED_REMOTES`` policy,
+  which stays a conjunctive outer ceiling on the revalidated grant.
+* ``local_fs``: refused in this build with a static detail. The adapter below
+  checks only the global ``LAB_TRACKER_RESOLVER_ALLOWED_ROOTS``, so it is not
+  dispatched until the local-use slice retains the store's revalidated grant
+  boundary inside enumeration and hashing.
 * Other kinds (``http``, ``git``, ``object_table``, ``database``) cannot list
   and are reported as unsupported.
 
-The first run of a scan records what is already there as a baseline and stages
-nothing (unless the scan sets ``include_existing``), so enabling a scan on a
-full store does not flood the review inbox. Files still changing (modified in
-the last ``SETTLE_SECONDS``) wait for a later poll. Notes are authored by the
-``SYSTEM`` principal with ``capture_channel=store_scan``.
+The first run of a scan against one registered store records what is already
+there as a baseline and stages nothing (unless the scan sets
+``include_existing``), so enabling a scan on a full store does not flood the
+review inbox. Baselines are keyed by store ID, so a name that later resolves to
+a different registration starts over rather than inheriting the old baseline; a
+baseline recorded under the earlier name-only key is adopted once, by whichever
+registration the name resolves to on the first authorized run, and removed.
+Files still changing (modified in the last ``SETTLE_SECONDS``) wait for a later
+poll. Notes are authored by the ``SYSTEM`` principal with
+``capture_channel=store_scan``.
 """
 
 from __future__ import annotations
@@ -37,6 +50,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Final, Protocol
+from uuid import UUID
 
 from lab_tracker.auth import AuthContext
 from lab_tracker.bounded_subprocess import (
@@ -60,6 +74,7 @@ from lab_tracker.capture_channels.common import (
     stable_key,
 )
 from lab_tracker.capture_channels.settings import StoreScan
+from lab_tracker.data_store_definition import ValidatedDataStoreDefinition
 from lab_tracker.local_filesystem_authority import LocalFilesystemAuthority
 from lab_tracker.local_filesystem_operations import BoundedLocalFilesystemOperations
 from lab_tracker.local_filesystem_ports import (
@@ -77,12 +92,19 @@ from lab_tracker.local_store_locator import (
     canonical_local_store_uri,
     canonical_store_uri,
 )
-from lab_tracker.models import DataStore, EntityOrigin, NoteMetadataScalar, NoteStatus, StoreKind
+from lab_tracker.models import (
+    EntityOrigin,
+    NoteMetadataScalar,
+    NoteStatus,
+    StoreCapability,
+    StoreKind,
+)
 from lab_tracker.rclone_remote_policy import RcloneRemotePolicy
 from lab_tracker.rclone_store_definition import (
     RegisteredRcloneStoreAddress,
     is_rclone_store_kind,
 )
+from lab_tracker.store_authority_use import StoreAuthorityUseProof
 
 STORE_SCAN_CHANNEL: Final = "store_scan"
 STORE_SCAN_ADAPTER: Final = "lab-tracker-store-scan"
@@ -111,6 +133,15 @@ _IGNORED_PREFIXES: Final = (".", "~$")
 _IGNORED_SUFFIXES: Final = (".tmp", ".partial", ".part", ".crdownload")
 _FRACTION_RE = re.compile(r"\.(\d+)")
 _HASH_NAME_RE = re.compile(r"[a-z0-9_-]{1,32}\Z")
+
+
+# One opaque detail for every authority denial (no binding, a revoked, changed,
+# or scope-mismatched grant, or a grant without ``list``): it never says which
+# check failed or discloses the store's target, grant, or credential handle.
+STORE_SCAN_UNAUTHORIZED_MESSAGE: Final = (
+    "The data store is not authorized for listing by a current operator grant."
+)
+LOCAL_STORE_SCAN_UNSUPPORTED_MESSAGE: Final = "Local store scans are not supported in this build."
 
 
 class StoreScanError(RuntimeError):
@@ -162,6 +193,8 @@ class LocalStoreScanAccess:
     It wraps the runtime's bounded local-filesystem broker so the broker itself
     is never published on the app state; a holder can only build a
     :class:`LocalStoreAdapter`, which re-checks the operator's local roots.
+    Store scans do not dispatch it in this build: those roots are not the
+    store's revalidated grant boundary.
     """
 
     _operations: BoundedLocalFilesystemOperations
@@ -404,21 +437,30 @@ def _is_contained_directory(path: str, real_root: str) -> bool:
 
 @dataclass(frozen=True)
 class RcloneStoreAdapter:
-    """List and hash an rclone-backed store through the exact remote policy."""
+    """List and hash an rclone-backed store through the exact remote policy.
 
-    store: DataStore
+    Every remote, root, and kind input comes from one use-time authority proof,
+    so the adapter can only address what the operator's grant currently covers.
+    """
+
+    authority: StoreAuthorityUseProof
     policy: RcloneRemotePolicy
     executor: ProcessExecutor
     deadline_seconds: float
     binary: str = "rclone"
     clock: Callable[[], float] = time.monotonic
 
+    def __post_init__(self) -> None:
+        if type(self.authority) is not StoreAuthorityUseProof:
+            raise TypeError("A store scan adapter requires a use-time authority proof.")
+
     def _address(self) -> tuple[RegisteredRcloneStoreAddress, Any]:
+        definition = self.authority.definition
         address = RegisteredRcloneStoreAddress.parse(
-            kind=self.store.kind,
-            name=self.store.name,
-            root=self.store.root,
-            credential_ref=self.store.credential_ref,
+            kind=definition.kind,
+            name=definition.name,
+            root=definition.root,
+            credential_ref=definition.credential_ref,
         )
         if address is None:
             raise StoreScanError("The store's rclone remote or root is invalid.")
@@ -445,7 +487,7 @@ class RcloneStoreAdapter:
             "--max-depth",
             str(MAX_LIST_DEPTH),
         ]
-        if self.store.kind in _METADATA_HASH_KINDS:
+        if self.authority.definition.kind in _METADATA_HASH_KINDS:
             argv.append("--hash")
         argv.append(target)
         try:
@@ -464,7 +506,12 @@ class RcloneStoreAdapter:
         return parse_rclone_listing(result.stdout, prefix=prefix, include=include)
 
     def sha256(self, listed: ListedFile, *, max_bytes: int) -> str | None:
-        if listed.size > max_bytes:
+        # Streaming bytes is a separate operation from listing: a grant without
+        # ``bytes_by_path`` still lists, and its files stay hash-pending.
+        if (
+            listed.size > max_bytes
+            or StoreCapability.BYTES_BY_PATH not in self.authority.capabilities
+        ):
             return None
         try:
             address, remote = self._address()
@@ -578,6 +625,10 @@ class BaselineStore(Protocol):
 
     def set_store_scan_baseline(self, scan_key: str, keys: frozenset[str]) -> None: ...
 
+    def adopt_store_scan_baseline(
+        self, legacy_key: str, scan_key: str
+    ) -> frozenset[str] | None: ...
+
 
 @dataclass
 class StoreScanResult:
@@ -593,8 +644,26 @@ class StoreScanResult:
     truncated_listing: bool = False
 
 
-def scan_key(scan: StoreScan) -> str:
-    """The identity a scan's baseline is remembered under."""
+def scan_key(scan: StoreScan, *, store_id: UUID) -> str:
+    """The identity a scan's baseline is remembered under.
+
+    It includes the exact registered store, so a name that later resolves to a
+    different registration records a fresh baseline.
+    """
+
+    prefix = scan.prefix.path if scan.prefix is not None else ""
+    return stable_key(
+        "scan",
+        str(scan.project_id),
+        str(store_id),
+        scan.store,
+        prefix,
+        "\x1e".join(scan.patterns),
+    )
+
+
+def _legacy_scan_key(scan: StoreScan) -> str:
+    """The name-only baseline identity used before baselines named their store."""
 
     prefix = scan.prefix.path if scan.prefix is not None else ""
     return stable_key("scan", str(scan.project_id), scan.store, prefix, "\x1e".join(scan.patterns))
@@ -603,7 +672,7 @@ def scan_key(scan: StoreScan) -> str:
 def run_store_scan(
     scan: StoreScan,
     *,
-    store: DataStore,
+    authority: StoreAuthorityUseProof,
     adapter: StoreAdapter,
     api: ScanApi,
     actor: AuthContext,
@@ -613,15 +682,20 @@ def run_store_scan(
     monotonic: Callable[[], float] = time.monotonic,
     expired: Callable[[], bool] = lambda: False,
 ) -> StoreScanResult:
-    """List, match, baseline, and stage new files for one scan."""
+    """List, match, baseline, and stage new files for one revalidated store."""
 
+    store = authority.definition
     listing = adapter.list(scan.prefix, include=lambda locator: _matches(locator, scan))
     result = StoreScanResult(listed=len(listing.files), truncated_listing=listing.truncated)
     matched = list(listing.files)
     result.matched = len(matched)
     keys = {listed: listed.capture_key(store.name) for listed in matched}
-    identity = scan_key(scan)
+    identity = scan_key(scan, store_id=authority.store_id)
     baseline = baselines.store_scan_baseline(identity)
+    if baseline is None:
+        # Upgrade without a capture gap: the first authorized run adopts (and
+        # removes) the baseline recorded under the old name-only key.
+        baseline = baselines.adopt_store_scan_baseline(_legacy_scan_key(scan), identity)
     if baseline is None:
         if not scan.include_existing:
             recorded = frozenset(sorted(keys.values())[:MAX_BASELINE_KEYS])
@@ -671,7 +745,7 @@ def run_store_scan(
     return result
 
 
-def store_uri(store: DataStore, locator: PortableStorePath) -> str:
+def store_uri(store: ValidatedDataStoreDefinition, locator: PortableStorePath) -> str:
     """The canonical ``store://<name>/<path>`` pointer for a listed file."""
 
     uri = (
@@ -687,7 +761,7 @@ def adapter_supports_listing(kind: StoreKind) -> bool:
 
 
 def _pointer_metadata(
-    store: DataStore,
+    store: ValidatedDataStoreDefinition,
     listed: ListedFile,
     *,
     digest: str | None,
@@ -722,7 +796,7 @@ def _pointer_metadata(
 
 
 def _pointer_text(
-    store: DataStore,
+    store: ValidatedDataStoreDefinition,
     listed: ListedFile,
     *,
     digest: str | None,
