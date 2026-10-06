@@ -4,7 +4,9 @@
 ``project.version`` in ``pyproject.toml`` is the only editable version source
 (docs/versioning.md). CI runs this without ``--tag`` on every change; the
 release workflow adds ``--tag`` so a ``vX.Y.Z`` tag that disagrees with the
-declared version fails before anything is built or published.
+declared version fails before anything is built or published, and the
+auto-release workflow uses ``--print-tag`` to learn which tag would release
+the current version.
 """
 
 from __future__ import annotations
@@ -68,6 +70,11 @@ def _build_parser(repo_root: Path) -> argparse.ArgumentParser:
         "--tag",
         help=f"Require this {TAG_PREFIX}X.Y.Z tag to match project.version.",
     )
+    parser.add_argument(
+        "--print-tag",
+        action="store_true",
+        help=f"Print only the {TAG_PREFIX}X.Y.Z tag that releases project.version.",
+    )
     return parser
 
 
@@ -83,6 +90,9 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, tomllib.TOMLDecodeError, VersionError) as exc:
         parser.error(str(exc))
 
+    if args.print_tag:
+        print(release_tag_for(version))
+        return 0
     print(f"lab-tracker version {version} is valid")
     if args.tag:
         print(f"release tag {args.tag} matches")
