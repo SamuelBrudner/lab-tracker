@@ -12,8 +12,8 @@ managed deployment without running terminal commands on a lab computer.
 - A persistent disk for uploaded files, note storage, and generated runtime
   secrets
 - A generated auth signing secret
-- A generated first-admin setup token shown in the browser only while no users
-  exist
+- A generated first-admin setup token, readable in your Render dashboard and
+  never shown by the app itself
 - Automatic migrations at service startup
 
 Render handles the always-on web URL, TLS certificate, service restart, database
@@ -25,14 +25,16 @@ roles and project membership inside Lab Tracker.
 1. Click **Deploy to Render**.
 2. Connect or fork the GitHub repo when Render asks.
 3. Wait for the first deploy to finish.
-4. Open the service URL and choose `Create First Admin`.
-5. The setup token is already loaded on that screen; choose a username and
-   password to create the admin account.
+4. In the Render dashboard, open the `lab-tracker` service, go to
+   **Environment**, and copy the value of `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN`.
+5. Open the service URL, choose `Create First Admin`, paste the token, and
+   choose a username and password to create the admin account.
 
-The Render Blueprint opts into first-run browser display with
-`LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE=first_run`. The token is returned
-only while the users table is empty and disappears after the first admin is
-created.
+The Render Blueprint sets `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE=never`,
+so the app never shows the token in the browser. The service URL is public as
+soon as the deploy finishes, and `first_run` would hand the token, and with it
+the admin account, to anyone who opened the URL before you did. The token stops
+working once the first user exists.
 
 After the first admin exists, use `Users` to invite lab members by email, grant
 viewer/editor/admin roles, and reset passwords. Use each project's

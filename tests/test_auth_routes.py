@@ -543,6 +543,7 @@ def test_bootstrap_token_is_never_disclosed_by_peer_address_outside_local(
     assert warning is not None
     assert "LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN" in warning
     assert "runtime-env/bootstrap-admin-token" in warning
+    assert "Render" in warning
 
 
 def test_bootstrap_status_hides_token_by_default_outside_local(monkeypatch, tmp_path):

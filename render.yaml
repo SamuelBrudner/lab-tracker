@@ -31,7 +31,7 @@ services:
       - key: LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN
         generateValue: true
       - key: LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE
-        value: first_run
+        value: never
       - key: LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES
         value: 720
       - key: LAB_TRACKER_AUTH_INVITE_TTL_HOURS
