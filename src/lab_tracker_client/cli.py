@@ -18,6 +18,7 @@ import lab_tracker_client.cli_agent as agent_cli
 import lab_tracker_client.cli_capture as cli_capture
 import lab_tracker_client.figure_autotrack as autotrack_helpers
 import lab_tracker_client.git_capture as git_capture
+import lab_tracker_client.hook_context as hook_context
 import lab_tracker_client.hooks as hook_install
 import lab_tracker_client.r_autotrack as r_autotrack
 import lab_tracker_client.registry as repo_registry
@@ -231,7 +232,11 @@ def _build_parser() -> argparse.ArgumentParser:
     prime_parser.add_argument(
         "--if-research-facing",
         action="store_true",
-        help="Read stdin and emit nothing unless the prompt is research-facing.",
+        help=(
+            "Read the prompt from stdin and emit nothing unless it is research-facing. "
+            "A Claude Code UserPromptSubmit payload's `prompt` is classified and the "
+            "prime comes back as hookSpecificOutput.additionalContext."
+        ),
     )
     prime_parser.add_argument(
         "--fail-silent",
@@ -390,7 +395,11 @@ def _add_setup_parsers(subcommands: argparse._SubParsersAction) -> None:
     status_parser.add_argument(
         "--brief",
         action="store_true",
-        help="One-line summary plus suggestions; sized for session hooks.",
+        help=(
+            "One-line summary plus suggestions; sized for session hooks. With a "
+            "Claude Code hook payload piped on stdin it prints the summary as "
+            "hookSpecificOutput.additionalContext."
+        ),
     )
     status_parser.add_argument(
         "--fail-silent",
@@ -1616,7 +1625,11 @@ def _cmd_watch_remove(args: argparse.Namespace) -> Any:
 
 
 def _cmd_setup_status(args: argparse.Namespace) -> Any:
-    return setup_helpers.setup_status(args.target, brief=args.brief)
+    hook = hook_context.read_piped_hook_payload(sys.stdin) if args.brief else None
+    status = setup_helpers.setup_status(args.target, brief=args.brief)
+    if hook is None:
+        return status
+    return hook_context.context_output(hook, hook_context.status_context(status))
 
 
 def _cmd_setup_init(args: argparse.Namespace) -> Any:
@@ -2320,11 +2333,19 @@ def _cmd_quick(client: LabTracker, args: argparse.Namespace) -> Any:
 
 def _cmd_prime(client: LabTracker, args: argparse.Namespace) -> Any:
     prompt = args.prompt
+    hook: hook_context.HookPayload | None = None
     if prompt is None and args.if_research_facing:
-        prompt = sys.stdin.read()
+        stdin = hook_context.read_stdin(sys.stdin)
+        if isinstance(stdin, hook_context.HookPayload):
+            hook, prompt = stdin, hook_context.hook_prompt(stdin)
+        else:
+            prompt = stdin
     if args.if_research_facing and not is_research_facing_prompt(prompt or ""):
         return None
-    return client.next_questions(project_id=args.project, limit=args.limit)
+    result = client.next_questions(project_id=args.project, limit=args.limit)
+    if hook is None:
+        return result
+    return hook_context.context_output(hook, hook_context.prime_context(result))
 
 
 def _cmd_export(client: LabTracker, args: argparse.Namespace) -> Any:

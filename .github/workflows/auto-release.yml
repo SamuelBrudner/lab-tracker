@@ -1,0 +1,62 @@
+name: auto-release
+
+# Release main once its CI passes on a commit whose project.version has no
+# vX.Y.Z tag yet (docs/versioning.md), so merging a version-bump PR is the
+# whole release. release.yml creates the annotated tag and the GitHub Release,
+# and only after its own checks pass. A version that already has its tag is
+# left alone, and a manually pushed tag still runs release.yml directly.
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+# One release decision at a time, so two green runs cannot race for one tag.
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    if: >-
+      github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push'
+      && github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      release: ${{ steps.plan.outputs.release }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Decide whether this commit's version still needs its tag
+        id: plan
+        run: |
+          tag="$(python scripts/verify_release.py --print-tag)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          # --exit-code: 0 when the tag exists, 2 when it does not; anything
+          # else is a failed lookup, which must not be read as "no tag".
+          status=0
+          git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null || status=$?
+          case "$status" in
+            0) echo "release=false" >> "$GITHUB_OUTPUT"; echo "$tag exists; nothing to release." ;;
+            2) echo "release=true" >> "$GITHUB_OUTPUT"; echo "$tag does not exist; releasing it." ;;
+            *) echo "::error::git ls-remote failed with status $status"; exit "$status" ;;
+          esac
+
+  release:
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.plan.outputs.tag }}
+      sha: ${{ github.event.workflow_run.head_sha }}

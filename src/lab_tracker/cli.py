@@ -1418,6 +1418,10 @@ def _gemini_settings_json(base_url: str = DEFAULT_BASE_URL) -> str:
 
 
 def _claude_settings_json() -> str:
+    # Both commands recognise the hook payload Claude Code pipes on stdin and
+    # answer with hookSpecificOutput.additionalContext; their plain JSON
+    # results would be parsed as hook output and dropped. See
+    # lab_tracker_client.hook_context.
     payload = {
         "hooks": {
             "SessionStart": [

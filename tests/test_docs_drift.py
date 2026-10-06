@@ -700,6 +700,15 @@ def test_app_session_link_code_matches_the_prefix_the_watcher_claims() -> None:
         assert _APP_LINK_CODE_SENTENCE in _collapsed_whitespace(_read(doc)), doc.name
 
 
+def test_agent_setup_names_every_hook_event_that_carries_lt_context() -> None:
+    from lab_tracker_client.hook_context import CONTEXT_EVENTS
+
+    text = _collapsed_whitespace(_read(_DOCS / "agent-setup.md"))
+    assert "`hookSpecificOutput.additionalContext`" in text
+    missing = [event for event in sorted(CONTEXT_EVENTS) if f"on `{event}`" not in text]
+    assert not missing, missing
+
+
 # Per-client MCP registration: the matrix in docs/agent-setup.md, the generated setup
 # guide, and the web Setup and Agents pages (client-setup.js) must describe one thing.
 _CLIENT_MATRIX_HEADING = "Choose your client"
