@@ -44,6 +44,12 @@ Minimal config:
 Configured watches are optional. `lt watch scan --root ...` can scan one folder
 without adding it to the config.
 
+A watch root must be a real folder or file, not a symlink to one. A root that
+is a symlink is refused with `watch root is a symlink; point the watch at its
+target: <target>`; configure the target path instead. Folders above the root
+may be symlinks. This keeps someone who can replace the watched file or
+folder from pointing the watch at another location, such as `~/.ssh`.
+
 ## Raw Evidence Folder
 
 Use `staged-note` when files in a folder should become staged evidence notes:
@@ -61,7 +67,15 @@ lt watch sync
 
 Each file event records the absolute file URI, root-relative external ID,
 content hash, size, and observed mtime. Sync refuses to upload a file if it
-changed after the scan; rescan the folder to capture the new version.
+changed after the scan; rescan the folder to capture the new version. Sync
+reads the file once and uploads exactly the bytes it checked against the
+scan. A symlink that replaced the scanned file, or anything that is not a
+regular file (a device, FIFO, or directory), is refused without being read
+and the event is marked `stale`. A file with more than one hard link is
+refused the same way, because a hard link in the watched folder can name a
+file stored elsewhere; copy such a file into the folder instead. A
+`staged-note` scan reports a file larger than the 100 MiB upload limit as a
+scan error without hashing it.
 
 Instrument files also carry facts from their headers. FCS, OME-TIFF, and NWB
 (with `h5py`) files get `format_kind`, `format_acquired_at` (ISO-8601 UTC),
@@ -75,7 +89,13 @@ the fields and the timezone rule for header clocks that have no UTC offset.
 `lt import-folder` remains supported for one-shot folder import. It now shares
 the same file discovery rules as `lt watch`: symlinked files are skipped, hidden
 paths are ignored, and include/exclude globs are matched against both the
-relative path and filename.
+relative path and filename. `lt watch` also hashes each file through a path
+with no symlink at or below the watched root, so a file, folder, or the root
+itself replaced by a symlink between discovery and hashing is reported as a
+scan error, not captured. On Windows, which has no `openat`, each path
+component is checked for symlinks and junctions before the open and the
+opened path is checked again afterwards. This narrows the swap race but does
+not fully close it.
 
 ## Acquisition Session Output Folder
 
@@ -129,6 +149,26 @@ Scan and sync:
 lt watch scan --mode manifest --root /scratch/snb6/project-runs
 lt watch sync --request-draft
 ```
+
+A manifest describes its outputs; it does not choose what leaves the machine
+or where it goes:
+
+- Sync uploads the note rendered from the manifest, never a local file the
+  manifest names. File-identity keys in its `source` (`path`, `root`,
+  `root_uri`, `relative_path`, `content_hash`, `size_bytes`, `mtime`) are
+  dropped at scan time; artifact URIs stay pointers.
+- The project comes from `--project`, the watch entry, or the checkout's
+  binding. A `project_id` in the manifest is ignored.
+- Manifest watches stage notes only. Register session outputs with
+  `--mode files --sink acquisition-output`.
+- Symlinked manifests are skipped, as symlinked files are in `files` mode.
+  A manifest is opened below the watch root without following any symlink,
+  so a manifest or folder swapped for a link after the scan listed it is
+  reported as a scan error.
+- A manifest larger than 8 MiB is refused before it is read.
+- An event an older client queued from a manifest with
+  `--sink acquisition-output` is marked `stale` at sync. Rescan with
+  `--mode files --sink acquisition-output`.
 
 `--request-draft` only applies to `staged-note` events. It asks the existing
 analysis graph draft endpoint to propose human-reviewed graph changes for the
@@ -310,6 +350,17 @@ Use generic `lt watch` for non-HPC folders and manifest-producing tools. Use
 
 - `Watch config not found`: run `lt watch init`, pass `--config`, or set
   `LAB_TRACKER_WATCH_CONFIG`.
+- `watch root is a symlink; point the watch at its target`: the configured
+  root (a folder or a single file) is a symlink. Edit the watch or the
+  `--root` flag to name the target path the message prints.
+- `permission denied reading watched file`: the scan could not open the file
+  or the folder holding it. Fix the permissions; the file is not captured.
+- `watched file has other hard links`: sync refuses to upload a file that is
+  hard-linked elsewhere. Copy it into the watched folder and rescan.
+- `watched file is missing, not a regular file, or still changing`: the file
+  was deleted, replaced by a symlink or special file, or was still being
+  written at sync. The event is marked `stale`; rescan once the file is
+  complete.
 - `watched file changed since scan`: the file was modified before sync. Run
   `lt watch scan` again to capture the new checksum. The event is marked
   `stale`, which is terminal: later syncs skip it without spending `--limit`,
