@@ -449,7 +449,8 @@ def _bootstrap_token_for_status(
 _BOOTSTRAP_TOKEN_HIDDEN_WARNING = (
     "First-admin token display is disabled for this deployment. Paste the "
     "LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN value; Docker deployments that generate it "
-    "store it in /app/data/runtime-env/bootstrap-admin-token inside the app container."
+    "store it in /app/data/runtime-env/bootstrap-admin-token inside the app container, "
+    "and managed platforms such as Render show it in the service's environment settings."
 )
 
 

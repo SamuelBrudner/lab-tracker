@@ -757,9 +757,12 @@ containment remain a separate follow-up.
   paste it into `Create First Admin` yourself (the Docker entrypoint stores a
   generated token in `/app/data/runtime-env/bootstrap-admin-token`, e.g.
   `docker compose exec app cat /app/data/runtime-env/bootstrap-admin-token`).
-  `first_run` shows it to any caller until the first user exists; use it only
-  when you create the first admin immediately after deploy, as the Render
-  blueprint does. The token is never returned after any user exists.
+  `first_run` shows it to any unauthenticated caller until the first user
+  exists, so whoever reaches a public URL first can create the admin account;
+  avoid it on internet-reachable deployments and read the token from the
+  platform instead (the Render blueprint uses `never`; Render shows the generated
+  token under the service's **Environment**). The token is never returned after
+  any user exists.
 
 ### Graph draft providers and transcription
 

@@ -384,6 +384,16 @@ def test_retained_surface_names_the_lt_hpc_command_not_its_adapter_id() -> None:
     assert "`lt-hpc`" not in _read(_DOCS / "retained-v1-surface.md")
 
 
+def test_one_click_deploy_reads_the_first_admin_token_from_the_dashboard() -> None:
+    # The blueprint keeps the token out of the browser; the runbook must not
+    # promise it there or recommend first_run for the public service URL.
+    text = " ".join(_read(_DOCS / "one-click-cloud-deploy.md").split())
+    assert "LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE=never" in text
+    assert "copy the value of `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN`" in text
+    assert "already loaded on that screen" not in text
+    assert "opts into first-run browser display" not in text
+
+
 def test_funnel_runbook_names_what_a_public_local_instance_must_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
