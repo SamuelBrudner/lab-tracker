@@ -36,7 +36,7 @@ from lab_tracker_client.agent_session import (
     record_drain,
     redact_secrets,
 )
-from lab_tracker_client.client import LabTracker
+from lab_tracker_client.client import LabTracker, LTValidationError
 
 JsonObject = dict[str, Any]
 
@@ -121,8 +121,10 @@ def _watch_root(config: watch_capture.WatchConfig, watch: Mapping[str, Any]) -> 
     if not root.is_absolute():
         # Relative roots are anchored at the checkout the config belongs to.
         root = config.checkout_root() / root
-    with suppress(OSError, RuntimeError):
-        return root.resolve()
+    # A root that is a symlink is refused here as a scan refuses it (the
+    # scan reports the error; touch stays a quiet no-op for that watch).
+    with suppress(OSError, RuntimeError, LTValidationError):
+        return watch_capture.watch_root_path(root)
     return None
 
 
@@ -134,6 +136,8 @@ def _watch_would_capture(
     mode = str(watch.get("mode") or watch_capture.MODE_FILES)
     if mode == watch_capture.MODE_MANIFEST:
         pattern = str(watch.get("pattern") or watch_capture.DEFAULT_MANIFEST_PATTERN)
+        if raw is not None and raw.is_symlink():
+            return False
         return _is_within(path, root) and fnmatch.fnmatch(path.name, pattern)
     if path == root:
         base = root.parent
@@ -272,7 +276,7 @@ def _event_for_match(config: watch_capture.WatchConfig, match: WatchMatch) -> Js
         "session_id": _optional(watch.get("session_id")),
     }
     if str(watch.get("mode") or watch_capture.MODE_FILES) == watch_capture.MODE_MANIFEST:
-        return watch_capture.event_from_manifest(config, match.path, **common)
+        return watch_capture.event_from_manifest(config, match.path, root=match.root, **common)
     acquisition = sink == watch_capture.SINK_ACQUISITION_OUTPUT
     default_adapter = "lt-watch-acquisition" if acquisition else "lt-watch-files"
     return watch_capture.event_from_file(

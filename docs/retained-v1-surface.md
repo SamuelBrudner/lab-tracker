@@ -70,7 +70,11 @@ research record:
   dataset ids declared for a watch (flags, watch entries, or manifests)
   become the staged note's targets, labelled
   `declared_target_source=explicit`, so a stale id fails the sync loudly
-  instead of landing as metadata only. A session the client can resolve on
+  instead of landing as metadata only. A manifest cannot choose the project
+  or name a local file to upload: its note is rendered from the summary,
+  and the project comes from the flag, the watch entry, or the checkout
+  binding. A watch root must be a real folder or file, not a symlink to one,
+  and sync refuses to upload a hard-linked file. A session the client can resolve on
   its own (`--session` as a UUID or link code, an `LT-<code>` link code in
   the watched folder or file name, or the checkout's `lt session use`
   context, overridden by `LAB_TRACKER_SESSION_ID`) becomes that target the
