@@ -293,30 +293,50 @@ path below the prefix (default `["*"]`); they are applied while listing, so
 only matching files count toward the listing cap. Dot files, Office lock files (`~$…`),
 and `*.tmp`/`*.part`/`*.partial`/`*.crdownload` are always ignored. The store
 name resolves like `store://` resolution: the project's own store first, then
-its group's.
+its group's. A project store with that name always wins, even when it is
+refused; a scan never falls back to the group's store.
 
-- **`local_fs`** — the registered root must lie inside
-  `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS`, both as written and after resolving
-  aliases, and the prefix must resolve inside the root. The listing never
-  follows a symlink: on POSIX it descends with directory descriptors opened
-  `O_NOFOLLOW` one component at a time, so a directory swapped for a symlink
-  mid-walk fails to open; elsewhere each directory is re-checked (no link or
-  reparse point, still under the root) just before it is listed. It is bounded
-  (5,000 matching files, 2,000 directories, depth 16), and
-  hashes each new file through the same retained-handle local helper that
-  artifact resolution uses, so the operator's local-root authority applies to
-  the read too. This softens G7: the core facility PC writes to the synced
-  folder, and the server notices.
+Every scan run is held to the store's operator authority grant
+([`LAB_TRACKER_STORE_AUTHORITY_GRANTS_JSON`](configuration.md#scoped-store-authority-grants)),
+exactly as resolution and health are. The poller detaches the store's persisted
+grant binding while its database read is open, releases that read, and
+revalidates the binding against the worker's startup registry snapshot before
+it builds a listing adapter or starts any filesystem, credential, or subprocess
+work. Listing requires the grant's `list` capability; streaming a file for its
+SHA-256 additionally requires `bytes_by_path` (without it the scan still lists
+and stages each file with `content_hash_pending=true`). For a store kind that
+can be listed, a store registered
+before grant bindings existed, a revoked or changed grant, a grant for another
+scope, or a grant without `list` fails that scan with the static detail `The
+data store is not authorized for listing by a current operator grant.` and no
+I/O; it never says which check failed or names the store's root, remote, or
+grant. Registrations are immutable and cannot yet be rebound, so to scan a
+location registered before grants existed, register it again under a grant
+(with a new name) and point the scan at that registration. That is a new scan
+with its own baseline; see the upgrade note below before re-pointing it.
+
 - **rclone-backed kinds** (`s3`, `gcs`, `azure_blob`, `dropbox`, `gdrive`,
   `box`, `onedrive`, `ssh`, `rclone`) — one bounded `rclone lsjson --recursive
-  --files-only` through the shared process executor and the exact
-  `LAB_TRACKER_RCLONE_ALLOWED_REMOTES` policy (8 MiB output cap, the resolver
-  subprocess deadline). `--hash` is requested only for backends that store a
-  hash (`s3`, `gcs`, `azure_blob`, `dropbox`, `gdrive`, `box`, `onedrive`) so an
-  SFTP or generic remote is never asked to re-read every file; SHA-256 is
-  computed by streaming `rclone cat` under the same cap.
+  --files-only` through the shared process executor (8 MiB output cap, the
+  resolver subprocess deadline). The remote and root come only from the
+  revalidated grant binding, and the exact `LAB_TRACKER_RCLONE_ALLOWED_REMOTES`
+  policy still applies as an outer ceiling. `--hash` is requested only for
+  backends that store a hash (`s3`, `gcs`, `azure_blob`, `dropbox`, `gdrive`,
+  `box`, `onedrive`) so an SFTP or generic remote is never asked to re-read
+  every file; SHA-256 is computed by streaming `rclone cat` under the same cap.
+- **`local_fs`** — not supported in this build. After the grant is
+  revalidated, the scan fails with the static detail `Local store scans are not
+  supported in this build.`, before it enumerates, stats, or hashes anything.
+  The local listing adapter checks only the global
+  `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS`, not the store's own grant boundary, so
+  an alias inside one project's store could reach another project's files under
+  a broad root. Local scans stay disabled until the local-use slice retains the
+  revalidated grant root inside enumeration and hashing; local resolution and
+  health are disabled for the same reason. To capture from a facility PC now,
+  sync its folder to an rclone-backed store.
 - **`http`, `git`, `object_table`, `database`** — cannot be listed; the scan
-  reports `Listing is not supported for <kind> stores.`
+  reports `Listing is not supported for <kind> stores.` whether or not the
+  store has a grant binding, before any grant check.
 
 Each new file becomes a staged note authored by `SYSTEM` with
 `origin_provider=store_scan` and metadata `capture_channel=store_scan`,
@@ -336,7 +356,15 @@ guessed. The note never carries the bytes.
 - The **first run** of a scan records what is already there as a baseline (in
   the poll state file) and stages nothing, so enabling a scan on a full store
   does not flood the review inbox. Set `"include_existing": true` to stage the
-  existing files instead (at most 100 per poll).
+  existing files instead (at most 100 per poll). `include_existing` matters
+  only on a run that finds no baseline: it records an empty baseline, so every
+  matching file is staged over that and later polls (each file once), and
+  turning the flag off afterward does not restore a baseline. Baselines belong
+  to one exact store registration: when the scan's store name starts resolving
+  to a different registration (for example, a project store that now shadows
+  the group's), the next run records a fresh baseline (apart from the one-time
+  upgrade adoption below). A refused scan records no baseline and stages
+  nothing.
 - A file is identified by store, path, size, and modification time
   (`client_capture_id`), so a file that is rewritten becomes a new capture.
 - A file modified within the last two minutes is still settling and waits for
@@ -346,9 +374,32 @@ guessed. The note never carries the bytes.
 If the poll state file is lost, the next run records a fresh baseline, and a
 file that arrived in between is not staged.
 
-What remains deferred: native (non-rclone) S3 versioning, `http`/`git` listing,
-and `object_table`/`database` stores, which have no listing adapter; and
-local-store health, which stays unsupported (the scan does not change that).
+Upgrading to a build that keys baselines by store registration opens no capture
+gap for a scan whose store already has a grant binding. Earlier builds keyed a
+baseline by project, store name, prefix, and patterns only, so the first
+authorized poll after the upgrade hands that name-keyed baseline to whichever
+registration the name resolves to at that moment, even when that is not the
+registration that recorded it (for example, a project store created since then
+that now shadows the group's). It does so once: the same write removes the
+name-keyed entry, so any later registration under that name starts with a
+fresh baseline. A refused poll adopts nothing and leaves the entry in place.
+
+The upgrade is not lossless for a scan whose store was registered before grant
+bindings existed. Its scans are refused until the location is registered again
+under a grant with a new name, as described above, and pointing the scan at
+the new name makes it a different scan: the name-keyed baseline is not adopted
+(it stays in the poll state file, unused), and the new scan's first run
+records a fresh baseline, so files that arrived while the old scan was refused
+are absorbed into it and not staged. To stage them, set `"include_existing":
+true` on the re-pointed scan before its first run. That stages every matching
+file under the prefix, not only those that arrived in the gap (at most 100 per
+poll), and because a file's `client_capture_id` includes the store name,
+files already staged under the old name are staged again under the new one.
+
+What remains deferred: `local_fs` scans and local-store health, until the
+retained grant boundary reaches the local filesystem helper; native
+(non-rclone) S3 versioning; `http`/`git` listing; and `object_table`/`database`
+stores, which have no listing adapter.
 
 Kill switch: remove the scan from `LAB_TRACKER_STORE_SCANS`.
 

@@ -655,3 +655,23 @@ def test_listing_caps_count_only_matching_files(tmp_path, monkeypatch: pytest.Mo
     ] + [{"Path": "zz-wanted.fcs", "Size": 1, "IsDir": False}]
     remote = parse_rclone_listing(json.dumps(rclone_entries).encode(), prefix=None, include=wanted)
     assert [listed.locator.path for listed in remote.files] == ["zz-wanted.fcs"]
+
+
+def test_rclone_scan_adapter_requires_a_use_time_authority_proof() -> None:
+    from lab_tracker.bounded_subprocess import BoundedSubprocessExecutor
+    from lab_tracker.capture_channels.store_scan import RcloneStoreAdapter
+    from lab_tracker.models import DataStore, StoreKind
+    from lab_tracker.rclone_remote_policy import RcloneRemotePolicy
+
+    row = DataStore(
+        store_id=uuid4(), project_id=uuid4(), name="lab-s3", kind=StoreKind.S3, root="bucket"
+    )
+
+    # A released store row cannot address a remote: only a revalidated proof can.
+    with pytest.raises(TypeError, match="use-time authority proof"):
+        RcloneStoreAdapter(
+            authority=row,  # type: ignore[arg-type]
+            policy=RcloneRemotePolicy.from_config("lab-s3"),
+            executor=BoundedSubprocessExecutor(),
+            deadline_seconds=5.0,
+        )
