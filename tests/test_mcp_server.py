@@ -2979,12 +2979,14 @@ def test_mcp_entrypoint_initializes_over_stdio(tmp_path: Path) -> None:
             },
         )
         with anyio.fail_after(20):
-            async with stdio_client(parameters) as (read, write):
-                async with ClientSession(read, write) as session:
-                    initialized = await session.initialize()
-                    assert initialized.serverInfo.name == mcp_server.SERVER_NAME
-                    tools = await session.list_tools()
-                    assert "lab_tracker_health" in {tool.name for tool in tools.tools}
+            async with (
+                stdio_client(parameters) as (read, write),
+                ClientSession(read, write) as session,
+            ):
+                initialized = await session.initialize()
+                assert initialized.serverInfo.name == mcp_server.SERVER_NAME
+                tools = await session.list_tools()
+                assert "lab_tracker_health" in {tool.name for tool in tools.tools}
 
     asyncio.run(check_server())
 
