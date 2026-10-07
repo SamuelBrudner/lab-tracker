@@ -1,20 +1,22 @@
 """Instrument-file header sniffers used by ``lt watch``: bounded, fail-soft, pure.
 
 Fixture files are written programmatically (FCS HEADER/TEXT bytes, minimal
-classic and BigTIFF files with OME-XML); no binaries are committed. h5py is
-not a dependency, so NWB is exercised both without it and with a stand-in
-module that mimics the few ``h5py.File`` calls the sniffer makes.
+classic and BigTIFF files with OME-XML, and HDF5 files through h5py); no
+binaries are committed. NWB is exercised without h5py and, where it is
+installed (the ``test`` extra installs it), against real HDF5 files, including
+crafted ones that point outside the file or claim oversized strings.
 """
 
 from __future__ import annotations
 
 import importlib
 import json
+import os
 import random
 import re
 import struct
+import subprocess
 import sys
-import types
 from datetime import timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -437,123 +439,379 @@ def test_the_module_never_imports_h5py_at_import_time(monkeypatch: pytest.Monkey
     assert reloaded.sniff_format is not None
 
 
-class _FakeDataset:
-    def __init__(self, value: Any) -> None:
-        self.value = value
-        self.shape = ()
-
-    def __getitem__(self, key: Any) -> Any:
-        assert key == ()
-        return self.value
+def _h5py() -> Any:
+    return pytest.importorskip("h5py")
 
 
-class _FakeGroup:
-    def __init__(self, nodes: dict[str, Any], attrs: dict[str, Any] | None = None) -> None:
-        self.nodes = nodes
-        self.attrs = attrs or {}
+def _nwb(
+    path: Path,
+    *,
+    libver: str = "earliest",
+    userblock_size: int = 0,
+    padding_attributes: int = 0,
+    nwb_version: str = "2.6.0",
+) -> Path:
+    """An NWB 2.x file laid out as pynwb writes one (variable-length UTF-8 strings)."""
 
-    def get(self, name: str) -> Any:
-        node: Any = self
-        for part in name.split("/"):
-            node = node.nodes.get(part) if isinstance(node, _FakeGroup) else None
-            if node is None:
-                return None
-        return node
-
-
-def _fake_h5py(
-    root: _FakeGroup, opened: list[tuple[str, dict[str, Any]]], *, has_locking: bool = True
-) -> types.ModuleType:
-    module = types.ModuleType("h5py")
-
-    class File(_FakeGroup):
-        def __init__(self, path: str, mode: str, **options: Any) -> None:
-            assert mode == "r"
-            if options and not has_locking:
-                # h5py < 3.5 has no ``locking`` argument.
-                raise TypeError("__init__() got an unexpected keyword argument 'locking'")
-            opened.append((path, options))
-            if Path(path).read_bytes()[:4] != b"\x89HDF":
-                raise OSError("Unable to open file (file signature not found)")
-            super().__init__(root.nodes, root.attrs)
-
-        def __enter__(self) -> File:
-            return self
-
-        def __exit__(self, *_exc: object) -> None:
-            return None
-
-    module.File = File  # type: ignore[attr-defined]
-    return module
+    h5py = _h5py()
+    with h5py.File(path, "w", libver=libver, userblock_size=userblock_size) as handle:
+        _fill_nwb(handle, padding_attributes=padding_attributes, nwb_version=nwb_version)
+    return path
 
 
-def test_nwb_with_h5py_reads_session_facts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    root = _FakeGroup(
-        {
-            "session_start_time": _FakeDataset(b"2023-11-02T09:15:00-04:00"),
-            "identifier": _FakeDataset("mouse7-day3"),
-            "session_description": _FakeDataset("x" * 1000),
-            "general": _FakeGroup({"subject": _FakeGroup({"subject_id": _FakeDataset(b"M7")})}),
-        },
-        {"nwb_version": b"2.6.0", "neurodata_type": "NWBFile"},
+def _fill_nwb(handle: Any, *, padding_attributes: int = 0, nwb_version: str = "2.6.0") -> None:
+    for index in range(padding_attributes):
+        handle.attrs[f"padding{index:03d}"] = "x" * 50
+    handle.attrs["namespace"] = "core"
+    handle.attrs["neurodata_type"] = "NWBFile"
+    handle.attrs["nwb_version"] = nwb_version
+    handle["session_start_time"] = "2023-11-02T09:15:00-04:00"
+    handle["identifier"] = "mouse7-day3"
+    handle["session_description"] = "x" * 1000
+    # Fixed-length, as some writers store short strings.
+    handle.create_dataset("general/subject/subject_id", data=b"M7", dtype="S2")
+
+
+NWB_FIELDS = {
+    "format_kind": "nwb",
+    "format_version": "2.6.0",
+    "format_session_start_time": "2023-11-02T09:15:00-04:00",
+    "format_identifier": "mouse7-day3",
+    "format_session_description": "x" * (sniffers.MAX_VALUE_CHARS - 1) + "…",
+    "format_subject_id": "M7",
+    "format_acquired_at": "2023-11-02T13:15:00+00:00",
+    "format_acquired_at_timezone": "header",
+}
+SECRET = "SECRET-7f3a-not-for-upload"
+
+
+def _secret_hdf5(path: Path) -> Path:
+    """Another local HDF5 file whose values must never be sniffed.
+
+    Fixed-length, so following a link to one would read it through h5py.
+    """
+
+    h5py = _h5py()
+    with h5py.File(path, "w") as handle:
+        for name in ("identifier", "general/subject/subject_id"):
+            handle.create_dataset(name, data=SECRET.encode(), dtype=f"S{len(SECRET)}")
+    return path
+
+
+@pytest.fixture
+def h5py_reads(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """(file, name) of each dataset or attribute value h5py is asked to read."""
+
+    h5py = _h5py()
+    reads: list[tuple[str, str]] = []
+    read_dataset = h5py.Dataset.__getitem__
+    read_attribute = h5py.AttributeManager.__getitem__
+
+    def dataset(self: Any, *args: Any) -> Any:
+        reads.append((self.file.filename, self.name))
+        return read_dataset(self, *args)
+
+    def attribute(self: Any, name: str) -> Any:
+        reads.append((h5py.h5f.get_name(self._id).decode(), f"@{name}"))
+        return read_attribute(self, name)
+
+    monkeypatch.setattr(h5py.Dataset, "__getitem__", dataset)
+    monkeypatch.setattr(h5py.AttributeManager, "__getitem__", attribute)
+    return reads
+
+
+@pytest.mark.parametrize(
+    ("libver", "userblock_size", "padding_attributes"),
+    [
+        ("earliest", 0, 0),  # version 1 object headers, as pynwb writes
+        ("earliest", 512, 40),  # a user block, and attributes in continuation chunks
+        ("latest", 0, 0),  # version 2 object headers
+        ("latest", 1024, 4),
+    ],
+)
+def test_nwb_with_h5py_reads_session_facts(
+    tmp_path: Path, libver: str, userblock_size: int, padding_attributes: int
+) -> None:
+    path = _nwb(
+        tmp_path / "rec.nwb",
+        libver=libver,
+        userblock_size=userblock_size,
+        padding_attributes=padding_attributes,
     )
-    opened: list[tuple[str, dict[str, Any]]] = []
-    monkeypatch.setitem(sys.modules, "h5py", _fake_h5py(root, opened))
-    path = _write(tmp_path, "rec.nwb", b"\x89HDF\r\n\x1a\n" + b"\x00" * 64)
 
-    fields = sniff_format(path, local_tz=PLUS_TWO)
-
-    assert fields == {
-        "format_kind": "nwb",
-        "format_version": "2.6.0",
-        "format_session_start_time": "2023-11-02T09:15:00-04:00",
-        "format_identifier": "mouse7-day3",
-        "format_session_description": "x" * (sniffers.MAX_VALUE_CHARS - 1) + "…",
-        "format_subject_id": "M7",
-        "format_acquired_at": "2023-11-02T13:15:00+00:00",
-        "format_acquired_at_timezone": "header",
-    }
-    # Opened without HDF5 file locking, so a scan never blocks the writer.
-    assert opened == [(str(path), {"locking": False})]
+    assert sniff_format(path, local_tz=PLUS_TWO) == NWB_FIELDS
 
 
-def test_nwb_on_h5py_without_the_locking_option_still_opens(
+@pytest.mark.parametrize(("libver", "padding_attributes"), [("earliest", 40), ("latest", 4)])
+@pytest.mark.parametrize(
+    "sizes",
+    [(8, 8), (4, 4), (8, 4), (4, 8), (2, 2), (8, 2)],
+    ids=["8-8", "4-4", "8-4", "4-8", "2-2", "8-2"],  # offset size, length size
+)
+def test_nwb_with_narrow_offsets_and_lengths_reads_session_facts(
+    tmp_path: Path, libver: str, padding_attributes: int, sizes: tuple[int, int]
+) -> None:
+    h5py = _h5py()
+    # File offsets and lengths are 8 bytes by default; a writer may choose 2 or 4.
+    path = tmp_path / "rec.nwb"
+    fapl = h5py.h5p.create(h5py.h5p.FILE_ACCESS)
+    fapl.set_libver_bounds(getattr(h5py.h5f, f"LIBVER_{libver.upper()}"), h5py.h5f.LIBVER_LATEST)
+    fcpl = h5py.h5p.create(h5py.h5p.FILE_CREATE)
+    try:
+        fcpl.set_sizes(*sizes)
+        file_id = h5py.h5f.create(str(path).encode(), h5py.h5f.ACC_TRUNC, fcpl=fcpl, fapl=fapl)
+    except ValueError as exc:
+        pytest.skip(f"HDF5 refuses offset and length sizes {sizes}: {exc}")
+    with h5py.File(file_id) as handle:
+        assert handle.id.get_create_plist().get_sizes() == sizes
+        _fill_nwb(handle, padding_attributes=padding_attributes)
+
+    assert sniff_format(path, local_tz=PLUS_TWO) == NWB_FIELDS
+
+
+def test_nwb_is_opened_without_locking_and_on_h5py_without_the_option(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = _FakeGroup({"identifier": _FakeDataset("abc")}, {"nwb_version": "2.6.0"})
-    opened: list[tuple[str, dict[str, Any]]] = []
-    monkeypatch.setitem(sys.modules, "h5py", _fake_h5py(root, opened, has_locking=False))
-    path = _write(tmp_path, "old.nwb", b"\x89HDF\r\n\x1a\n")
+    h5py = _h5py()
+    path = _nwb(tmp_path / "rec.nwb")
+    real_file = h5py.File
+    opened: list[dict[str, Any]] = []
 
-    fields = sniff_format(path)
+    def old_file(name: str, mode: str, **options: Any) -> Any:
+        opened.append(options)
+        if options:  # h5py < 3.5 has no ``locking`` argument.
+            raise TypeError("__init__() got an unexpected keyword argument 'locking'")
+        return real_file(name, mode)
 
-    assert fields["format_identifier"] == "abc"
-    assert opened == [(str(path), {})]
+    monkeypatch.setattr(h5py, "File", old_file)
+
+    assert sniff_format(path)["format_identifier"] == "mouse7-day3"
+    # Tried without HDF5 file locking first, so a scan never blocks the writer.
+    assert opened == [{"locking": False}, {}]
 
 
-def test_nwb_1x_style_root_attributes_are_a_fallback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = _FakeGroup({}, {"session_start_time": "2020-01-01T00:00:00", "identifier": "abc"})
-    monkeypatch.setitem(sys.modules, "h5py", _fake_h5py(root, []))
+def test_nwb_1x_style_root_attributes_are_a_fallback(tmp_path: Path) -> None:
+    h5py = _h5py()
+    path = tmp_path / "legacy.nwb"
+    with h5py.File(path, "w") as handle:
+        handle.attrs["session_start_time"] = "2020-01-01T00:00:00"
+        handle.attrs["identifier"] = "abc"
 
-    fields = sniff_format(_write(tmp_path, "legacy.nwb", b"\x89HDF\r\n\x1a\n"), local_tz=MINUS_FIVE)
+    fields = sniff_format(path, local_tz=MINUS_FIVE)
 
     assert fields["format_identifier"] == "abc"
     assert fields["format_acquired_at"] == "2020-01-01T05:00:00+00:00"
 
 
 def test_nwb_that_h5py_cannot_open_records_the_error_and_other_hdf5_is_skipped(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
-    monkeypatch.setitem(sys.modules, "h5py", _fake_h5py(_FakeGroup({}, {}), []))
+    h5py = _h5py()
+    generic = tmp_path / "array.h5"
+    with h5py.File(generic, "w") as handle:
+        handle["data"] = [1, 2, 3]
 
     broken = sniff_format(_write(tmp_path, "broken.nwb", b"not hdf5 at all"))
-    generic = sniff_format(_write(tmp_path, "array.h5", b"\x89HDF\r\n\x1a\n"))
 
     assert broken["format_kind"] == "nwb"
     assert "signature not found" in str(broken["format_sniff_error"])
-    assert generic == {}
+    assert sniff_format(generic) == {}
+
+
+def test_nwb_links_out_of_the_file_are_not_followed(
+    tmp_path: Path, h5py_reads: list[tuple[str, str]]
+) -> None:
+    h5py = _h5py()
+    other = str(_secret_hdf5(tmp_path / "other.h5"))
+    path = _nwb(tmp_path / "rec.nwb")
+    with h5py.File(path, "a") as handle:
+        del handle["identifier"], handle["session_description"], handle["general"]
+        handle["identifier"] = h5py.ExternalLink(other, "/identifier")
+        # An external link part-way down a path, and a soft link routed through one.
+        handle["general"] = h5py.ExternalLink(other, "/general")
+        handle["elsewhere"] = h5py.ExternalLink(other, "/")
+        handle["session_description"] = h5py.SoftLink("/elsewhere/identifier")
+
+    fields = sniff_format(path, local_tz=PLUS_TWO)
+
+    assert SECRET not in json.dumps(fields)
+    assert fields["format_session_start_time"] == "2023-11-02T09:15:00-04:00"
+    for key in ("format_identifier", "format_session_description", "format_subject_id"):
+        assert key not in fields
+    assert {file for file, _name in h5py_reads} <= {str(path)}
+
+
+def test_nwb_raw_data_stored_outside_the_file_is_not_read(
+    tmp_path: Path, h5py_reads: list[tuple[str, str]]
+) -> None:
+    h5py = _h5py()
+    secret = _write(tmp_path, "token.txt", SECRET.encode())
+    other = str(_secret_hdf5(tmp_path / "other.h5"))
+    path = _nwb(tmp_path / "rec.nwb")
+    with h5py.File(path, "a") as handle:
+        del handle["identifier"], handle["session_description"]
+        # HDF5 external storage reads any local file -- here not even an HDF5 one.
+        # (Low-level: h5py's create_dataset(external=...) ignores it for a scalar.)
+        plist = h5py.h5p.create(h5py.h5p.DATASET_CREATE)
+        plist.set_layout(h5py.h5d.CONTIGUOUS)
+        plist.set_external(str(secret).encode(), 0, len(SECRET))
+        string = h5py.h5t.C_S1.copy()
+        string.set_size(len(SECRET))
+        scalar = h5py.h5s.create(h5py.h5s.SCALAR)
+        h5py.h5d.create(handle.id, b"session_description", string, scalar, dcpl=plist)
+        assert handle["session_description"].external
+        # A virtual dataset maps another file's dataset.
+        layout = h5py.VirtualLayout(shape=(), dtype=f"S{len(SECRET)}")
+        layout[...] = h5py.VirtualSource(other, "identifier", shape=())
+        handle.create_virtual_dataset("identifier", layout)
+
+    fields = sniff_format(path, local_tz=PLUS_TWO)
+
+    assert SECRET not in json.dumps(fields)
+    assert "format_session_description" not in fields
+    assert "format_identifier" not in fields
+    assert fields["format_subject_id"] == "M7"
+    assert not {name for _file, name in h5py_reads} & {"/identifier", "/session_description"}
+
+
+def _forge_vlen_length(path: Path, offset: int, claimed: int) -> None:
+    """Overwrite a variable-length element's 4-byte length (HDF5 trusts it)."""
+
+    with path.open("r+b") as raw:
+        raw.seek(offset)
+        raw.write(struct.pack("<I", claimed))
+
+
+def _vlen_attribute_element(path: Path, value: str) -> int:
+    """File offset of the root attribute element pointing at ``value`` in a global heap."""
+
+    data = path.read_bytes()
+    for collection in re.finditer(b"GCOL\x01", data):
+        element = struct.pack("<IQ", len(value.encode()), collection.start())
+        if data.count(element) == 1:
+            return data.index(element)
+    raise AssertionError(f"no element for {value!r}")
+
+
+def _oversized_nwb(tmp_path: Path) -> Path:
+    """Every NWB string over the read limit: declared, forged, or genuinely long."""
+
+    h5py = _h5py()
+    path = _nwb(tmp_path / "oversized.nwb", nwb_version="2.6.0-forged")
+    with h5py.File(path, "a") as handle:
+        del handle["identifier"], handle["session_description"]
+        # 300 MB declared by a 6 KB file: never-written storage reads as its fill.
+        handle.create_dataset("identifier", shape=(), dtype="S300000000")
+        handle["session_description"] = "y" * (sniffers.MAX_HDF5_STRING_BYTES + 1)
+        handle["general/subject"].attrs["subject_id"] = b"z" * 16384
+        del handle["general/subject/subject_id"]
+        offset = handle["session_start_time"].id.get_offset()
+    _forge_vlen_length(path, offset, 1 << 30)
+    _forge_vlen_length(path, _vlen_attribute_element(path, "2.6.0-forged"), 1 << 30)
+    return path
+
+
+def test_nwb_strings_over_the_limit_are_not_read(
+    tmp_path: Path, h5py_reads: list[tuple[str, str]]
+) -> None:
+    path = _oversized_nwb(tmp_path)
+
+    assert path.stat().st_size < 64 * 1024
+    assert sniff_format(path) == {"format_kind": "nwb"}
+    assert h5py_reads == []
+
+
+_CHILD_SNIFF = """
+import json, resource, sys
+import h5py
+from lab_tracker_client.format_sniffers import sniff_format
+def peak():
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return rss if sys.platform == "darwin" else rss * 1024
+before = peak()
+fields = sniff_format(sys.argv[1])
+print(json.dumps({"growth": peak() - before, "fields": fields}))
+"""
+
+
+def _sniff_in_child(path: Path) -> dict[str, Any]:
+    """Sniff in a fresh interpreter: its peak-RSS growth, and a timeout if it blocks."""
+
+    pytest.importorskip("resource")
+    completed = subprocess.run(
+        [sys.executable, "-c", _CHILD_SNIFF, str(path)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    report: dict[str, Any] = json.loads(completed.stdout)
+    return report
+
+
+def test_oversized_nwb_strings_allocate_nothing(tmp_path: Path) -> None:
+    report = _sniff_in_child(_oversized_nwb(tmp_path))
+
+    assert report["fields"] == {"format_kind": "nwb"}
+    # Read as declared, these strings would allocate 300 MB and 1 GiB.
+    assert report["growth"] < 64 * 1024 * 1024
+
+
+def test_a_virtual_dataset_never_opens_its_source_files(tmp_path: Path) -> None:
+    pytest.importorskip("resource")  # POSIX: os.mkfifo as well
+    h5py = _h5py()
+    # A virtual dataset with unlimited mappings opens its sources to compute its
+    # shape; a FIFO there would block the scan until something wrote to it.
+    fifo = tmp_path / "source.h5"
+    os.mkfifo(fifo)
+    path = _nwb(tmp_path / "rec.nwb")
+    with h5py.File(path, "a") as handle:
+        del handle["identifier"]
+        layout = h5py.VirtualLayout(shape=(1,), maxshape=(None,), dtype="S8")
+        source = h5py.VirtualSource(str(fifo), "data", shape=(1,), maxshape=(None,))
+        layout[0 : h5py.h5s.UNLIMITED] = source[0 : h5py.h5s.UNLIMITED]
+        handle.create_virtual_dataset("identifier", layout)
+
+    fields = _sniff_in_child(path)["fields"]
+
+    assert "format_identifier" not in fields
+    assert fields["format_session_start_time"] == "2023-11-02T09:15:00-04:00"
+
+
+@pytest.mark.parametrize(
+    ("missing", "links"),
+    [
+        ("format_identifier", {"identifier": ("external", "/identifier")}),
+        ("format_subject_id", {"general": ("external", "/general")}),
+        (
+            "format_identifier",
+            {"elsewhere": ("external", "/"), "identifier": ("soft", "/elsewhere/identifier")},
+        ),
+    ],
+    ids=["leaf", "group", "soft-through-external"],
+)
+def test_an_external_link_never_opens_its_target_file(
+    tmp_path: Path, missing: str, links: dict[str, tuple[str, str]]
+) -> None:
+    pytest.importorskip("resource")  # POSIX: os.mkfifo as well
+    h5py = _h5py()
+    # Traversing an external link opens its file; a FIFO there would block the
+    # scan until something wrote to it, so the link must be refused unopened.
+    fifo = tmp_path / "other.h5"
+    os.mkfifo(fifo)
+    path = _nwb(tmp_path / "rec.nwb")
+    with h5py.File(path, "a") as handle:
+        for name, (kind, target) in links.items():
+            if name in handle:
+                del handle[name]
+            if kind == "external":
+                handle[name] = h5py.ExternalLink(str(fifo), target)
+            else:
+                handle[name] = h5py.SoftLink(target)
+
+    fields = _sniff_in_child(path)["fields"]
+
+    assert fields == {key: value for key, value in NWB_FIELDS.items() if key != missing}
 
 
 # --- general ----------------------------------------------------------------------------

@@ -223,10 +223,17 @@ when it is present.
 - No more than 2 MiB is read from any file: the FCS TEXT segment up to
   1 MiB, the first TIFF IFD up to 4096 entries, and up to 1 MiB of
   ImageDescription. OME-XML parsing stops at the first image's `Pixels`
-  element, so large plane lists are never read. h5py reads only the HDF5
-  metadata the sniffer asks for. It opens the file read-only with HDF5 file
-  locking off (h5py 3.5 or later), so a scan never makes acquisition
-  software that is writing the file fail with "unable to lock file".
+  element, so large plane lists are never read.
+- NWB values are read only from the file itself: h5py follows hard links
+  only (never soft or external links), and a value is read only when it is a
+  scalar string of at most 4 KiB stored in the file (not HDF5 external raw
+  storage or a virtual dataset). Variable-length strings are read by the
+  sniffer, within the 2 MiB budget, because HDF5 would first allocate
+  whatever length the file claims. HDF5's own parsing of the object headers
+  and messages it walks is not counted in that budget. h5py opens the file
+  read-only with HDF5 file locking off (h5py 3.5 or later), so a scan never
+  makes acquisition software that is writing the file fail with "unable to
+  lock file".
 - Every value is limited to 256 characters.
 - OME-XML with any DTD or entity declaration is refused, so external entities
   (XXE) and entity expansion ("billion laughs") cannot happen. `defusedxml`

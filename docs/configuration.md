@@ -224,12 +224,15 @@ manufacture host, network, credential, or subprocess authority.
 
 Registration and remote registered-store use now both require this scoped
 authority in addition to the global policies above. HTTP, rclone-backed, and
-Git resolution and health can dispatch only after the persisted binding has
-been revalidated. A `local_fs` grant remains registration-only at this stage
-and produces an opaque denial at the I/O boundary until the retained-handle
-filesystem slice carries the selected boundary into the broker. Contributor-
-authored direct paths, URLs, rclone targets, and Git remotes remain inert
-metadata.
+Git resolution and health, and rclone-backed store scans
+(`LAB_TRACKER_STORE_SCANS`), can dispatch only after the persisted binding has
+been revalidated; a scan also needs the grant's `list` capability, and
+`bytes_by_path` to hash what it lists. A `local_fs` grant remains
+registration-only at this stage and produces an opaque denial (for scans, the
+static detail `Local store scans are not supported in this build.`) at the I/O
+boundary until the retained-handle filesystem slice carries the selected
+boundary into the broker. Contributor-authored direct paths, URLs, rclone
+targets, and Git remotes remain inert metadata.
 
 ### Local filesystem policy
 
@@ -757,9 +760,12 @@ containment remain a separate follow-up.
   paste it into `Create First Admin` yourself (the Docker entrypoint stores a
   generated token in `/app/data/runtime-env/bootstrap-admin-token`, e.g.
   `docker compose exec app cat /app/data/runtime-env/bootstrap-admin-token`).
-  `first_run` shows it to any caller until the first user exists; use it only
-  when you create the first admin immediately after deploy, as the Render
-  blueprint does. The token is never returned after any user exists.
+  `first_run` shows it to any unauthenticated caller until the first user
+  exists, so whoever reaches a public URL first can create the admin account;
+  avoid it on internet-reachable deployments and read the token from the
+  platform instead (the Render blueprint uses `never`; Render shows the generated
+  token under the service's **Environment**). The token is never returned after
+  any user exists.
 
 ### Graph draft providers and transcription
 
@@ -1009,9 +1015,14 @@ stopping the others or the daily-review batch dispatch.
   stored
 - `LAB_TRACKER_STORE_SCANS`: JSON list of registered-store scans,
   `[{"project_id": "<uuid>", "store": "lab-onedrive", "prefix": "flow",
-  "patterns": ["*.fcs"], "include_existing": false}]`. `local_fs` stores must
-  lie inside `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS`; rclone-backed stores must be
-  in `LAB_TRACKER_RCLONE_ALLOWED_REMOTES`; other kinds cannot be listed
+  "patterns": ["*.fcs"], "include_existing": false}]`. Each scan run
+  revalidates the store's
+  [authority grant](#scoped-store-authority-grants), which must include `list`
+  (and `bytes_by_path` for SHA-256 hashing), before any listing; a store
+  without a current grant fails that scan with a static detail and no I/O.
+  Rclone-backed stores must also be in `LAB_TRACKER_RCLONE_ALLOWED_REMOTES`.
+  `local_fs` scans are refused in this build (`Local store scans are not
+  supported in this build.`), and other kinds cannot be listed
 - `LAB_TRACKER_STORE_SCAN_HASH_MAX_BYTES`: largest file a scan streams to
   compute its SHA-256 (default: `67108864`, 64 MiB; `0`–`536870912`); larger
   or unreadable files are staged with `content_hash_pending=true`

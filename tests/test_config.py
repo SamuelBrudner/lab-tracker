@@ -1635,7 +1635,7 @@ def test_explicit_non_peer_bootstrap_disclosure_modes_are_valid_outside_local(
     monkeypatch,
     mode,
 ):
-    # render.yaml pins first_run; the dedicated-instance deployment pins never.
+    # first_run stays an explicit opt-in; render.yaml and the dedicated instance pin never.
     _clear_bootstrap_disclosure_env(monkeypatch)
     monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "production")
     monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "strong-production-secret")

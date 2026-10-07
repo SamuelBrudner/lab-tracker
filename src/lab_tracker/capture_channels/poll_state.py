@@ -102,6 +102,27 @@ class PollState:
             }
             self._write(state)
 
+    def adopt_store_scan_baseline(self, legacy_key: str, scan_key: str) -> frozenset[str] | None:
+        """Move a legacy baseline to ``scan_key``, removing it in the same write.
+
+        Removal makes adoption one-time: a later registration under the same
+        name finds nothing to adopt. Returns the baseline now under
+        ``scan_key``, or ``None`` when there was no legacy entry.
+        """
+
+        with self._locked() as state:
+            baselines = state.get("store_scan_baselines")
+            if not isinstance(baselines, dict) or legacy_key not in baselines:
+                return None
+            legacy = baselines.pop(legacy_key)
+            if isinstance(legacy, dict) and isinstance(legacy.get("keys"), list):
+                baselines.setdefault(scan_key, legacy)
+            self._write(state)
+            adopted = baselines.get(scan_key)
+            if not isinstance(adopted, dict) or not isinstance(adopted.get("keys"), list):
+                return None
+            return frozenset(str(key) for key in adopted["keys"])
+
     @contextmanager
     def _locked(self) -> Iterator[dict[str, Any]]:
         with self._thread_lock:
