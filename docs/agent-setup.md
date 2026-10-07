@@ -258,6 +258,20 @@ a project contributor (or viewer for read-only use).
 | `AGENTS.lt.md`, `scripts/lt.py`, `lt_ids.json` | Agent-readable integration notes, the client shim, and the project-id mapping (`lt project bind` fills it) |
 | `.cursor/rules/lab-tracker.mdc` (only with `--yes`) | Cursor (the managed code-conventions block that `--yes` also adds to `CLAUDE.md` and `AGENTS.md`) |
 
+The two scaffolded Claude Code hooks reach the agent through
+`hookSpecificOutput.additionalContext`. Claude Code pipes each hook a JSON
+payload on stdin and parses stdout that starts with `{` and ends with `}` as
+[hook output](https://code.claude.com/docs/en/hooks#json-output), silently
+dropping keys it does not know, so plain `lt` JSON would never reach the
+agent. When stdin carries a hook payload, `lt setup status --brief` returns
+its brief line and remaining suggestions as context on `SessionStart`, and
+`lt prime --if-research-facing` classifies only the payload's `prompt` (not
+the `cwd` or transcript path) and returns the ranked open questions as
+context on `UserPromptSubmit`. Run from a terminal or with other piped
+input, both keep their JSON output. Because detection reads stdin rather
+than a flag, repos scaffolded earlier need only a client upgrade, not
+`lt update`.
+
 ### Choose your client
 
 Registration is per client, and each client reads a different file.

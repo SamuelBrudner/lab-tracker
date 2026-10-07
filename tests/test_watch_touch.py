@@ -189,6 +189,28 @@ def test_manifest_watch_queues_a_written_manifest(touch_env: Path) -> None:
     assert event["capture_id"] == "run-1"
 
 
+def test_manifest_watch_skips_a_symlinked_manifest(touch_env: Path) -> None:
+    """Like the scan's manifest glob, a symlinked manifest is never queued."""
+
+    repo = _watched_repo(touch_env, mode="manifest")
+    real = repo / "results" / "run-1" / "lab-tracker-evidence.json"
+    real.parent.mkdir()
+    real.write_text(json.dumps({"capture_id": "run-1"}), encoding="utf-8")
+    link = repo / "results" / "run-2" / "lab-tracker-evidence.json"
+    link.parent.mkdir()
+    try:
+        link.symlink_to(real)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+
+    payload = watch_touch.touch_from_hook(
+        _post_tool_use(repo, link), sync=False, client_factory=_no_client
+    )
+
+    assert payload["action"] == "unwatched"
+    assert _events(repo) == []
+
+
 def test_staged_note_capture_needs_a_declared_project(touch_env: Path, capsys) -> None:
     repo = _watched_repo(touch_env, project_id=None)
     target = repo / "results" / "a.csv"

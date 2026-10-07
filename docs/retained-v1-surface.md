@@ -70,7 +70,11 @@ research record:
   dataset ids declared for a watch (flags, watch entries, or manifests)
   become the staged note's targets, labelled
   `declared_target_source=explicit`, so a stale id fails the sync loudly
-  instead of landing as metadata only. A session the client can resolve on
+  instead of landing as metadata only. A manifest cannot choose the project
+  or name a local file to upload: its note is rendered from the summary,
+  and the project comes from the flag, the watch entry, or the checkout
+  binding. A watch root must be a real folder or file, not a symlink to one,
+  and sync refuses to upload a hard-linked file. A session the client can resolve on
   its own (`--session` as a UUID or link code, an `LT-<code>` link code in
   the watched folder or file name, or the checkout's `lt session use`
   context, overridden by `LAB_TRACKER_SESSION_ID`) becomes that target the
@@ -209,12 +213,14 @@ research record:
     email-to-capture through a per-(user, project) HMAC plus-address accepted
     only from the mapped sender and shown only to that person (Devices →
     Email capture), instrument-calendar (ICS) bookings, and
-    registered-store scans. Bookings and store files become SYSTEM-authored
-    staged notes; channel principals are non-interactive and can never accept
-    or commit. Pollers run from the optional ticker, `POST
-    /integrations/run-due`, or `lab-tracker integrations poll`, each at most
-    once per minimum interval. See
-    [server-capture-channels.md](server-capture-channels.md).
+    registered-store scans (rclone-backed stores only, each run revalidating
+    the store's operator grant and its `list` capability before any listing;
+    `local_fs` scans are refused until the local-use slice). Bookings and
+    store files become SYSTEM-authored staged notes; channel principals are
+    non-interactive and can never accept or commit. Pollers run from the
+    optional ticker, `POST /integrations/run-due`, or
+    `lab-tracker integrations poll`, each at most once per minimum interval.
+    See [server-capture-channels.md](server-capture-channels.md).
   - **New deterministic proposals.** Each batch execution also runs a
     worktree-tree detector (`basis: worktree_tree_match`, a capture to the
     earliest note whose `repo_git_tree` is the same tree) and a time-window

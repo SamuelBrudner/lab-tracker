@@ -18,7 +18,17 @@ from urllib.parse import urlencode
 from uuid import UUID, uuid4
 
 import pytest
+from api_helpers import TEST_STORE_AUTHORITY_GRANT_ID, install_use_time_store_authority
 from fastapi.testclient import TestClient
+from sqlalchemy import event
+from store_authority_fakes import (
+    ExplodingSnapshotProvider,
+    RecordingSnapshotProvider,
+    bound_data_store,
+    empty_registry,
+    grant_payload,
+    registry_from_grants,
+)
 
 from lab_tracker.auth import LOCAL_AUTH_USER_ID, Role
 from lab_tracker.bounded_subprocess import BoundedSubprocessExecutor, ProcessResult
@@ -28,13 +38,30 @@ from lab_tracker.capture_channels.app_runtime import (
 )
 from lab_tracker.capture_channels.dispatch import CaptureRuntime, run_due_pollers
 from lab_tracker.capture_channels.email_capture import capture_token
+from lab_tracker.capture_channels.settings import parse_store_scans
 from lab_tracker.capture_channels.slack import slack_signature
-from lab_tracker.capture_channels.store_scan import LocalStoreScanAccess
+from lab_tracker.capture_channels.store_scan import (
+    LOCAL_STORE_SCAN_UNSUPPORTED_MESSAGE,
+    STORE_SCAN_UNAUTHORIZED_MESSAGE,
+    LocalStoreScanAccess,
+    StoreScanError,
+    StoreScanResult,
+    parse_rclone_listing,
+    run_store_scan,
+    scan_key,
+)
+from lab_tracker.data_store_definition import ValidatedDataStoreDefinition
 from lab_tracker.local_filesystem_authority import LocalFilesystemAuthority
 from lab_tracker.local_filesystem_operations import BoundedLocalFilesystemOperations
-from lab_tracker.models import DataStore, StoreKind, utc_now
+from lab_tracker.models import DataStore, StoreCapability, StoreKind, utc_now
 from lab_tracker.rclone_remote_policy import RcloneRemotePolicy
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
+from lab_tracker.store_authority_registry import ProjectStoreScope, StoreAuthorityRegistry
+from lab_tracker.store_authority_use import (
+    FixedStoreAuthoritySnapshotProvider,
+    detach_store_authority_binding,
+    revalidate_store_authority_binding,
+)
 
 SLACK_SECRET = "8f14e45fceea167a5a36dedd4bea2543"
 AUTH_SECRET = "test-secret"  # what the migrated_sqlite_database_url fixture configures
@@ -715,13 +742,54 @@ def test_one_failing_feed_does_not_stop_the_next(
 
 # --------------------------------------------------------------------------- store scans
 
+# What a scan needs from the operator's grant: ``list`` to enumerate and
+# ``bytes_by_path`` to stream a file for its SHA-256.
+_SCAN_CAPABILITIES = (StoreCapability.LIST, StoreCapability.BYTES_BY_PATH)
+
 
 def _register_store(client: TestClient, project_id: str, **fields: Any) -> DataStore:
+    """Insert a legacy, grantless row (as registered before grant bindings existed)."""
+
     store = DataStore(store_id=uuid4(), project_id=UUID(project_id), **fields)
+    _insert_store(client, store)
+    return store
+
+
+def _insert_store(client: TestClient, store: DataStore) -> None:
     with client.app.state.db_session_factory() as session:
         SQLAlchemyLabTrackerRepository(session).data_stores.insert(store)
         session.commit()
-    return store
+
+
+def _register_bound_store(
+    client: TestClient,
+    *,
+    project_id: str | None = None,
+    group_id: str | None = None,
+    capabilities: tuple[StoreCapability, ...] = _SCAN_CAPABILITIES,
+    **fields: Any,
+) -> tuple[DataStore, dict[str, object]]:
+    """Insert a row bound to an operator grant; return it and that exact grant."""
+
+    store, _registry, scope = bound_data_store(
+        project_id=UUID(project_id) if project_id is not None else None,
+        group_id=UUID(group_id) if group_id is not None else None,
+        capabilities=capabilities,
+        **fields,
+    )
+    _insert_store(client, store)
+    grant = grant_payload(
+        scope=scope,
+        definition=ValidatedDataStoreDefinition.create(
+            name=store.name,
+            kind=store.kind,
+            root=store.root,
+            credential_ref=store.credential_ref,
+        ),
+        capabilities=capabilities,
+        grant_id=str(store.authority_grant_id),
+    )
+    return store, grant
 
 
 def _touch(path: Path, content: bytes, *, age: timedelta = timedelta(hours=1)) -> None:
@@ -729,6 +797,33 @@ def _touch(path: Path, content: bytes, *, age: timedelta = timedelta(hours=1)) -
     path.write_bytes(content)
     stamp = (NOW - age).timestamp()
     os.utime(path, (stamp, stamp))
+
+
+def _scan(runtime: CaptureRuntime) -> Any:
+    [report] = run_due_pollers(runtime, trigger="test", only=["store_scans"], force=True).pollers
+    return report
+
+
+def _baselines(runtime: CaptureRuntime) -> dict[str, Any]:
+    state = json.loads(runtime.state.path.read_text(encoding="utf-8"))
+    return dict(state.get("store_scan_baselines", {}))
+
+
+class _SwitchingProvider:
+    """Return one registry per capture, recording each capture in ``events``."""
+
+    def __init__(self, *registries: StoreAuthorityRegistry, events: list[str]) -> None:
+        self._registries = list(registries)
+        self.events = events
+        self.calls = 0
+
+    def __call__(self) -> StoreAuthorityRegistry:
+        self.calls += 1
+        self.events.append("snapshot")
+        return self._registries.pop(0)
+
+
+# ---------------------------------------------------------------- local_fs scans
 
 
 @pytest.fixture()
@@ -739,7 +834,9 @@ def local_store(
     root = allowed / "onedrive"
     root.mkdir(parents=True)
     project_id = _project(client, admin_auth_headers, "Store scan project")
-    _register_store(client, project_id, name="lab-disk", kind=StoreKind.LOCAL_FS, root=str(root))
+    store, grant = _register_bound_store(
+        client, project_id=project_id, name="lab-disk", kind=StoreKind.LOCAL_FS, root=str(root)
+    )
     _configure(
         client,
         store_scans=json.dumps(
@@ -757,31 +854,101 @@ def local_store(
         authority=LocalFilesystemAuthority.from_roots([allowed]),
         executor=BoundedSubprocessExecutor(),
     )
+    registry = registry_from_grants([grant])
     return SimpleNamespace(
         project_id=project_id,
         root=root,
         allowed=allowed,
-        runtime=lambda: _runtime(
-            client, local_store_access=LocalStoreScanAccess(operations), clock=lambda: NOW
+        store=store,
+        registry=registry,
+        access=LocalStoreScanAccess(operations),
+        runtime=lambda **overrides: _runtime(
+            client,
+            **{
+                "local_store_access": LocalStoreScanAccess(operations),
+                "store_authority_snapshot_provider": FixedStoreAuthoritySnapshotProvider(registry),
+                "clock": lambda: NOW,
+                **overrides,
+            },
         ),
     )
 
 
-def _scan(runtime: CaptureRuntime) -> Any:
-    [report] = run_due_pollers(runtime, trigger="test", only=["store_scans"], force=True).pollers
-    return report
+def _scan_with_local_adapter(local_store: SimpleNamespace) -> StoreScanResult:
+    """Drive the retained local adapter directly, as dispatch will once .63.5 lands.
+
+    Production refuses ``local_fs`` scans (see the dispatch test below); these
+    mechanics tests keep the adapter's listing and hashing contract covered.
+    """
+
+    runtime = local_store.runtime()
+    [scan] = parse_store_scans(runtime.settings.store_scans, variable="LAB_TRACKER_STORE_SCANS")
+    binding = detach_store_authority_binding(local_store.store)
+    assert binding is not None
+    authority = revalidate_store_authority_binding(local_store.registry, binding)
+    assert authority is not None
+    with runtime.session_factory() as session:
+        return run_store_scan(
+            scan,
+            authority=authority,
+            adapter=local_store.access.adapter(authority.definition.root, deadline_seconds=10.0),
+            api=runtime.api_for_session(session),
+            actor=runtime.system_actor,
+            baselines=runtime.state,
+            now=NOW,
+            hash_max_bytes=int(runtime.settings.store_scan_hash_max_bytes),
+        )
 
 
-def test_local_store_scan_baselines_then_stages_new_files_with_sha256(
+def test_local_store_scans_are_refused_after_revalidation_with_no_host_io(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    local_store: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import lab_tracker.capture_channels.store_scan as store_scan_module
+
+    _touch(local_store.root / "flow" / "present.fcs", b"would be listed")
+    events: list[str] = []
+    provider = RecordingSnapshotProvider(local_store.registry, events=events)
+    scandir_targets: list[object] = []
+    real_scandir = os.scandir
+
+    def recording_scandir(target: Any = ".") -> Any:
+        scandir_targets.append(target)
+        return real_scandir(target)
+
+    def no_local_adapter(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a refused local scan built a local adapter")
+
+    monkeypatch.setattr(os, "scandir", recording_scandir)
+    monkeypatch.setattr(store_scan_module.LocalStoreScanAccess, "adapter", no_local_adapter)
+    runtime = local_store.runtime(store_authority_snapshot_provider=provider)
+
+    report = _scan(runtime)
+
+    assert report.status == "ran"
+    assert report.counts == {"scans_failed": 1}
+    assert report.errors == [f"lab-disk/flow: {LOCAL_STORE_SCAN_UNSUPPORTED_MESSAGE}"]
+    # The grant was revalidated first, so lifting the refusal after .63.5 is
+    # only the adapter dispatch; nothing below the root was enumerated.
+    assert provider.calls == 1
+    assert scandir_targets == []
+    assert _notes(client, admin_auth_headers, local_store.project_id) == []
+    assert _baselines(runtime) == {}
+    assert str(local_store.root) not in caplog.text
+    assert str(local_store.root) not in json.dumps(report.model_dump(mode="json"))
+
+
+def test_local_store_adapter_baselines_then_stages_new_files_with_sha256(
     client: TestClient, admin_auth_headers: dict[str, str], local_store: SimpleNamespace
 ) -> None:
     root: Path = local_store.root
     _touch(root / "flow" / "old.fcs", b"already here")
-    runtime = local_store.runtime()
 
-    baseline = _scan(runtime)
-    assert baseline.status == "ran", baseline.errors
-    assert baseline.counts["baseline_recorded"] == 1
+    baseline = _scan_with_local_adapter(local_store)
+    assert baseline.baseline_recorded == 1
     assert _notes(client, admin_auth_headers, local_store.project_id) == []
 
     payload = b"FCS3.1 new acquisition"
@@ -793,11 +960,11 @@ def test_local_store_scan_baselines_then_stages_new_files_with_sha256(
     outside.write_bytes(b"secret")
     (root / "flow" / "link.fcs").symlink_to(outside)
 
-    second = _scan(runtime)
+    second = _scan_with_local_adapter(local_store)
 
-    assert second.counts["created"] == 1
-    assert second.counts["settling"] == 1
-    assert second.counts["hashed"] == 1
+    assert second.created == 1
+    assert second.settling == 1
+    assert second.hashed == 1
     [note] = _notes(client, admin_auth_headers, local_store.project_id)
     metadata = note["metadata"]
     assert metadata["capture_channel"] == "store_scan"
@@ -812,12 +979,12 @@ def test_local_store_scan_baselines_then_stages_new_files_with_sha256(
     assert note["created_by_user_id"] is None
     assert note["raw_asset"] is None  # a pointer, never the bytes
 
-    third = _scan(runtime)
-    assert third.counts["created"] == 0
-    assert third.counts["already_captured"] == 1
+    third = _scan_with_local_adapter(local_store)
+    assert third.created == 0
+    assert third.already_captured == 1
 
 
-def test_local_store_scan_marks_large_files_hash_pending(
+def test_local_store_adapter_marks_large_files_hash_pending(
     client: TestClient, admin_auth_headers: dict[str, str], local_store: SimpleNamespace
 ) -> None:
     _configure(
@@ -836,35 +1003,26 @@ def test_local_store_scan_marks_large_files_hash_pending(
     )
     _touch(local_store.root / "big.fcs", b"more than four bytes")
 
-    report = _scan(local_store.runtime())
+    result = _scan_with_local_adapter(local_store)
 
-    assert report.counts["hash_pending"] == 1
+    assert result.hash_pending == 1
     [note] = _notes(client, admin_auth_headers, local_store.project_id)
     assert note["metadata"]["content_hash_pending"] == "True"
     assert "evidence_content_hash" not in note["metadata"]
 
 
-def test_local_store_outside_the_operator_roots_is_refused(
-    client: TestClient, admin_auth_headers: dict[str, str], tmp_path: Path
-) -> None:
-    project_id = _project(client, admin_auth_headers, "Rogue store")
+def test_local_store_adapter_outside_the_operator_roots_is_refused(tmp_path: Path) -> None:
     rogue = tmp_path / "elsewhere"
     rogue.mkdir()
     _touch(rogue / "a.fcs", b"x")
-    _register_store(client, project_id, name="rogue", kind=StoreKind.LOCAL_FS, root=str(rogue))
-    _configure(client, store_scans=json.dumps([{"project_id": project_id, "store": "rogue"}]))
     operations = BoundedLocalFilesystemOperations(
         authority=LocalFilesystemAuthority.from_roots([tmp_path / "allowed"]),
         executor=BoundedSubprocessExecutor(),
     )
+    adapter = LocalStoreScanAccess(operations).adapter(str(rogue), deadline_seconds=10.0)
 
-    report = _scan(
-        _runtime(client, local_store_access=LocalStoreScanAccess(operations), clock=lambda: NOW)
-    )
-
-    assert report.counts["scans_failed"] == 1
-    assert "LAB_TRACKER_RESOLVER_ALLOWED_ROOTS" in report.errors[0]
-    assert _notes(client, admin_auth_headers, project_id) == []
+    with pytest.raises(StoreScanError, match="LAB_TRACKER_RESOLVER_ALLOWED_ROOTS"):
+        adapter.list(None, include=lambda _locator: True)
 
 
 class _Listed:
@@ -935,10 +1093,9 @@ def test_directory_swapped_for_a_symlink_mid_walk_is_not_followed(
 
     monkeypatch.setattr(os, "scandir", swapping_scandir)
 
-    report = _scan(local_store.runtime())
+    _scan_with_local_adapter(local_store)
 
     assert swapped == [True]
-    assert report.status == "ran", report.errors
     paths = sorted(
         note["metadata"]["store_file_path"]
         for note in _notes(client, admin_auth_headers, local_store.project_id)
@@ -973,13 +1130,23 @@ def test_a_poller_out_of_budget_leaves_work_for_its_next_run(
     assert fetched == []
 
 
+# ---------------------------------------------------------------- rclone scans
+
+
 class FakeRclone:
     """A ProcessExecutor fake answering ``rclone lsjson`` and ``rclone cat``."""
 
-    def __init__(self, listing: list[dict[str, Any]], files: dict[str, bytes]) -> None:
+    def __init__(
+        self,
+        listing: list[dict[str, Any]],
+        files: dict[str, bytes],
+        *,
+        events: list[str] | None = None,
+    ) -> None:
         self.listing = listing
         self.files = files
         self.calls: list[list[str]] = []
+        self.events = events if events is not None else []
 
     def run(
         self,
@@ -994,6 +1161,7 @@ class FakeRclone:
     ) -> ProcessResult:
         argv = list(command)
         self.calls.append(argv)
+        self.events.append(f"rclone {argv[1]}")
         if argv[1] == "lsjson":
             stdout = json.dumps(self.listing).encode()
             return ProcessResult(0, stdout, len(stdout), 0)
@@ -1005,11 +1173,35 @@ class FakeRclone:
         raise AssertionError(argv)
 
 
-def test_rclone_store_scan_uses_the_bounded_executor_and_remote_policy(
+def _listed(path: str, size: int = 8) -> dict[str, Any]:
+    return {"Path": path, "Size": size, "ModTime": "2026-09-27T10:00:00Z", "IsDir": False}
+
+
+def _rclone_runtime(
+    client: TestClient,
+    fake: FakeRclone,
+    provider: Any,
+    *,
+    remotes: str = "lab-s3",
+    **overrides: Any,
+) -> CaptureRuntime:
+    return _runtime(
+        client,
+        process_executor=fake,
+        rclone_remote_policy=RcloneRemotePolicy.from_config(remotes),
+        store_authority_snapshot_provider=provider,
+        clock=lambda: NOW,
+        **overrides,
+    )
+
+
+def test_rclone_store_scan_revalidates_then_uses_the_bounded_executor_and_remote_policy(
     client: TestClient, admin_auth_headers: dict[str, str]
 ) -> None:
     project_id = _project(client, admin_auth_headers, "S3 project")
-    _register_store(client, project_id, name="lab-s3", kind=StoreKind.S3, root="bucket/data")
+    _store, grant = _register_bound_store(
+        client, project_id=project_id, name="lab-s3", kind=StoreKind.S3, root="bucket/data"
+    )
     _configure(
         client,
         store_scans=json.dumps(
@@ -1024,6 +1216,7 @@ def test_rclone_store_scan_uses_the_bounded_executor_and_remote_policy(
         ),
     )
     payload = b"s3 object bytes"
+    events: list[str] = []
     fake = FakeRclone(
         [
             {
@@ -1035,18 +1228,29 @@ def test_rclone_store_scan_uses_the_bounded_executor_and_remote_policy(
             }
         ],
         {"lab-s3:bucket/data/flow/run1/sample.fcs": payload},
+        events=events,
     )
-    runtime = _runtime(
-        client,
-        process_executor=fake,
-        rclone_remote_policy=RcloneRemotePolicy.from_config("lab-s3"),
-        clock=lambda: NOW,
+    base_factory = client.app.state.db_session_factory
+
+    def recording_session_factory() -> Any:
+        session = base_factory()
+        event.listen(session, "after_rollback", lambda _session: events.append("release"))
+        return session
+
+    provider = RecordingSnapshotProvider(
+        registry_from_grants([grant]), events=events, marker="snapshot"
     )
+    runtime = _rclone_runtime(client, fake, provider, session_factory=recording_session_factory)
 
     report = _scan(runtime)
 
     assert report.status == "ran", report.errors
     assert report.counts["created"] == 1
+    # The read scope is released, then exactly one snapshot is captured,
+    # before the first subprocess.
+    assert events[:3] == ["release", "snapshot", "rclone lsjson"]
+    assert "rclone cat" in events
+    assert provider.calls == 1
     assert fake.calls[0][:2] == ["rclone", "lsjson"]
     assert "--hash" in fake.calls[0] and fake.calls[0][-1] == "lab-s3:bucket/data/flow"
     [note] = _notes(client, admin_auth_headers, project_id)
@@ -1056,24 +1260,402 @@ def test_rclone_store_scan_uses_the_bounded_executor_and_remote_policy(
     assert metadata["evidence_content_hash"] == hashlib.sha256(payload).hexdigest()
 
 
+def test_rclone_store_scan_uses_the_apps_startup_snapshot_provider(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    project_id = _project(client, admin_auth_headers, "Registered S3 project")
+    registered = client.post(
+        "/data-stores",
+        json={
+            "project_id": project_id,
+            "name": "lab-s3",
+            "kind": "s3",
+            "root": "bucket",
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
+        },
+        headers=admin_auth_headers,
+    )
+    assert registered.status_code == 201, registered.text
+    _configure(
+        client,
+        store_scans=json.dumps(
+            [{"project_id": project_id, "store": "lab-s3", "include_existing": True}]
+        ),
+    )
+    fake = FakeRclone([_listed("a.fcs")], {"lab-s3:bucket/a.fcs": b"12345678"})
+
+    def runtime() -> CaptureRuntime:
+        # No provider override: the runtime takes the app's startup provider.
+        return _runtime(
+            client,
+            process_executor=fake,
+            rclone_remote_policy=RcloneRemotePolicy.from_config("lab-s3"),
+            clock=lambda: NOW,
+        )
+
+    granted = _scan(runtime())
+    install_use_time_store_authority(client.app, empty_registry())
+    revoked = _scan(runtime())
+
+    assert granted.counts["created"] == 1, granted.errors
+    assert revoked.counts == {"scans_failed": 1}
+    assert revoked.errors == [f"lab-s3/: {STORE_SCAN_UNAUTHORIZED_MESSAGE}"]
+    assert [argv[1] for argv in fake.calls] == ["lsjson", "cat"]
+
+
 def test_rclone_remote_outside_the_allowlist_is_refused(
     client: TestClient, admin_auth_headers: dict[str, str]
 ) -> None:
     project_id = _project(client, admin_auth_headers, "Unlisted remote")
-    _register_store(client, project_id, name="lab-s3", kind=StoreKind.S3, root="bucket")
+    _store, grant = _register_bound_store(
+        client, project_id=project_id, name="lab-s3", kind=StoreKind.S3, root="bucket"
+    )
     _configure(client, store_scans=json.dumps([{"project_id": project_id, "store": "lab-s3"}]))
     fake = FakeRclone([], {})
     runtime = _runtime(
         client,
         process_executor=fake,
         rclone_remote_policy=RcloneRemotePolicy.deny_all(),
+        store_authority_snapshot_provider=FixedStoreAuthoritySnapshotProvider(
+            registry_from_grants([grant])
+        ),
         clock=lambda: NOW,
     )
 
     report = _scan(runtime)
 
+    # The global allowlist stays a conjunctive ceiling on a valid grant.
     assert report.counts["scans_failed"] == 1
     assert fake.calls == []
+
+
+def test_rclone_grant_without_bytes_by_path_lists_but_never_streams(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    project_id = _project(client, admin_auth_headers, "List-only grant")
+    _store, grant = _register_bound_store(
+        client,
+        project_id=project_id,
+        name="lab-s3",
+        kind=StoreKind.S3,
+        root="bucket",
+        capabilities=(StoreCapability.LIST,),
+    )
+    _configure(
+        client,
+        store_scans=json.dumps(
+            [{"project_id": project_id, "store": "lab-s3", "include_existing": True}]
+        ),
+    )
+    fake = FakeRclone([_listed("a.fcs")], {"lab-s3:bucket/a.fcs": b"12345678"})
+    runtime = _rclone_runtime(
+        client, fake, FixedStoreAuthoritySnapshotProvider(registry_from_grants([grant]))
+    )
+
+    report = _scan(runtime)
+
+    assert report.counts["created"] == 1, report.errors
+    assert report.counts["hash_pending"] == 1
+    assert [argv[1] for argv in fake.calls] == ["lsjson"]
+    [note] = _notes(client, admin_auth_headers, project_id)
+    assert note["metadata"]["content_hash_pending"] == "True"
+
+
+@pytest.mark.parametrize(
+    "denial",
+    ["legacy", "revoked", "changed_fingerprint", "missing_list", "other_scope"],
+)
+def test_store_scan_denials_are_opaque_and_perform_no_io(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    caplog: pytest.LogCaptureFixture,
+    denial: str,
+) -> None:
+    project_id = _project(client, admin_auth_headers, f"Denied scan {denial}")
+    capabilities = _SCAN_CAPABILITIES
+    if denial == "missing_list":
+        capabilities = (StoreCapability.BYTES_BY_PATH, StoreCapability.BYTE_RANGE)
+    if denial == "legacy":
+        _register_store(client, project_id, name="lab-s3", kind=StoreKind.S3, root="bucket/data")
+        store_id = None
+        grant: dict[str, object] = {}
+    else:
+        store, grant = _register_bound_store(
+            client,
+            project_id=project_id,
+            name="lab-s3",
+            kind=StoreKind.S3,
+            root="bucket/data",
+            capabilities=capabilities,
+        )
+        store_id = store.store_id
+    definition = ValidatedDataStoreDefinition.create(
+        name="lab-s3", kind=StoreKind.S3, root="bucket/data"
+    )
+    events: list[str] = []
+    provider: Any
+    if denial in {"legacy", "missing_list"}:
+        # Pure checks on the detached binding deny before any snapshot.
+        provider = ExplodingSnapshotProvider()
+    elif denial == "revoked":
+        provider = RecordingSnapshotProvider(empty_registry(), events=events)
+    elif denial == "changed_fingerprint":
+        # Same grant ID, widened semantics: the persisted fingerprint is stale.
+        provider = RecordingSnapshotProvider(
+            registry_from_grants(
+                [
+                    grant_payload(
+                        scope=ProjectStoreScope(UUID(project_id)),
+                        definition=definition,
+                        capabilities=(*_SCAN_CAPABILITIES, StoreCapability.BYTE_RANGE),
+                        grant_id=str(grant["grant_id"]),
+                    )
+                ]
+            ),
+            events=events,
+        )
+    else:
+        # The same grant ID now names another project's boundary.
+        provider = RecordingSnapshotProvider(
+            registry_from_grants(
+                [
+                    grant_payload(
+                        scope=ProjectStoreScope(uuid4()),
+                        definition=definition,
+                        capabilities=_SCAN_CAPABILITIES,
+                        grant_id=str(grant["grant_id"]),
+                    )
+                ]
+            ),
+            events=events,
+        )
+    _configure(
+        client,
+        store_scans=json.dumps(
+            [{"project_id": project_id, "store": "lab-s3", "include_existing": True}]
+        ),
+    )
+    fake = FakeRclone([_listed("a.fcs")], {"lab-s3:bucket/data/a.fcs": b"12345678"})
+    runtime = _rclone_runtime(client, fake, provider)
+
+    report = _scan(runtime)
+
+    assert report.status == "ran"
+    assert report.counts == {"scans_failed": 1}
+    assert report.errors == [f"lab-s3/: {STORE_SCAN_UNAUTHORIZED_MESSAGE}"]
+    assert fake.calls == []
+    assert events == ([] if denial in {"legacy", "missing_list"} else ["authority"])
+    assert _notes(client, admin_auth_headers, project_id) == []
+    assert _baselines(runtime) == {}
+    if store_id is not None:
+        assert str(store_id) not in json.dumps(report.model_dump(mode="json"))
+    assert "bucket" not in caplog.text
+    assert "bucket" not in json.dumps(report.model_dump(mode="json"))
+
+
+def _grouped_project(client: TestClient, headers: dict[str, str], name: str) -> tuple[str, str]:
+    group = client.post("/groups", json={"name": f"{name} lab"}, headers=headers)
+    assert group.status_code == 201, group.text
+    group_id = str(group.json()["data"]["group_id"])
+    project = client.post("/projects", json={"name": name, "group_id": group_id}, headers=headers)
+    assert project.status_code == 201, project.text
+    return group_id, str(project.json()["data"]["project_id"])
+
+
+def test_a_shadowing_project_store_without_a_grant_never_falls_through_to_the_group_store(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    group_id, project_id = _grouped_project(client, admin_auth_headers, "Shadowed scan")
+    _group_store, group_grant = _register_bound_store(
+        client, group_id=group_id, name="lab-s3", kind=StoreKind.S3, root="group-bucket"
+    )
+    _configure(
+        client,
+        store_scans=json.dumps(
+            [{"project_id": project_id, "store": "lab-s3", "include_existing": True}]
+        ),
+    )
+    fake = FakeRclone([_listed("a.fcs")], {"lab-s3:group-bucket/a.fcs": b"12345678"})
+    registry = registry_from_grants([group_grant])
+
+    inherited = _scan(_rclone_runtime(client, fake, FixedStoreAuthoritySnapshotProvider(registry)))
+    assert inherited.counts["created"] == 1, inherited.errors
+    assert fake.calls[0][-1] == "lab-s3:group-bucket"
+
+    fake.calls.clear()
+    _register_store(client, project_id, name="lab-s3", kind=StoreKind.S3, root="elsewhere")
+    shadowed = _scan(_rclone_runtime(client, fake, ExplodingSnapshotProvider()))
+
+    assert shadowed.counts == {"scans_failed": 1}
+    assert shadowed.errors == [f"lab-s3/: {STORE_SCAN_UNAUTHORIZED_MESSAGE}"]
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize(
+    ("kind", "root"),
+    [
+        (StoreKind.OBJECT_TABLE, "lab.recordings"),
+        (StoreKind.DATABASE, "lab_db"),
+        (StoreKind.HTTP, "https://data.example.org/files"),
+        (StoreKind.GIT, "https://git.example.org/lab/data.git"),
+    ],
+)
+def test_an_unlistable_store_kind_reports_unsupported_listing_before_any_authority_check(
+    client: TestClient, admin_auth_headers: dict[str, str], kind: StoreKind, root: str
+) -> None:
+    project_id = _project(client, admin_auth_headers, f"Unlistable {kind.value}")
+    # Registered without a grant binding; for ``object_table`` and ``database``
+    # no binding can be detached at all, yet the kind is still the reason.
+    _register_store(client, project_id, name="lab-table", kind=kind, root=root)
+    _configure(
+        client,
+        store_scans=json.dumps(
+            [{"project_id": project_id, "store": "lab-table", "include_existing": True}]
+        ),
+    )
+    fake = FakeRclone([], {})
+
+    report = _scan(_rclone_runtime(client, fake, ExplodingSnapshotProvider()))
+
+    assert report.counts == {"scans_failed": 1}
+    assert report.errors == [f"lab-table/: Listing is not supported for {kind.value} stores."]
+    assert fake.calls == []
+    assert _baselines(runtime=client.app.state.capture_runtime) == {}
+
+
+def _seed_legacy_baseline(runtime: CaptureRuntime, *paths: str) -> str:
+    """Record a baseline the way a build before store-ID keys did; return its key."""
+
+    import lab_tracker.capture_channels.store_scan as store_scan_module
+
+    [scan] = parse_store_scans(runtime.settings.store_scans, variable="LAB_TRACKER_STORE_SCANS")
+    listing = parse_rclone_listing(
+        json.dumps([_listed(path) for path in paths]).encode(), prefix=scan.prefix
+    )
+    legacy_key = store_scan_module._legacy_scan_key(scan)
+    runtime.state.set_store_scan_baseline(
+        legacy_key, frozenset(listed.capture_key(scan.store) for listed in listing.files)
+    )
+    return legacy_key
+
+
+def test_a_legacy_name_keyed_baseline_is_adopted_once_without_a_capture_gap(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    project_id = _project(client, admin_auth_headers, "Upgraded scan")
+    store, grant = _register_bound_store(
+        client, project_id=project_id, name="lab-s3", kind=StoreKind.S3, root="bucket"
+    )
+    _configure(client, store_scans=json.dumps([{"project_id": project_id, "store": "lab-s3"}]))
+    fake = FakeRclone(
+        [_listed("seen.fcs"), _listed("arrived-meanwhile.fcs")],
+        {"lab-s3:bucket/arrived-meanwhile.fcs": b"12345678"},
+    )
+    runtime = _rclone_runtime(
+        client, fake, FixedStoreAuthoritySnapshotProvider(registry_from_grants([grant]))
+    )
+    legacy_key = _seed_legacy_baseline(runtime, "seen.fcs")
+
+    report = _scan(runtime)
+
+    # The pre-upgrade baseline still holds: only the file that arrived since
+    # the last pre-upgrade poll is staged, and nothing is silently absorbed.
+    assert report.counts["baseline_recorded"] == 0, report.errors
+    assert report.counts["created"] == 1
+    [note] = _notes(client, admin_auth_headers, project_id)
+    assert note["metadata"]["store_file_path"] == "arrived-meanwhile.fcs"
+    baselines = _baselines(runtime)
+    assert legacy_key not in baselines
+    [adopted_key] = baselines
+    assert adopted_key == scan_key(
+        parse_store_scans(runtime.settings.store_scans, variable="X")[0], store_id=store.store_id
+    )
+
+
+def test_a_name_resolving_to_a_new_registration_records_a_fresh_baseline(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    group_id, project_id = _grouped_project(client, admin_auth_headers, "Rebound scan")
+    group_store, group_grant = _register_bound_store(
+        client,
+        group_id=group_id,
+        name="lab-s3",
+        kind=StoreKind.S3,
+        root="group-bucket",
+        grant_id="group-scan",
+    )
+    _configure(client, store_scans=json.dumps([{"project_id": project_id, "store": "lab-s3"}]))
+    fake = FakeRclone([_listed("group-file.fcs")], {})
+    first_runtime = _rclone_runtime(
+        client, fake, FixedStoreAuthoritySnapshotProvider(registry_from_grants([group_grant]))
+    )
+    legacy_key = _seed_legacy_baseline(first_runtime, "group-file.fcs")
+
+    first = _scan(first_runtime)
+    # The group store adopts the pre-upgrade baseline, and the legacy entry goes.
+    assert first.counts["baseline_recorded"] == 0, first.errors
+    assert first.counts["created"] == 0
+    assert legacy_key not in _baselines(first_runtime)
+
+    # The project now registers its own "lab-s3" under a different grant; the
+    # name resolves to that registration from here on.
+    project_store, project_grant = _register_bound_store(
+        client,
+        project_id=project_id,
+        name="lab-s3",
+        kind=StoreKind.S3,
+        root="project-bucket",
+        grant_id="project-scan",
+    )
+    fake.listing = [_listed("existing-1.fcs"), _listed("existing-2.fcs")]
+    runtime = _rclone_runtime(
+        client,
+        fake,
+        FixedStoreAuthoritySnapshotProvider(registry_from_grants([group_grant, project_grant])),
+    )
+
+    second = _scan(runtime)
+
+    # Files already in the newly resolved store are baselined, not staged as
+    # new under the previous registration's (or the adopted legacy) baseline.
+    assert second.counts["baseline_recorded"] == 2, second.errors
+    assert second.counts.get("created", 0) == 0
+    assert fake.calls[-1][-1] == "lab-s3:project-bucket"
+    assert _notes(client, admin_auth_headers, project_id) == []
+    assert legacy_key not in _baselines(runtime)
+    assert len(_baselines(runtime)) == 2
+    assert group_store.store_id != project_store.store_id
+
+
+def test_each_scan_captures_one_point_in_time_snapshot(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    project_id = _project(client, admin_auth_headers, "Point-in-time scans")
+    _store, grant = _register_bound_store(
+        client, project_id=project_id, name="lab-s3", kind=StoreKind.S3, root="bucket"
+    )
+    _configure(
+        client,
+        store_scans=json.dumps(
+            [
+                {"project_id": project_id, "store": "lab-s3", "prefix": "first"},
+                {"project_id": project_id, "store": "lab-s3", "prefix": "second"},
+            ]
+        ),
+    )
+    events: list[str] = []
+    fake = FakeRclone([_listed("a.fcs")], {}, events=events)
+    # Revocation becomes visible between the two scans of one run.
+    provider = _SwitchingProvider(registry_from_grants([grant]), empty_registry(), events=events)
+
+    report = _scan(_rclone_runtime(client, fake, provider))
+
+    assert provider.calls == 2
+    assert events == ["snapshot", "rclone lsjson", "snapshot"]
+    assert fake.calls[0][-1] == "lab-s3:bucket/first"
+    assert report.counts["scans_run"] == 1
+    assert report.counts["scans_failed"] == 1
+    assert report.errors == [f"lab-s3/second: {STORE_SCAN_UNAUTHORIZED_MESSAGE}"]
 
 
 # --------------------------------------------------------------------------- dispatch

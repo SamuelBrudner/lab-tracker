@@ -13,14 +13,19 @@ deterministic decoding of machine-readable structure (not OCR, not a model):
 * NWB (HDF5): with ``h5py`` importable, ``session_start_time``,
   ``identifier``, ``session_description`` and ``/general/subject/subject_id``.
   ``h5py`` is imported only when an NWB candidate is sniffed; without it the
-  file is still labelled ``nwb`` with ``format_sniff_error``.
+  file is still labelled ``nwb`` with ``format_sniff_error``. Only hard links
+  are followed, and only scalar strings stored in the file itself (no external
+  links, external raw storage or virtual datasets) of at most
+  :data:`MAX_HDF5_STRING_BYTES` are read; see :class:`_Hdf5Strings`.
 
 :func:`sniff_format` returns flat ``format_*`` metadata (``format_kind`` is
 ``fcs``, ``ome_tiff`` or ``nwb``) and never raises: a malformed header yields
-``format_kind`` plus ``format_sniff_error``, an unrecognized file ``{}``. No
-more than :data:`MAX_SNIFF_BYTES` are read from any file (h5py reads only the
-HDF5 metadata it is asked for), and every stored value is bounded to
-:data:`MAX_VALUE_CHARS`.
+``format_kind`` plus ``format_sniff_error``, an unrecognized file ``{}``. The
+sniffers read no more than :data:`MAX_SNIFF_BYTES` from any file, and every
+stored value is bounded to :data:`MAX_VALUE_CHARS`. For NWB, HDF5 also parses
+the superblock and the object headers and link and attribute messages it is
+walked through; that parsing is the library's own and is not counted against
+:data:`MAX_SNIFF_BYTES`, but it reads nothing outside the file.
 
 ``format_acquired_at`` is ISO-8601 UTC. A header clock with a UTC offset is
 converted exactly (``format_acquired_at_timezone`` = ``header``); a clock
@@ -35,7 +40,7 @@ import importlib
 import os
 import re
 import struct
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -55,6 +60,11 @@ MAX_FCS_TEXT_BYTES = 1024 * 1024
 MAX_OME_XML_BYTES = 1024 * 1024
 MAX_TIFF_IFD_ENTRIES = 4096
 MAX_VALUE_CHARS = 256
+# Longest NWB/HDF5 string read at all; NWB metadata strings are far shorter,
+# and only MAX_VALUE_CHARS of one is kept.
+MAX_HDF5_STRING_BYTES = 4 * 1024
+_MAX_HDF5_HEADER_CHUNKS = 16
+_MAX_HDF5_HEADER_CHUNK_BYTES = 64 * 1024
 
 MetadataValue = str | int
 FormatFields = dict[str, MetadataValue]
@@ -587,19 +597,231 @@ def _text(value: Any) -> str | None:
     return None
 
 
-def _scalar(group: Any, name: str) -> str | None:
-    """A scalar dataset under ``group`` (NWB 2.x), else a same-named attribute."""
+def _le(data: bytes, start: int, size: int) -> int:
+    return int.from_bytes(data[start : start + size], "little")
 
-    try:
-        node = group.get(name)
-    except Exception:
-        node = None
-    if node is not None and getattr(node, "shape", None) == ():
-        return _text(node[()])
-    try:
-        return _text(group.attrs.get(name))
-    except Exception:
+
+class _Hdf5Strings:
+    """Scalar strings from one open HDF5 file, read only from that file and bounded.
+
+    h5py walks hard links only: an external link names another file, and a soft
+    link is a path that can run through one. A dataset is read only when its
+    raw data is stored in this file (not HDF5 external storage, which reads any
+    local file, and not a virtual layout, which maps other files). A string is
+    read only when scalar and at most :data:`MAX_HDF5_STRING_BYTES` long. A
+    fixed-length string's size is its datatype's, so h5py may read it once that
+    is checked. A variable-length string's length is a 4-byte field that HDF5
+    allocates and zeroes before checking it against the stored bytes (a 7 KB
+    file can claim 4 GiB), so its length and bytes are read here instead,
+    through the sniff's :class:`_BoundedReader`: from the element (a dataset's
+    raw data or an attribute's object-header message) and the global heap
+    collection it points into. Those reads reach only this file, so a crafted
+    address yields a wrong or missing value, never another file's bytes.
+    """
+
+    def __init__(self, h5py: Any, handle: Any, reader: _BoundedReader) -> None:
+        self._h5py = h5py
+        self._fileno = handle.id.fileno
+        self._reader = reader
+        # File addresses are relative to the superblock (after any user block)
+        # and offset_size or length_size bytes wide.
+        self._base = int(handle.userblock_size)
+        offset_size, length_size = handle.id.get_create_plist().get_sizes()
+        self._offset_size = int(offset_size)
+        self._length_size = int(length_size)
+        self._attributes: dict[int, dict[bytes, bytes]] = {}
+
+    def member(self, group: Any, *names: str) -> Any:
+        """The object at ``group/names...`` when every link on the way is hard."""
+
+        node = group
+        for name in names:
+            try:
+                if not isinstance(node, self._h5py.Group):
+                    return None
+                if not isinstance(node.get(name, getlink=True), self._h5py.HardLink):
+                    return None
+                node = node[name]
+                # Still this file even if it changed between the check and the open.
+                if node.id.fileno != self._fileno:
+                    return None
+            except Exception:
+                return None
+        return node
+
+    def scalar(self, group: Any, name: str) -> str | None:
+        """A scalar dataset under ``group`` (NWB 2.x), else a same-named attribute."""
+
+        value = self._dataset(self.member(group, name))
+        return value if value is not None else self.attribute(group, name)
+
+    def attribute(self, node: Any, name: str) -> str | None:
+        """A scalar string attribute of ``node``."""
+
+        try:
+            if name not in node.attrs:
+                return None
+            attr = node.attrs.get_id(name)
+            size = self._string_size(attr.get_type()) if attr.shape == () else None
+            if size is None:
+                return None
+            if size:
+                return _text(node.attrs[name])
+            header = int(self._h5py.h5o.get_info(node.id).addr)
+        except Exception:
+            return None
+        return _text(self._heap_string(self._attribute_data(header).get(name.encode("utf-8"))))
+
+    def _dataset(self, node: Any) -> str | None:
+        in_file = (self._h5py.h5d.COMPACT, self._h5py.h5d.CONTIGUOUS)
+        try:
+            if not isinstance(node, self._h5py.Dataset):
+                return None
+            plist = node.id.get_create_plist()
+            # Before the shape: a virtual dataset's shape can open its source files.
+            if plist.get_external_count() or plist.get_layout() not in in_file:
+                return None
+            if node.shape != ():
+                return None
+            size = self._string_size(node.id.get_type())
+            if size is None:
+                return None
+            if size:
+                return _text(node[()])
+            # Absolute, unlike other addresses; None for compact or never-written
+            # storage, which NWB writers do not use for strings.
+            offset = node.id.get_offset()
+        except Exception:
+            return None
+        if offset is None:
+            return None
+        return _text(self._heap_string(self._reader.read_at(offset, 8 + self._offset_size)))
+
+    def _string_size(self, type_id: Any) -> int | None:
+        """0 for a variable-length string, a short fixed string's size, else ``None``."""
+
+        if type_id.get_class() != self._h5py.h5t.STRING:
+            return None
+        if type_id.is_variable_str():
+            return 0
+        size = int(type_id.get_size())
+        return size if size <= MAX_HDF5_STRING_BYTES else None
+
+    def _heap_string(self, element: bytes | None) -> bytes | None:
+        """The bytes a variable-length string element points at.
+
+        An element is the length (4 bytes), the global heap collection's address
+        and the object's index (4 bytes); the object must be exactly that long,
+        as HDF5 itself requires.
+        """
+
+        if element is None or len(element) < 8 + self._offset_size:
+            return None
+        length = _le(element, 0, 4)
+        if length > MAX_HDF5_STRING_BYTES:
+            return None
+        if length == 0:
+            return b""
+        collection = self._base + _le(element, 4, self._offset_size)
+        index = _le(element, 4 + self._offset_size, 4)
+        # The collection prefix ("GCOL", version 1, 3 reserved, collection size)
+        # and each object's (index 2, references 2, 4 reserved, size) are both
+        # 8 + length_size bytes padded to 8 (16 for any length_size up to 8);
+        # object data is padded to 8 bytes too.
+        prefix = (8 + self._length_size + 7) // 8 * 8
+        head = self._reader.read_at(collection, prefix)
+        if len(head) < prefix or head[:5] != b"GCOL\x01":
+            return None
+        end = collection + _le(head, 8, self._length_size)
+        position = collection + prefix
+        while position + prefix <= end:
+            entry = self._reader.read_at(position, prefix)
+            entry_index = _le(entry, 0, 2)
+            if len(entry) < prefix or entry_index == 0:  # 0 is the free space
+                return None
+            size = _le(entry, 8, self._length_size)
+            if entry_index == index:
+                if size != length:
+                    return None
+                data = self._reader.read_at(position + prefix, length)
+                return data if len(data) == length else None
+            position += prefix + (size + 7) // 8 * 8
         return None
+
+    def _attribute_data(self, header: int) -> dict[bytes, bytes]:
+        """Attribute name -> raw data, from an object header's attribute messages.
+
+        Attributes in a version 2 header's dense storage and shared attribute
+        messages are not among them, so read as absent.
+        """
+
+        if header not in self._attributes:
+            found: dict[bytes, bytes] = {}
+            for kind, flags, data in self._header_messages(self._base + header):
+                # 0x0C is an attribute; flag 0x02 marks a message stored elsewhere.
+                if kind != 0x0C or flags & 0x02 or len(data) < 8:
+                    continue
+                version = data[0]
+                sizes = [_le(data, 2, 2), _le(data, 4, 2), _le(data, 6, 2)]  # name, type, space
+                if version == 1:
+                    start, sizes = 8, [(size + 7) // 8 * 8 for size in sizes]
+                elif version in (2, 3):
+                    start = 8 if version == 2 else 9  # v3 adds the name's encoding
+                else:
+                    continue
+                name = data[start : start + sizes[0]].split(b"\x00", 1)[0]
+                found.setdefault(name, data[start + sum(sizes) :])
+            self._attributes[header] = found
+        return self._attributes[header]
+
+    def _header_messages(self, address: int) -> Iterator[tuple[int, int, bytes]]:
+        """(type, flags, data) of each message in an object header and its continuations.
+
+        Version 1: a 16-byte prefix whose bytes 8-11 size chunk 0, then messages
+        with an 8-byte header (type 2, size 2, flags 1, 3 reserved); continuation
+        blocks hold bare messages. Version 2: "OHDR", version, flags, optional
+        times and attribute limits, chunk 0's size; messages with a 4-byte header
+        (type 1, size 2, flags 1) and 2 more for creation order when flags has
+        0x04; continuation blocks are "OCHK" + messages + a 4-byte checksum.
+        """
+
+        head = self._reader.read_at(address, 34)  # the longest version 2 prefix
+        if head[:5] == b"OHDR\x02" and len(head) >= 7:
+            flags = head[5]
+            width = 1 << (flags & 0x03)
+            at = 6 + (16 if flags & 0x20 else 0) + (4 if flags & 0x10 else 0)
+            chunks = [(address + at + width, _le(head, at, width))]
+            version_2, message_header = True, 6 if flags & 0x04 else 4
+        elif head[:2] == b"\x01\x00" and len(head) >= 16:
+            chunks = [(address + 16, _le(head, 8, 4))]
+            version_2, message_header = False, 8
+        else:
+            return
+        for _ in range(_MAX_HDF5_HEADER_CHUNKS):
+            if not chunks:
+                return
+            start, size = chunks.pop(0)
+            if not 0 <= size <= _MAX_HDF5_HEADER_CHUNK_BYTES:
+                return
+            chunk = self._reader.read_at(start, size)
+            position = 0
+            while position + message_header <= len(chunk):
+                if version_2:
+                    kind, length = chunk[position], _le(chunk, position + 1, 2)
+                    message_flags = chunk[position + 3]
+                else:
+                    kind, length = _le(chunk, position, 2), _le(chunk, position + 2, 2)
+                    message_flags = chunk[position + 4]
+                data = chunk[position + message_header : position + message_header + length]
+                position += message_header + length
+                if len(data) < length:
+                    break
+                if kind == 0x10 and length >= self._offset_size + self._length_size:
+                    block = self._base + _le(data, 0, self._offset_size)
+                    block_size = _le(data, self._offset_size, self._length_size)
+                    # A version 2 block's messages sit between "OCHK" and the checksum.
+                    chunks.append((block + 4, block_size - 8) if version_2 else (block, block_size))
+                yield kind, message_flags, data
 
 
 def _open_hdf5_unlocked(h5py: Any, path: Path) -> Any:
@@ -618,7 +840,7 @@ def _open_hdf5_unlocked(h5py: Any, path: Path) -> Any:
         return h5py.File(str(path), "r")
 
 
-def _sniff_nwb(_reader: _BoundedReader, path: Path, zone: tzinfo | None) -> FormatFields:
+def _sniff_nwb(reader: _BoundedReader, path: Path, zone: tzinfo | None) -> FormatFields:
     named_nwb = path.name.lower().endswith(".nwb")
     try:
         h5py = importlib.import_module("h5py")
@@ -627,20 +849,20 @@ def _sniff_nwb(_reader: _BoundedReader, path: Path, zone: tzinfo | None) -> Form
             return {FORMAT_SNIFF_ERROR_KEY: "h5py not installed"}
         raise _NotThisFormat() from None
     with _open_hdf5_unlocked(h5py, path) as handle:
-        attrs = handle.attrs
-        neurodata_type = _text(attrs.get("neurodata_type"))
-        nwb_version = _text(attrs.get("nwb_version"))
+        strings = _Hdf5Strings(h5py, handle, reader)
+        neurodata_type = strings.attribute(handle, "neurodata_type")
+        nwb_version = strings.attribute(handle, "nwb_version")
         if not (named_nwb or neurodata_type == "NWBFile" or nwb_version):
             raise _NotThisFormat()
         fields: FormatFields = {}
         if nwb_version:
             fields["format_version"] = _bounded(nwb_version)
         for name in ("session_start_time", "identifier", "session_description"):
-            value = _scalar(handle, name)
+            value = strings.scalar(handle, name)
             if value and value.strip():
                 fields[f"format_{name}"] = _bounded(value)
-        subject = handle.get("general/subject")
-        subject_id = _scalar(subject, "subject_id") if subject is not None else None
+        subject = strings.member(handle, "general", "subject")
+        subject_id = strings.scalar(subject, "subject_id") if subject is not None else None
         if subject_id and subject_id.strip():
             fields["format_subject_id"] = _bounded(subject_id)
     start = parse_iso_datetime(str(fields.get("format_session_start_time", "")))
@@ -658,6 +880,7 @@ __all__ = [
     "KIND_NWB",
     "KIND_OME_TIFF",
     "MAX_FCS_TEXT_BYTES",
+    "MAX_HDF5_STRING_BYTES",
     "MAX_OME_XML_BYTES",
     "MAX_SNIFF_BYTES",
     "MAX_TIFF_IFD_ENTRIES",

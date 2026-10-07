@@ -250,11 +250,14 @@ Operational notes for this deployment:
   mail server, and calendar feeds follow the outbound HTTP policy (a feed on a
   private network needs `LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES` and
   `LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS`).
-- **Store scans** read only what resolution may read: a `local_fs` store must
-  sit inside `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` (mount it into the container,
-  read-only where possible, as described above), and an rclone store's remote
-  must be in `LAB_TRACKER_RCLONE_ALLOWED_REMOTES` with its `rclone.conf`
-  available to the app container.
+- **Store scans** read only what resolution may read: each run revalidates
+  the store's grant in `LAB_TRACKER_STORE_AUTHORITY_GRANTS_JSON` (it needs
+  `list`, plus `bytes_by_path` to hash), so revoking a grant takes effect for
+  scans once every worker has restarted. An rclone store's remote must also be
+  in `LAB_TRACKER_RCLONE_ALLOWED_REMOTES` with its `rclone.conf` available to
+  the app container. `local_fs` scans are refused in this build; to watch a
+  synced folder, register its cloud side (for example `onedrive` or `dropbox`)
+  as an rclone-backed store instead.
 
 ## Backup
 
@@ -391,8 +394,11 @@ from the container and paste it into `Create First Admin`:
 docker compose exec app cat /app/data/runtime-env/bootstrap-admin-token
 ```
 
-The token stops working once the first user exists. Managed platforms without
-shell access can opt into browser display with
-`LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE=first_run` (the Render blueprint
-does); `local` is accepted only when `LAB_TRACKER_ENVIRONMENT=local`, and
-startup fails if it is set anywhere else.
+The token stops working once the first user exists. On managed platforms
+without shell access, set `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN` yourself or read
+the generated value from the platform's environment settings (the Render
+blueprint generates it and keeps `never`).
+`LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE=first_run` returns the token to
+any unauthenticated caller until the first user exists, so do not use it on a
+publicly reachable URL; `local` is accepted only when
+`LAB_TRACKER_ENVIRONMENT=local`, and startup fails if it is set anywhere else.

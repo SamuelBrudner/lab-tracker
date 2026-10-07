@@ -88,6 +88,7 @@ def poll_once(*, only: Sequence[str] | None = None, force: bool = False) -> Poll
             rclone_remote_policy=runtime.rclone_remote_policy,
             process_executor=runtime.process_executor,
             local_store_access=LocalStoreScanAccess(runtime.local_filesystem_operations),
+            store_authority_snapshot_provider=runtime.store_authority_snapshot_provider,
             state=PollState.from_settings(settings),
         )
         return run_due_pollers(capture, trigger="cli", only=only, force=force)

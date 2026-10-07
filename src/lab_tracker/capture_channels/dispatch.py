@@ -49,17 +49,27 @@ from lab_tracker.capture_channels.settings import (
     parse_store_scans,
 )
 from lab_tracker.capture_channels.store_scan import (
+    LOCAL_STORE_SCAN_UNSUPPORTED_MESSAGE,
+    STORE_SCAN_UNAUTHORIZED_MESSAGE,
     LocalStoreScanAccess,
     RcloneStoreAdapter,
     StoreAdapter,
     StoreScanError,
+    adapter_supports_listing,
     run_store_scan,
 )
-from lab_tracker.models import DataStore, StoreKind, utc_now
+from lab_tracker.models import StoreCapability, StoreKind, utc_now
 from lab_tracker.outbound_http import OutboundHttpClient, OutboundHttpPolicy
 from lab_tracker.rclone_remote_policy import RcloneRemotePolicy
 from lab_tracker.rclone_store_definition import is_rclone_store_kind
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
+from lab_tracker.store_authority_use import (
+    DetachedStoreAuthorityBinding,
+    StoreAuthoritySnapshotProvider,
+    StoreAuthorityUseProof,
+    detach_store_authority_binding,
+    revalidate_store_authority_binding,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -107,6 +117,9 @@ class CaptureRuntime:
     rclone_remote_policy: RcloneRemotePolicy
     process_executor: ProcessExecutor
     local_store_access: LocalStoreScanAccess
+    # The fixed startup registry snapshot store scans revalidate against; the
+    # same provider resolution and health use, never a re-read of configuration.
+    store_authority_snapshot_provider: StoreAuthoritySnapshotProvider = field(repr=False)
     state: PollState
     imap_factory: ImapFactory = default_imap_factory
     calendar_fetcher: CalendarFetcher | None = None
@@ -337,18 +350,12 @@ def _run_store_scans(runtime: CaptureRuntime, expired: Expired) -> _Outcome:
         label = f"{scan.store}/{scan.prefix.path if scan.prefix else ''}"
         try:
             with runtime.session_factory() as session:
-                store = SQLAlchemyLabTrackerRepository(session).data_stores.get_by_name(
-                    scan.project_id, scan.store
-                )
-                session.rollback()
-                if store is None:
-                    raise StoreScanError(
-                        "No data store with that name is registered for the project."
-                    )
-                adapter = _store_adapter(runtime, store)
+                binding = _detach_scan_binding(session, scan)
+                authority = _authorize_store_scan(runtime, scan, binding)
+                adapter = _store_adapter(runtime, authority)
                 result = run_store_scan(
                     scan,
-                    store=store,
+                    authority=authority,
                     adapter=adapter,
                     api=runtime.api_for_session(session),
                     actor=runtime.system_actor,
@@ -380,18 +387,82 @@ def _run_store_scans(runtime: CaptureRuntime, expired: Expired) -> _Outcome:
     return outcome
 
 
-def _store_adapter(runtime: CaptureRuntime, store: DataStore) -> StoreAdapter:
+def _detach_scan_binding(session: Session, scan: StoreScan) -> DetachedStoreAuthorityBinding | None:
+    """Select the scan's store, detach its grant binding, then release the read scope.
+
+    The name resolves like ``store://`` resolution (own store first, then the
+    group's) and never falls through to a group store once a project store of
+    that name exists. A kind no adapter can list is reported as such before
+    detaching: the kind is not secret, and kinds the binding rejects (such as
+    ``object_table`` and ``database``) would otherwise surface only as the
+    opaque authorization denial. Past this point the released row is never
+    consulted.
+    """
+
+    store = SQLAlchemyLabTrackerRepository(session).data_stores.get_by_name(
+        scan.project_id, scan.store
+    )
+    unlistable = (
+        store.kind
+        if store is not None
+        and type(store.kind) is StoreKind
+        and not adapter_supports_listing(store.kind)
+        else None
+    )
+    binding = (
+        detach_store_authority_binding(store) if store is not None and unlistable is None else None
+    )
+    session.rollback()
+    if store is None:
+        raise StoreScanError("No data store with that name is registered for the project.")
+    if unlistable is not None:
+        raise StoreScanError(f"Listing is not supported for {unlistable.value} stores.")
+    return binding
+
+
+def _authorize_store_scan(
+    runtime: CaptureRuntime,
+    scan: StoreScan,
+    binding: DetachedStoreAuthorityBinding | None,
+) -> StoreAuthorityUseProof:
+    """Capture one snapshot and revalidate the detached binding, or deny opaquely.
+
+    Every check here is pure: a legacy, corrupt, renamed, capability-short,
+    revoked, changed, or scope-mismatched binding fails before any adapter,
+    filesystem, credential, or subprocess work.
+    """
+
+    if binding is None or binding.definition.name != scan.store:
+        raise StoreScanError(STORE_SCAN_UNAUTHORIZED_MESSAGE)
+    kind = binding.definition.kind
+    if not adapter_supports_listing(kind):
+        raise StoreScanError(f"Listing is not supported for {kind.value} stores.")
+    if StoreCapability.LIST not in binding.capabilities:
+        raise StoreScanError(STORE_SCAN_UNAUTHORIZED_MESSAGE)
+    proof = revalidate_store_authority_binding(runtime.store_authority_snapshot_provider(), binding)
+    if proof is None:
+        raise StoreScanError(STORE_SCAN_UNAUTHORIZED_MESSAGE)
+    return proof
+
+
+def _store_adapter(runtime: CaptureRuntime, authority: StoreAuthorityUseProof) -> StoreAdapter:
     deadline = float(runtime.settings.resolver_subprocess_deadline_seconds)
-    if store.kind is StoreKind.LOCAL_FS:
-        return runtime.local_store_access.adapter(store.root, deadline_seconds=deadline)
-    if is_rclone_store_kind(store.kind):
+    kind = authority.definition.kind
+    if kind is StoreKind.LOCAL_FS:
+        # Local enumeration and hashing stay disabled until the revalidated
+        # grant root is retained inside the filesystem helper (.63.5): the local
+        # adapter checks only the global resolver roots, so an in-grant alias
+        # could list and hash another project's files. Once it is retained,
+        # build ``runtime.local_store_access``'s adapter from ``authority`` here.
+        raise StoreScanError(LOCAL_STORE_SCAN_UNSUPPORTED_MESSAGE)
+    if is_rclone_store_kind(kind):
         return RcloneStoreAdapter(
-            store=store,
+            authority=authority,
             policy=runtime.rclone_remote_policy,
             executor=runtime.process_executor,
             deadline_seconds=deadline,
         )
-    raise StoreScanError(f"Listing is not supported for {store.kind.value} stores.")
+    raise StoreScanError(f"Listing is not supported for {kind.value} stores.")
 
 
 def _scan_log_label(scan: StoreScan) -> str:

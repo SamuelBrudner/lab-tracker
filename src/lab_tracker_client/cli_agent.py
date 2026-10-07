@@ -9,8 +9,10 @@
 
 When stdin carries an agent hook payload (it names a ``hook_event_name``),
 the hook commands print nothing on stdout: Claude Code parses a hook's JSON
-stdout as hook-control output and reports keys it does not know as a hook
-error. Run them by hand (or with ``--dry-run``) to see the JSON payload.
+stdout as hook-control output and drops keys it does not know (they show up
+only in its ``--debug`` log), so the payload would go nowhere. Run them by
+hand (or with ``--dry-run``) to see the JSON payload. The scaffolded
+context hooks answer through :mod:`lab_tracker_client.hook_context`.
 """
 
 from __future__ import annotations

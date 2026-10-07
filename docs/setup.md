@@ -281,7 +281,9 @@ consumer-relevant and a release is the unit a maintainer chose to cut.
 - `lt setup status` reports the same `lt_mcp` check plus a `client` release
   comparison built from its existing `/health` probe (`status`,
   `client_behind_server`, `update_recommended`), and suggests the update only
-  when one is recommended, so the SessionStart hook's `--brief` line names it.
+  when one is recommended, so the SessionStart hook's `--brief` line names it
+  (delivered to the agent as `additionalContext`; see
+  [agent-setup.md](agent-setup.md)).
   The probe has 2-second connect and read timeouts and a 4-second deadline on
   the whole response, headers included, so a server that trickles its headers
   or its body is cut at the deadline (give or take one read) and cannot hold

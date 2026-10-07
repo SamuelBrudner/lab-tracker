@@ -59,6 +59,9 @@ test = [
   # 3.10-3.12+ on Linux, macOS, and Windows).
   "zxing-cpp>=2.3",
   "pillow",
+  # Exercise `lt watch` NWB sniffing (h5py is otherwise optional) against
+  # real HDF5 files, including the crafted ones its security tests build.
+  "h5py",
 ]
 lint = [
   "mypy>=1.15,<3",
@@ -149,6 +152,7 @@ show_error_codes = true
 files = [
   "src/lab_tracker/_version.py",
   "src/lab_tracker_client/_version.py",
+  "src/lab_tracker_client/hook_context.py",
   "src/lab_tracker_client/maintenance.py",
   "src/lab_tracker_client/capture_project.py",
   "src/lab_tracker_client/pipeline_capture.py",
