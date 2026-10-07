@@ -228,9 +228,10 @@ _SKILL_FRONTMATTER = (
     # harness's own permission prompt (the second consent gate).
     'allowed-tools: "Read,Bash(lt setup status:*),Bash(lt setup verify-client:*),'
     'Bash(lt setup verify-mcp:*),Bash(lt doctor:*)"\n'
-    'version: "0.1.0"\n'
-    "compatible-with: claude-code,codex\n"
-    "tags: [lab-tracker, setup, onboarding, capture]\n"
+    "metadata:\n"
+    '  version: "0.1.0"\n'
+    "  compatible-with: claude-code,codex\n"
+    "  tags: [lab-tracker, setup, onboarding, capture]\n"
     "---\n"
 )
 

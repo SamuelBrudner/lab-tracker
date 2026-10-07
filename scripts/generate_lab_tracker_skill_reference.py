@@ -1,4 +1,4 @@
-"""Generate the OpenAPI-derived section of the repo-owned Lab Tracker skill."""
+"""Generate skill references and synchronize the complete packaged skill trees."""
 
 from __future__ import annotations
 
@@ -84,35 +84,58 @@ def main(argv: list[str] | None = None) -> int:
         help="Path to the repo-owned Lab Tracker skill.",
     )
     parser.add_argument(
+        "--package-dir",
+        default="src/lab_tracker/skill_data",
+        help="Package-data destination for complete skill trees.",
+    )
+    parser.add_argument(
         "--check",
         action="store_true",
-        help="Fail if the generated section is not current.",
+        help="Fail if generated references or packaged skill trees are not current.",
     )
     args = parser.parse_args(argv)
 
     skill_path = Path(args.skill_path)
     generated_tools = generate_mcp_tool_list()
     generated_api = generate_reference(build_openapi_schema())
-    current = skill_path.read_text(encoding="utf-8")
-    updated = replace_generated_section(
-        current,
-        MCP_TOOLS_BEGIN_MARKER,
-        MCP_TOOLS_END_MARKER,
-        generated_tools,
-    )
-    updated = replace_generated_section(
-        updated,
-        API_BEGIN_MARKER,
-        API_END_MARKER,
-        generated_api,
-    )
-    if args.check:
-        if updated != current:
-            print(f"{skill_path} has a stale generated API reference.")
-            return 1
-        return 0
-    skill_path.write_text(updated, encoding="utf-8")
-    return 0
+    updates: dict[Path, str] = {}
+    for filename, begin, end, generated in (
+        ("tools.md", MCP_TOOLS_BEGIN_MARKER, MCP_TOOLS_END_MARKER, generated_tools),
+        ("api.md", API_BEGIN_MARKER, API_END_MARKER, generated_api),
+    ):
+        path = skill_path.parent / "references" / filename
+        updates[path] = replace_generated_section(
+            path.read_text(encoding="utf-8"), begin, end, generated
+        )
+    from lab_tracker.setup_guide import setup_skill_markdown
+
+    setup_path = skill_path.parent.parent / "lab-tracker-setup" / "SKILL.md"
+    updates[setup_path] = setup_skill_markdown()
+    package_dir = Path(args.package_dir)
+    package_paths: set[Path] = set()
+    for skill_dir in (skill_path.parent, setup_path.parent):
+        for path in sorted(skill_dir.rglob("*.md")):
+            target = package_dir / skill_dir.name / path.relative_to(skill_dir)
+            package_paths.add(target)
+            updates[target] = updates.get(path, path.read_text(encoding="utf-8"))
+    stale = []
+    for skill_name in (skill_path.parent.name, setup_path.parent.name):
+        for path in sorted((package_dir / skill_name).rglob("*.md")):
+            if path not in package_paths:
+                stale.append(path)
+                if args.check:
+                    print(f"{path} is an obsolete packaged resource.")
+                else:
+                    path.unlink()
+    for path, content in updates.items():
+        if not path.exists() or path.read_text(encoding="utf-8") != content:
+            stale.append(path)
+            if args.check:
+                print(f"{path} is missing or stale.")
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8", newline="\n")
+    return int(bool(stale) and args.check)
 
 
 def build_openapi_schema() -> dict[str, Any]:
@@ -227,7 +250,9 @@ def replace_generated_section(
         raise ValueError(f"Skill file does not contain {begin_marker} markers.")
     before, rest = skill_text.split(begin_marker, 1)
     _, after = rest.split(end_marker, 1)
-    return before.rstrip() + "\n\n" + generated.rstrip() + "\n\n" + after.lstrip("\n")
+    after = after.lstrip("\n")
+    suffix = "\n\n" + after if after else "\n"
+    return before.rstrip() + "\n\n" + generated.rstrip() + suffix
 
 
 def describe_schema(schema: dict[str, Any], components: dict[str, Any]) -> str:

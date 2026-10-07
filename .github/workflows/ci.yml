@@ -46,6 +46,8 @@ jobs:
         run: uv run --frozen ruff check .
       - name: Typecheck Python architecture contracts
         run: uv run --frozen mypy
+      - name: Typecheck isolated skill evaluator
+        run: MYPYPATH=src uv run --frozen mypy scripts/agent_skill_evals scripts/eval-agent-skills.py --follow-imports=silent
       - name: Lint frontend
         run: npm run lint:frontend -- --quiet
       - name: Check frontend OpenAPI declarations

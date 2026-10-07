@@ -58,6 +58,8 @@ from lab_tracker_client.transport import HEALTH_PROBE_DEADLINE_SECONDS
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DOCS = _REPO_ROOT / "docs"
 _SKILL_PATH = _REPO_ROOT / "skills" / "lab-tracker" / "SKILL.md"
+_CAPTURE_REFERENCE_PATH = _SKILL_PATH.parent / "references" / "capture.md"
+_DEVELOPMENT_REFERENCE_PATH = _SKILL_PATH.parent / "references" / "development.md"
 _MCP_SKILLS_DOC = _DOCS / "lab-tracker-mcp-skills.md"
 _AGENT_SETUP_DOC = _DOCS / "agent-setup.md"
 _CLIENT_SETUP_JS = (
@@ -217,7 +219,7 @@ def _scaffold_files_rewritten_by_update(root: Path) -> list[str]:
     ("doc", "section_start"),
     [
         (_DOCS / "setup.md", "### Update a consumer repo after upgrading"),
-        (_SKILL_PATH, "run `lt update` inside a consumer repo"),
+        (_CAPTURE_REFERENCE_PATH, "run `lt update` inside a consumer repo"),
     ],
 )
 def test_lt_update_docs_list_every_rewritten_scaffold_file(
@@ -249,14 +251,16 @@ def test_documented_lt_update_flags_exist() -> None:
     assert "--skills-only" in accepted
     unknown = [
         f"{path.relative_to(_REPO_ROOT)}: {match.group(0).strip()}"
-        for path in (*_maintained_docs(), _SKILL_PATH)
+        for path in (
+            *_maintained_docs(), _SKILL_PATH, *_SKILL_PATH.parent.glob("references/*.md")
+        )
         for match in _LT_UPDATE_INVOCATION.finditer(_read(path))
         if set(_LONG_FLAG.findall(match.group(1))) - accepted
     ]
     assert not unknown, f"documented `lt update` flags that the parser rejects: {unknown}"
 
 
-@pytest.mark.parametrize("doc", [_DOCS / "setup.md", _SKILL_PATH])
+@pytest.mark.parametrize("doc", [_DOCS / "setup.md", _CAPTURE_REFERENCE_PATH])
 def test_lt_update_docs_describe_the_skills_only_refresh(doc: Path) -> None:
     text = " ".join(_read(doc).split())
     assert "`lt update --skills-only`" in text
@@ -277,7 +281,7 @@ _RELATIVE_SKILLS_HOME_QUALIFIER = (
     [
         _read(_DOCS / "setup.md"),
         _read(_AGENT_SETUP_DOC),
-        _read(_SKILL_PATH),
+        _read(_CAPTURE_REFERENCE_PATH),
         _read(_MCP_SKILLS_DOC),
         setup_guide_markdown(),
     ],
@@ -313,14 +317,18 @@ def test_setup_guide_does_not_say_a_bare_lt_update_refreshes_the_skill() -> None
 
 
 @pytest.mark.parametrize(
-    "doc", [_DOCS / "setup.md", _SKILL_PATH], ids=["setup.md", "lab-tracker-skill"]
+    "doc", [_DOCS / "setup.md", _CAPTURE_REFERENCE_PATH],
+    ids=["setup.md", "lab-tracker-capture-reference"]
 )
 def test_lt_update_docs_say_only_install_skills_refreshes_the_skill_with_the_repo(
     doc: Path,
 ) -> None:
     text = " ".join(_read(doc).split())
     assert "Bare `lt update` refreshes the repo's files only" in text
-    assert "`lt update --install-skills` refreshes the skill in addition to the repo" in text
+    assert any(
+        f"`lt update --install-skills` refreshes {skills} in addition to the repo" in text
+        for skills in ("the skill", "both skills")
+    )
 
 
 # The lt-mcp smoke check and the /health probes are bounded, and the prose that
@@ -492,7 +500,7 @@ def test_notes_made_by_hand_or_import_carry_no_release_or_install_id(tmp_path: P
 
 
 # L24/L25: examples must use the sanctioned LPAT, never deprecated login.
-@pytest.mark.parametrize("doc", [_SKILL_PATH, _MCP_SKILLS_DOC])
+@pytest.mark.parametrize("doc", [_DEVELOPMENT_REFERENCE_PATH, _MCP_SKILLS_DOC])
 def test_mcp_environment_examples_use_an_lpat_not_username_password(doc: Path) -> None:
     blocks = [
         block for block in _fenced_blocks(_read(doc), "bash") if "LAB_TRACKER_BASE_URL=" in block
@@ -722,7 +730,7 @@ _SHARED_GUIDANCE_HEADING = "All clients"
 _INIT_USER_LEVEL_SENTENCE = (
     "Any run without `--dry-run` also records the repository in "
     "`~/.lab-tracker/applied-repos.json`, and `--install-skills` additionally writes "
-    "the generated setup skill into the user-level Claude and Codex skill homes "
+    "both skills and supporting references into the user-level Claude and Codex skill homes "
     "(`~/.claude/skills` and `~/.agents/skills`)."
 )
 _CLAUDE_DESKTOP_SUPPORT_STATUS = (

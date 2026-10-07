@@ -32,6 +32,7 @@ from lab_tracker.setup_guide import (
     setup_guide_markdown,
     setup_skill_markdown,
 )
+from lab_tracker.skill_bundle import skill_resources
 from lab_tracker_client import cli as lt_cli
 from lab_tracker_client import registry as repo_registry
 from lab_tracker_client import setup as setup_helpers
@@ -132,9 +133,8 @@ def test_install_skills_renders_refreshes_and_uninstalls(isolated_homes) -> None
 
     install_result = init_consumer_repo(repo, install_skills=True)
     assert skill_path.read_text(encoding="utf-8") == setup_skill_markdown()
-    assert [path for path in install_result.created if path.name == "SKILL.md"] == [
-        skill_path
-    ]
+    assert skill_path in install_result.created
+    assert (skill_path.parent.parent / "lab-tracker" / "SKILL.md") in install_result.created
 
     # Refresh path: a stale copy is rewritten with the original backed up.
     skill_path.write_text("stale text", encoding="utf-8")
@@ -469,7 +469,9 @@ def test_refresh_setup_skills_touches_nothing_but_the_skill_homes(
     paths = _default_skill_paths(default_agent_home)
 
     created = refresh_setup_skills()
-    assert set(created.created) == set(paths.values())
+    assert set(created.created) == {
+        path.parent.parent / p for path in paths.values() for p in skill_resources()
+    }
     for path in paths.values():
         assert path.read_text(encoding="utf-8") == setup_skill_markdown()
 
@@ -484,7 +486,9 @@ def test_refresh_setup_skills_touches_nothing_but_the_skill_homes(
         assert backup.read_text(encoding="utf-8") == f"{name} customised skill"
         assert refreshed.backups[path] == backup
 
-    assert set(refresh_setup_skills().up_to_date) == set(paths.values())
+    assert set(refresh_setup_skills().up_to_date) == {
+        path.parent.parent / p for path in paths.values() for p in skill_resources()
+    }
     assert set(refreshed.as_dict()) == set(InitResult().as_dict())
     assert refreshed.offers == []
     assert refreshed.warnings == []
@@ -508,7 +512,9 @@ def test_refresh_setup_skills_dry_run_writes_nothing(
 
     result = refresh_setup_skills(dry_run=True)
 
-    assert set(result.diffs) == set(paths.values())
+    assert set(result.diffs) == {
+        path.parent.parent / p for path in paths.values() for p in skill_resources()
+    }
     assert paths["claude"].read_text(encoding="utf-8") == "stale claude skill"
     assert not paths["claude"].with_name("SKILL.md.bak-lt-update").exists()
     assert paths["claude"] in result.backups

@@ -17,7 +17,7 @@ def test_repo_owned_lab_tracker_skill_has_current_generated_reference(monkeypatc
     monkeypatch.setenv("LAB_TRACKER_DATABASE_URL", "sqlite+pysqlite:///:memory:")
     monkeypatch.setenv("LAB_TRACKER_FILE_STORAGE_PATH", ".test-file-storage")
     monkeypatch.setenv("LAB_TRACKER_NOTE_STORAGE_PATH", ".test-note-storage")
-    skill_path = Path("skills/lab-tracker/SKILL.md")
+    skill_path = Path("skills/lab-tracker/references/api.md")
 
     current = skill_path.read_text(encoding="utf-8")
     expected = generate_reference(build_openapi_schema())
