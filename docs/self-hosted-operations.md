@@ -125,23 +125,83 @@ tailscale funnel --bg --https=8443 http://127.0.0.1:<host-port>
 it then resumes after a reboot or a Tailscale restart. Public DNS records for a
 new Funnel name can take up to ten minutes to appear.
 
+### Recording the public path
+
+A Funnel failure that happens before the request reaches Lab Tracker, such as a
+TLS handshake that never completes, leaves nothing in the app's logs. The
+host's own evidence ages out quickly: in the one recorded stall, Tailscale's
+logs and the macOS power history no longer covered the time of the report when
+the host was examined. `scripts/funnel_edge_probe.py` keeps that history. Each
+run appends one JSON line recording:
+
+- each public URL, resolved through a public DNS resolver (`1.1.1.1` by
+  default, using `dig`) and checked on every returned address in stages: TCP
+  connect, TLS handshake, then `GET /health`, with timings and the app name
+  and revision that answered;
+- what the host's own resolver returns for the name, which on a tailnet node is
+  usually its tailnet address;
+- `tailscale status` (backend state, whether the node is online, its relay,
+  health messages) and the Serve/Funnel mappings, marking any started without
+  `--bg`;
+- each loopback backend a mapping points at, checked directly; and
+- the host's boot time.
+
+Unlike a plain `curl` on the host, the probe's connections go to Funnel's
+public relay addresses rather than the node's tailnet address, so they exercise
+the relay-to-node path that outside clients use. It cannot see problems on a
+client's own network.
+
+On macOS, install it as a LaunchAgent that runs every five minutes, with one
+`--url` per published port:
+
+```bash
+/usr/bin/python3 scripts/funnel_edge_probe.py install-launchd \
+  --url https://<host>.<tailnet>.ts.net \
+  --url https://<host>.<tailnet>.ts.net:8443
+```
+
+The agent runs a copy of the script from
+`~/Library/Application Support/lab-tracker/`, so switching branches in the
+checkout does not affect it; re-run the command after pulling changes to the
+script. Records go to `~/Library/Logs/lab-tracker/funnel-edge-probe.jsonl`,
+which rotates at 5 MB into numbered `.gz` files, keeping 26 (several months at
+five-minute runs). Add `--no-ipv6` on a host without IPv6, and `--dry-run` to
+print the plist without installing it. On Linux, run the `probe` subcommand
+from cron or a systemd timer; it logs under
+`$XDG_STATE_HOME/lab-tracker/` (default `~/.local/state/lab-tracker/`).
+
+To read the history:
+
+```bash
+/usr/bin/python3 scripts/funnel_edge_probe.py report --since 2026-10-01
+```
+
+The report lists each run of consecutive failures per URL with the failing
+stage, for example `tls_handshake timeout (4/4 addresses)`, together with the
+Tailscale state and any unhealthy backend at the start. It also lists gaps
+with no runs (launchd does not run the agent while the host sleeps or is off),
+reboots, Tailscale state and health changes, and changes to the set of Funnel
+ports.
+
 ### When a client cannot connect
 
 `lt health` prints the failing stage, and `lt setup status` and
 `lt setup connect --base-url <url> --dry-run` return the same `diagnosis`,
 `detail`, and `next_step` (see
 [Diagnose an unavailable connection](agent-setup.md#diagnose-an-unavailable-connection)).
-The client sees only which stage failed. Work through these on the host:
+The client sees only which stage failed. Work through these on the host. If the
+host runs the edge probe ([Recording the public path](#recording-the-public-path)),
+start with its `report` for the time of the failure.
 
 1. **Test the public path, not the host's own view.** From a machine that is not
    on the tailnet (Tailscale stopped, or a phone on cellular), run `lt health`
    or `curl -v --max-time 10 https://<host>.<tailnet>.ts.net:<port>/health`,
    once per published port. In one recorded incident the same name resolved to
    a tailnet address on the host and passed health checks while the public path
-   timed out in TLS, so a passing check run on the host does not show that the
-   public endpoint works. The dedicated-instance release workflow probes
-   `DEDICATED_PUBLIC_BASE_URL` with `curl` from wherever the script runs,
-   normally that host, so it shares that blind spot.
+   timed out in TLS, so a passing check run on the host through its own
+   resolver does not show that the public endpoint works. The dedicated-instance
+   release workflow probes `DEDICATED_PUBLIC_BASE_URL` with `curl` from wherever
+   the script runs, normally that host, so it shares that blind spot.
 2. **Tell a TLS stall from a 502.** Tailscale documents that the node terminates
    TLS for Funnel traffic and passes the decrypted request to the local
    service. So a stopped backend is expected to appear as an HTTP error after
@@ -166,9 +226,13 @@ The client sees only which stage failed. Work through these on the host:
    cheap to check, though a dead backend is expected to show as an HTTP error
    rather than a stalled handshake (step 2).
 5. **Check persistence and prerequisites.** Confirm the Funnel was started with
-   `--bg` and is still listed after a reboot or Tailscale restart. Re-check
-   MagicDNS, HTTPS certificates, and the `funnel` node attribute in the admin
-   console, and that the port is one of 443, 8443, or 10000.
+   `--bg` and is still listed after a reboot or Tailscale restart. A `--bg`
+   mapping resumes only once Tailscale itself runs again, so on a macOS host
+   using the Tailscale app, check that the app's launch-at-login setting is on;
+   on one host checked after a reboot it was off, and the app's process started
+   more than 13 hours after boot. Re-check MagicDNS, HTTPS certificates, and the
+   `funnel` node attribute in the admin console, and that the port is one of
+   443, 8443, or 10000.
 6. **Last resort: reconnect the node.** If steps 3 to 5 look healthy and the
    public path still stalls, `tailscale down` followed by `tailscale up` on the
    host restored the public ports in one recorded incident where refreshing the
