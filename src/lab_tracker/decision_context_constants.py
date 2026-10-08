@@ -50,6 +50,16 @@ COMMIT_CAPTURE_RECOVERY_POLICY = (
     "events."
 )
 
+AGENT_SESSION_CAPTURE_DISCOVERY_POLICY = (
+    "`lt doctor` and `lt setup status` explain optional Claude Code session capture. "
+    "When capture is missing, offer `lt setup agent-hooks --dry-run` so the person "
+    "can review the personal hooks before choosing `lt setup agent-hooks --yes`. "
+    "These hooks stage bounded, redacted session summaries and watched-file captures "
+    "for human review; the full transcript stays local. Delivery requires a bound "
+    "project and a server connection with a Read + stage evidence token. "
+    "Missing optional hooks are advisory, and diagnostics never install them."
+)
+
 AGENT_CONSULTATION_POLICY = f"""# Lab Tracker Agent Consultation Policy
 
 {RESEARCH_FACING_DECISION_POLICY}
@@ -94,6 +104,7 @@ MCP_SERVER_INSTRUCTIONS = " ".join(
         "capture path (figure autotrack for notebooks, scripts, and R; command, "
         "pipeline, and cluster runs; coding-agent sessions; bench and server "
         "channels); read-only `lt setup status` is safe to consult.",
+        AGENT_SESSION_CAPTURE_DISCOVERY_POLICY,
     )
 )
 
@@ -157,6 +168,8 @@ def managed_agent_activation_block() -> str:
             "`--yes`); suggest them to the user rather than applying them "
             "unprompted. The `lab-tracker://setup-guide` MCP resource lists every "
             "optional capture path.",
+            "",
+            AGENT_SESSION_CAPTURE_DISCOVERY_POLICY,
             CLAUDE_BLOCK_END,
             "",
         ]
@@ -222,6 +235,8 @@ def code_facing_idioms(*, symbols: Iterable[str] | None = None) -> str:
         "`lab_tracker_client.integrations`), and `lt capture file <path>` stages "
         "one saved file from any language. Each stages evidence for review; "
         "offer them rather than wrapping commands unasked.",
+        "",
+        AGENT_SESSION_CAPTURE_DISCOVERY_POLICY,
     ]
     if {"savefig", "capture_figures"}.issubset(symbol_set):
         sections.extend(

@@ -137,7 +137,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "Check managed Lab Tracker code-facing idiom blocks, that lt-mcp "
             "can start (a bounded import check in a child interpreter), and "
             "whether this client is behind its server (one bounded /health "
-            "request; an unreachable server is a warning, not a failure)."
+            "request; an unreachable server is a warning, not a failure). "
+            "Also explain optional Claude Code session capture setup."
         ),
     )
     doctor_parser.add_argument(
@@ -2608,6 +2609,8 @@ def _cmd_doctor(args: argparse.Namespace) -> Any:
             ]
             if payload.get("suggestion"):
                 summary["suggestion"] = payload["suggestion"]
+            summary["agent_hooks"] = payload["agent_hooks"]
+            summary["suggestions"] = payload["suggestions"]
         repos.append(summary)
     result: dict[str, Any] = {
         "command": "doctor-all",

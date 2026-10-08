@@ -65,6 +65,9 @@ the person works; setup verbs need their consent (`--dry-run`, then `--yes`).
   drafted into review) and `lt watch touch` (queues a watched file an agent
   writes). Kill switch: `LAB_TRACKER_AGENT_HOOKS=0`. See
   `docs/agent-session-capture.md`.
+  `lt doctor`, `lt doctor --all`, and `lt setup status` explain missing or
+  partial hooks and offer preview and personal installation commands. The
+  notice is optional guidance; diagnostics never enable capture themselves.
 - **Bench, in the web app:** a session's page has its capture QR, an NFC tag
   writer, photo import, a voice debrief, and **Open bench kiosk**; the Devices
   page has the bench kiosk, a hands-free shortcut (`POST
