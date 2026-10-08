@@ -33,6 +33,7 @@ from lab_tracker.capture_channels.cli import add_integrations_parsers, run_integ
 from lab_tracker.config import get_settings
 from lab_tracker.db import get_engine, get_session_factory
 from lab_tracker.decision_context_constants import (
+    AGENT_SESSION_CAPTURE_DISCOVERY_POLICY,
     AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN,
     AGENTS_CODE_CONVENTIONS_BLOCK_END,
     CLAUDE_BLOCK_BEGIN,
@@ -1370,6 +1371,8 @@ def _extract_version_line(
 
 
 def _doctor(target: str | Path = ".") -> dict[str, object]:
+    from lab_tracker_client.setup import _agent_hooks_status, agent_capture_suggestions
+
     root = Path(target).expanduser().resolve()
     body = code_facing_idioms()
     version_line = code_conventions_version_line(body)
@@ -1428,6 +1431,9 @@ def _doctor(target: str | Path = ".") -> dict[str, object]:
         "code_facing_idioms": body,
         "targets": targets,
     }
+    agent_hooks = _agent_hooks_status(root)
+    payload["agent_hooks"] = agent_hooks
+    payload["suggestions"] = agent_capture_suggestions(agent_hooks)
     if any(target["drifted"] for target in targets):
         payload["suggestion"] = (
             "Managed blocks differ from the installed package text; "
@@ -1580,6 +1586,8 @@ def _agents_fragment() -> str:
         `lt hooks install`, `lt setup autotrack`, `lt setup schedule`, and
         `lt setup agent-hooks` also require `--yes`; suggest them to the user
         rather than applying them unprompted.
+
+        {AGENT_SESSION_CAPTURE_DISCOVERY_POLICY}
 
         Capture that needs no code changes, once this checkout is bound to a
         project: `lt setup autotrack` captures figures notebooks save or

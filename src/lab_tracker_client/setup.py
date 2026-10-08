@@ -551,6 +551,7 @@ def _suggestions(status: JsonObject) -> list[str]:
             "Lab Tracker skill files or supporting references are missing or stale; "
             f"`lt update --skills-only` refreshes both complete skills {_SKILLS_ONLY_SCOPE_NOTE}"
         )
+    suggestions.extend(agent_capture_suggestions(status.get("agent_hooks", {})))
     return suggestions
 
 
@@ -1395,13 +1396,52 @@ def _session_status(root: Path) -> JsonObject:
 
 
 def _agent_hooks_status(root: Path) -> JsonObject:
-    """Whether `lt setup agent-hooks` entries are present; an opt-in, never suggested."""
+    """Read-only inventory of the optional Claude Code capture hooks."""
 
     from lab_tracker_client.agent_hooks import agent_hooks_status
+    from lab_tracker_client.agent_session import agent_hooks_enabled
 
     with suppress(Exception):
-        return agent_hooks_status(root)
+        return {**agent_hooks_status(root), "enabled": agent_hooks_enabled()}
     return {"installed": False, "session_end": False, "watch_touch": False, "files": []}
+
+
+def agent_capture_suggestions(hooks: JsonObject) -> list[str]:
+    """Explain optional capture without installing it or treating it as an error."""
+
+    if hooks.get("enabled") is False:
+        return [
+            "Optional Claude Code agent capture is disabled by LAB_TRACKER_AGENT_HOOKS. "
+            "Leave it disabled, or remove that override if you want session summaries "
+            "and watched-file captures to reach the review inbox."
+        ]
+    if any(item.get("error") for item in hooks.get("files", [])):
+        return [
+            "Claude Code capture settings could not be read; repair the settings errors "
+            "shown in agent_hooks.files, then rerun `lt doctor` or `lt setup status`."
+        ]
+    if hooks.get("installed"):
+        return []
+    if hooks.get("session_end"):
+        detail = "Claude Code session capture is installed, but watched-file capture is missing."
+    elif hooks.get("watch_touch"):
+        detail = "Claude Code watched-file capture is installed, but session capture is missing."
+    else:
+        detail = (
+            "Optional Claude Code agent capture is not installed; session summaries "
+            "are not sent to the review inbox automatically."
+        )
+    return [
+        f"{detail} If you want this capture, run from this repository: "
+        "`lt setup agent-hooks --dry-run` to review the changes, then "
+        "`lt setup agent-hooks --yes` to install in your personal "
+        ".claude/settings.local.json. This captures a bounded, redacted summary of "
+        "prompts, edits, commands, and test results when a session ends, plus files "
+        "written into configured watch folders; the full transcript stays local. "
+        "Delivery requires a bound project and a server connection with a "
+        "Read + stage evidence token; `lt setup status` checks setup prerequisites. "
+        "Captures remain staged for human review."
+    ]
 
 
 def _hooks_status(root: Path) -> JsonObject:

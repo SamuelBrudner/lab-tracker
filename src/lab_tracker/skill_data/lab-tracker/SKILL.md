@@ -64,6 +64,16 @@ attachment failure without claiming the graph write rolled back.
 Notes have `staged`, `committed`, and `archived` statuses. Questions are the
 reasoning layer; concrete execution tasks stay in the repository's issue tracker.
 
+## Capture Surfaces
+
+`lt doctor` and `lt setup status` explain missing optional Claude Code session
+capture and show `lt setup agent-hooks --dry-run` followed by the person's choice
+of `lt setup agent-hooks --yes`. Offer that preview when capture is wanted;
+diagnostics never install the hooks. They stage redacted session summaries and
+watched-file captures for human review, with a bound project and a Read + stage
+evidence connection required for delivery. The full transcript stays local.
+See [capture and integration](references/capture.md) for every capture path.
+
 ## Load details for the current workflow
 
 Resolve these links relative to this skill directory. Read only the reference

@@ -27,6 +27,11 @@ read-only and lists what is and is not set up on this machine and repository.
 A coding agent with the `lab-tracker-setup` skill can walk you through the
 rest one approved command at a time.
 
+`lt doctor` also explains optional Claude Code session capture when it is missing
+or only partly installed, with preview and personal installation commands.
+The same guidance appears in `lt setup status` and in each repository checked by
+`lt doctor --all`. These checks never enable capture themselves.
+
 ## At the bench
 
 | You want to... | Use | Guide |

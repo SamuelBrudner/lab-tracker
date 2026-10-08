@@ -143,6 +143,11 @@ short, consent-gated sequence on the `lt` CLI.
     writes the committed `.claude/settings.json` instead, which would
     capture the sessions of everyone who clones the repository, so it
     is a team decision rather than a setup default.
+    `lt doctor` and `lt setup status` explain missing or partial hooks
+    and show the preview and personal installation commands. These
+    are optional suggestions, never automatic installation or doctor
+    failures. Delivery needs a bound project and a server connection
+    with a Read + stage evidence token.
 13. **Runs and pipelines (optional, nothing to install)** — once the
     project is bound, `lt run --output <dir> -- <command>` records an
     analysis command (redacted command line, git and working-copy state,
@@ -205,4 +210,4 @@ change.
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.3.0 sha256=1cb97be4d733 -->
+<!-- lab-tracker-setup-guide version=0.3.0 sha256=9531f24931d2 -->
