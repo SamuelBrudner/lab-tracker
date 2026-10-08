@@ -109,6 +109,7 @@ def test_setup_readiness_requires_auth_and_never_returns_provider_secret(
     _bootstrap_database(monkeypatch, tmp_path)
     monkeypatch.setenv("LAB_TRACKER_GRAPH_DRAFT_PROVIDER", "openai")
     monkeypatch.setenv("LAB_TRACKER_OPENAI_API_KEY", "super-secret-provider-key")
+    monkeypatch.setenv("LAB_TRACKER_OPENAI_MODEL", "gpt-4o-mini")
     monkeypatch.setenv("LAB_TRACKER_GRAPH_DRAFT_SCHEDULER_ENABLED", "true")
     monkeypatch.setenv("LAB_TRACKER_GRAPH_DRAFT_BACKGROUND_ENABLED", "false")
     monkeypatch.setenv(
@@ -128,7 +129,16 @@ def test_setup_readiness_requires_auth_and_never_returns_provider_secret(
         )
 
     assert response.status_code == 200
-    assert response.json()["data"] == {
+    data = response.json()["data"]
+    models = data.pop("ai_models")
+    assert {item["setting"] for item in models} == {
+        "LAB_TRACKER_OPENAI_MODEL", "LAB_TRACKER_OPENAI_TRANSCRIPTION_MODEL",
+    }
+    assert all(item["availability"]["status"] == "not_checked" for item in models)
+    assert models[0]["configured_model"] == "gpt-4o-mini"
+    assert models[0]["recommended_model"] == "gpt-6.1-sol"
+    assert models[0]["currency"] == "superseded"
+    assert data == {
         "scheduler_enabled": True,
         "background_worker_enabled": True,
         "provider": "openai",
@@ -233,7 +243,10 @@ def test_setup_readiness_normalizes_provider_and_reports_runtime_flags(
         )
 
     assert response.status_code == 200
-    assert response.json()["data"] == {
+    data = response.json()["data"]
+    models = data.pop("ai_models")
+    assert all(item["provider"] == expected_provider for item in models)
+    assert data == {
         "scheduler_enabled": scheduler_enabled,
         "background_worker_enabled": expected_background_worker_enabled,
         "provider": expected_provider,
@@ -1024,6 +1037,8 @@ def test_concurrent_revocation_and_acceptance_have_one_winner(monkeypatch, tmp_p
 
 
 def test_invitation_defaults_to_editor_and_warns_for_local_base_url(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LAB_TRACKER_BASE_URL", raising=False)
     _bootstrap_database(monkeypatch, tmp_path)
     with TestClient(create_app(), base_url="http://127.0.0.1:8000") as client:
         _seed_admin(client)

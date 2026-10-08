@@ -68,6 +68,34 @@ function ReadinessStatus({ readiness, error }) {
             : "Needs operator setup"}
         </span>
       </div>
+      {(readiness.ai_models || []).map((model) => (
+        <div key={model.setting} className="stack">
+          <div className="row-between">
+            <span>
+              {model.workloads.includes("note_graph_draft") ? "Draft model" : "Transcription model"}
+              {": "}{model.configured_model}
+            </span>
+            <span className="pill">
+              {model.review_overdue
+                ? "Review overdue"
+                : model.currency === "recommended"
+                  ? "Reviewed choice"
+                  : model.currency === "superseded"
+                    ? "Upgrade available"
+                    : "Needs model review"}
+            </span>
+          </div>
+          <p className={model.review_overdue || model.currency !== "recommended" ? "warn" : "subtle"}>
+            {model.currency === "superseded"
+              ? `Ask the host operator to update to ${model.recommended_model}. `
+              : model.currency === "unreviewed" || model.currency === "custom_endpoint"
+                ? "Ask the host operator to review this model for this server. "
+                : ""}
+            Recommendation reviewed {model.reviewed_on}; next review due {model.review_due_on}.
+          </p>
+          {(model.warnings || []).map((warning) => <p className="warn" key={warning}>{warning}</p>)}
+        </div>
+      ))}
       <p className={automationReady ? "subtle" : "warn"}>
         {automationReady
           ? "Automatic drafting is ready. Reviews still require a person to accept changes."

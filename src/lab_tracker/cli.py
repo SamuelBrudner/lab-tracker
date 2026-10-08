@@ -883,6 +883,19 @@ def main(argv: list[str] | None = None) -> None:
         default=".",
         help="Consumer repo path to inspect. Defaults to the current directory.",
     )
+    models_parser = subcommands.add_parser(
+        "models",
+        help="Audit configured AI models against dated, source-backed recommendations.",
+    )
+    models_parser.add_argument(
+        "--check-availability", action="store_true",
+        help="Query provider model metadata using configured credentials; no inference calls.",
+    )
+    models_parser.add_argument(
+        "--strict", action="store_true",
+        help="Exit 1 if an active model needs review or an explicit availability check fails.",
+    )
+    models_parser.add_argument("--json", action="store_true", help="Print the full model audit.")
     backup_parser = subcommands.add_parser(
         "backup",
         help="Create a SQLite backup snapshot with the online backup API.",
@@ -985,6 +998,36 @@ def main(argv: list[str] | None = None) -> None:
         payload = _doctor(args.target)
         print(json.dumps(payload, indent=2))
         if _doctor_exit_code(payload):
+            raise SystemExit(1)
+    elif args.command == "models":
+        from lab_tracker.ai_model_audit import audit_ai_models
+
+        audit = audit_ai_models(get_settings(), check_availability=args.check_availability)
+        if args.json:
+            print(json.dumps(audit.as_dict(), indent=2))
+        else:
+            for model in audit.models:
+                active = "active" if model.active else "inactive"
+                print(f"{model.setting}={model.configured_model} ({active}, {model.currency})")
+                print(
+                    f"  Recommended: {model.recommended_model}; review due: {model.review_due_on}"
+                )
+                if model.review_overdue:
+                    print("  Recommendation review is overdue; check the official source.")
+                print(f"  Source: {model.source_url}")
+                for warning in model.warnings:
+                    print(f"  {warning}")
+                if args.check_availability:
+                    print(f"  Configured model metadata: {model.availability.status}")
+                    print(
+                        "  Recommended model metadata: "
+                        f"{model.recommendation_availability.status}"
+                    )
+            print(
+                "Model metadata access does not verify billing, graph quality "
+                "or inference readiness."
+            )
+        if args.strict and audit.attention_needed:
             raise SystemExit(1)
     elif args.command == "backup":
         settings = get_settings()

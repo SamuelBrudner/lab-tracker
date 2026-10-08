@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lab-tracker"
-version = "0.2.0"
+version = "0.3.0"
 description = "Human-gated research provenance for questions, evidence, analyses, claims, and figures"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -199,6 +199,8 @@ files = [
   "src/lab_tracker/services/graph_draft_capture_setup.py",
   "src/lab_tracker/capture_setup_catalog.py",
   "src/lab_tracker/provider_error_redaction.py",
+  "src/lab_tracker/ai_model_catalog.py",
+  "src/lab_tracker/ai_model_audit.py",
   "src/lab_tracker/client_release.py",
   "src/lab_tracker/capture_client_release.py",
   "src/lab_tracker/deployment_probe.py",

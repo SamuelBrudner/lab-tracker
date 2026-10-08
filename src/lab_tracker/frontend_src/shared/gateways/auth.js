@@ -31,6 +31,8 @@ import {
 /** @typedef {import("../../generated/openapi.js").operations["update_auth_user_auth_users__user_id__patch"]["responses"][200]["content"]["application/json"]["data"]} UpdatedAuthUser */
 /** @typedef {CurrentAuthUser & ListedAuthUser & UpdatedAuthUser} AuthUserRead */
 /** @typedef {import("../../generated/openapi.js").operations["auth_setup_readiness_auth_setup_readiness_get"]["responses"][200]["content"]["application/json"]["data"]} AuthSetupReadiness */
+/** @typedef {NonNullable<AuthSetupReadiness["ai_models"]>[number]} AIModelStatus */
+/** @typedef {NonNullable<AIModelStatus["availability"]>} ModelAvailability */
 /** @typedef {import("../../generated/openapi.js").operations["consume_enrollment_auth_devices_consume_post"]["responses"][201]["content"]["application/json"]["data"]} DeviceConsumeRead */
 /** @typedef {import("../../generated/openapi.js").operations["create_enrollment_auth_devices_enrollment_post"]["responses"][201]["content"]["application/json"]["data"]} DeviceEnrollmentRead */
 /** @typedef {import("../../generated/openapi.js").operations["list_devices_auth_devices_get"]["responses"][200]["content"]["application/json"]["data"][number]} ListedDeviceToken */
@@ -82,6 +84,35 @@ const authBootstrapStatusShape = object({
 
 const authMeMetaShape = object({ auth_enabled: boolean });
 
+const modelAvailabilityShape = object({
+  status: /** @type {import("../contract.js").Validator<NonNullable<ModelAvailability["status"]>>} */ (
+    oneOf("not_checked", "credential_missing", "available", "unavailable", "error")
+  ),
+  resolved_model: nullish(string),
+  checked_at: nullish(string),
+  message: nullish(string),
+});
+
+const aiModelStatusShape = object({
+  provider: string,
+  setting: string,
+  workloads: arrayOf(string),
+  active: boolean,
+  configured_model: string,
+  recommended_model: string,
+  currency: /** @type {import("../contract.js").Validator<AIModelStatus["currency"]>} */ (
+    oneOf("recommended", "superseded", "unreviewed", "custom_endpoint")
+  ),
+  reviewed_on: string,
+  review_due_on: string,
+  review_overdue: boolean,
+  source_url: string,
+  rationale: string,
+  warnings: optional(arrayOf(string)),
+  availability: optional(modelAvailabilityShape),
+  recommendation_availability: optional(modelAvailabilityShape),
+});
+
 /** @satisfies {AuthSetupReadinessValidator} */
 const authSetupReadinessShape = object({
   background_worker_enabled: boolean,
@@ -89,6 +120,7 @@ const authSetupReadinessShape = object({
   provider_credential_configured: boolean,
   scheduler_enabled: boolean,
   source_revision: string,
+  ai_models: optional(arrayOf(aiModelStatusShape)),
 });
 
 /** @satisfies {AuthInvitationValidator} */

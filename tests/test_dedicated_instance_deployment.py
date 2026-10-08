@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -196,9 +197,18 @@ def test_deployment_scripts_are_executable() -> None:
 
 
 def test_deployment_material_has_no_private_instance_identifiers() -> None:
+    # Audit publishable files, including new templates, without reading ignored
+    # operator credentials and private runtime configuration from this checkout.
+    paths = subprocess.run(
+        [
+            "git", "ls-files", "--cached", "--others", "--exclude-standard", "-z",
+            "--", str(DEPLOYMENT_ROOT.relative_to(REPO_ROOT)),
+        ],
+        cwd=REPO_ROOT, check=True, capture_output=True, text=True,
+    ).stdout.split("\0")
     deployment_material = "\n".join(
         path.read_text(encoding="utf-8")
-        for path in sorted(DEPLOYMENT_ROOT.rglob("*"))
+        for path in sorted(REPO_ROOT / name for name in paths if name)
         if path.is_file()
     ).lower()
     forbidden = (
