@@ -205,4 +205,4 @@ change.
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.2.0 sha256=1cb97be4d733 -->
+<!-- lab-tracker-setup-guide version=0.3.0 sha256=1cb97be4d733 -->
