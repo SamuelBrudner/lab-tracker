@@ -33,6 +33,7 @@ from lab_tracker.setup_guide import (
     setup_skill_markdown,
 )
 from lab_tracker.skill_bundle import skill_resources
+from lab_tracker_client import agent_hooks
 from lab_tracker_client import cli as lt_cli
 from lab_tracker_client import registry as repo_registry
 from lab_tracker_client import setup as setup_helpers
@@ -593,6 +594,7 @@ def test_status_suggestions_and_brief(isolated_homes, monkeypatch, capsys) -> No
 def test_status_brief_healthy_is_one_line(isolated_homes, monkeypatch, capsys) -> None:
     repo = isolated_homes / "consumer-healthy"
     init_consumer_repo(repo, yes=True, install_skills=True)
+    agent_hooks.install_agent_hooks(repo)
     (repo / "lt_ids.json").write_text(
         json.dumps({"project_id": "p-1", "project_name": "demo"}), encoding="utf-8"
     )
@@ -604,8 +606,8 @@ def test_status_brief_healthy_is_one_line(isolated_homes, monkeypatch, capsys) -
 
     lt_cli.main(["setup", "status", "--target", str(repo), "--brief"])
     brief = json.loads(capsys.readouterr().out)
-    # Not a git repo and no hook: no hook suggestions; everything else is
-    # configured, so brief reports a healthy line.
+    # No git commit-hook suggestion outside a git repo; optional agent hooks
+    # are already configured, so brief reports a healthy line.
     assert brief["suggestions"] == []
     assert brief["brief"].startswith("lab-tracker: capture is configured")
 
@@ -632,6 +634,7 @@ def broken_mcp_install(tmp_path, monkeypatch):
 def _healthy_status_repo(isolated_homes, monkeypatch, name: str) -> Path:
     repo = isolated_homes / name
     init_consumer_repo(repo, yes=True, install_skills=True)
+    agent_hooks.install_agent_hooks(repo)
     (repo / "lt_ids.json").write_text(
         json.dumps({"project_id": "p-1", "project_name": "demo"}), encoding="utf-8"
     )

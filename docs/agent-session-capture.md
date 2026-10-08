@@ -19,10 +19,15 @@ implemented slice of the
 ## Set it up (one consented command)
 
 Capturing agent conversations is its own opt-in. `lt setup init` never adds
-these hooks, and `lt setup status` only reports whether they are installed
-(`agent_hooks`); it never suggests them.
+these hooks. `lt doctor` and `lt setup status` report whether they are installed
+(`agent_hooks`) and explain how to preview and enable missing or partial capture.
+`lt doctor --all` includes the same guidance for each registered repository.
+Missing optional hooks do not fail the doctor check, and diagnostics never
+install them. The notice explains what is captured and that delivery requires a
+bound project and a server connection with a **Read + stage evidence** token.
 
 ```bash
+lt doctor                          # read-only capture guidance and diagnostics
 lt setup agent-hooks --dry-run     # show the .claude/settings.local.json diff
 lt setup agent-hooks --yes         # apply it, for you alone
 lt setup agent-hooks --uninstall --yes

@@ -264,6 +264,11 @@ def test_null_hooks_count_as_empty(tmp_path: Path, capsys, seed: dict, extra: li
 def _git_repo(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "-q", str(path)], check=True)  # noqa: S603, S607
+    # The developer's global ignore may already hide settings.local.json.
+    subprocess.run(  # noqa: S603, S607
+        ["git", "-C", str(path), "config", "core.excludesFile", str(path / "no-global-ignore")],
+        check=True,
+    )
     return path
 
 
@@ -338,7 +343,7 @@ def test_lt_update_leaves_a_personal_install_out_of_the_shared_file(
 
 
 @pytest.mark.parametrize(("extra", "scope"), [([], "local"), (["--shared"], "shared")])
-def test_setup_status_detects_hooks_in_either_file_without_suggesting_them(
+def test_setup_status_guides_optional_capture_and_stays_quiet_after_install(
     scaffolded: Path, monkeypatch, capsys, extra: list[str], scope: str
 ) -> None:
     monkeypatch.setattr(setup_helpers, "probe_health_diagnostics", lambda _url: {"reachable": True})
@@ -346,7 +351,15 @@ def test_setup_status_detects_hooks_in_either_file_without_suggesting_them(
     before = setup_helpers.setup_status(scaffolded)
     assert before["agent_hooks"]["installed"] is False
     assert before["agent_hooks"]["scopes"] == []
-    assert not any("agent-hooks" in item for item in before["suggestions"])
+    [notice] = [item for item in before["suggestions"] if "agent-hooks" in item]
+    assert "Optional Claude Code" in notice
+    assert "lt setup agent-hooks --dry-run" in notice
+    assert "lt setup agent-hooks --yes" in notice
+    assert "settings.local.json" in notice
+    assert "Read + stage evidence" in notice
+    assert not _path(scaffolded, LOCAL).exists()
+    lt_cli.main(["setup", "status", "--target", str(scaffolded), "--brief"])
+    assert notice in json.loads(capsys.readouterr().out)["suggestions"]
 
     _run(capsys, "--target", str(scaffolded), "--yes", *extra)
     after = setup_helpers.setup_status(scaffolded)
@@ -355,6 +368,86 @@ def test_setup_status_detects_hooks_in_either_file_without_suggesting_them(
     assert after["agent_hooks"]["watch_touch"] is True
     assert after["agent_hooks"]["scopes"] == [scope]
     assert not any("agent-hooks" in item for item in after["suggestions"])
+
+
+@pytest.mark.usefixtures("offline_server")
+@pytest.mark.parametrize("existing", [None, "SessionEnd", "PostToolUse"])
+def test_doctor_guides_missing_or_partial_capture_without_writing_or_failing(
+    scaffolded: Path, capsys, existing: str | None
+) -> None:
+    if existing:
+        managed = (
+            agent_hooks.SESSION_END_HOOK
+            if existing == "SessionEnd"
+            else agent_hooks.WATCH_TOUCH_HOOK
+        )
+        _path(scaffolded, LOCAL).write_text(json.dumps({"hooks": {existing: [managed.group()]}}))
+    before = {path.name: path.read_bytes() for path in (scaffolded / ".claude").iterdir()}
+
+    lt_cli.main(["doctor", "--target", str(scaffolded)])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["agent_hooks"]["installed"] is False
+    [notice] = payload["suggestions"]
+    assert "lt setup agent-hooks --dry-run" in notice
+    assert "lt setup agent-hooks --yes" in notice
+    assert "full transcript stays local" in notice
+    if existing:
+        assert "capture is missing" in notice
+    else:
+        assert "not installed" in notice
+    assert {path.name: path.read_bytes() for path in (scaffolded / ".claude").iterdir()} == before
+
+
+@pytest.mark.usefixtures("offline_server")
+def test_doctor_all_preserves_capture_guidance_per_repository(
+    scaffolded: Path, tmp_path, capsys
+) -> None:
+    installed = tmp_path / "installed"
+    init_consumer_repo(installed)
+    _run(capsys, "--target", str(installed), "--yes")
+
+    lt_cli.main(["doctor", "--all"])
+    payload = json.loads(capsys.readouterr().out)
+    by_root = {Path(item["root"]): item for item in payload["repos"]}
+
+    assert by_root[scaffolded]["agent_hooks"]["installed"] is False
+    assert "lt setup agent-hooks --dry-run" in by_root[scaffolded]["suggestions"][0]
+    assert by_root[installed]["agent_hooks"]["installed"] is True
+    assert by_root[installed]["suggestions"] == []
+    assert not _path(scaffolded, LOCAL).exists()
+
+
+@pytest.mark.usefixtures("offline_server")
+def test_doctor_reports_disabled_capture_instead_of_reinstallation(
+    scaffolded: Path, monkeypatch, capsys
+) -> None:
+    _run(capsys, "--target", str(scaffolded), "--yes")
+    monkeypatch.setenv("LAB_TRACKER_AGENT_HOOKS", "0")
+
+    lt_cli.main(["doctor", "--target", str(scaffolded)])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["agent_hooks"]["installed"] is True
+    assert payload["agent_hooks"]["enabled"] is False
+    [notice] = payload["suggestions"]
+    assert "disabled by LAB_TRACKER_AGENT_HOOKS" in notice
+    assert "agent-hooks --yes" not in notice
+
+
+@pytest.mark.usefixtures("offline_server")
+def test_doctor_reports_unreadable_capture_settings_before_installation(
+    scaffolded: Path, capsys
+) -> None:
+    broken = "{not json"
+    _path(scaffolded, LOCAL).write_text(broken)
+
+    lt_cli.main(["doctor", "--target", str(scaffolded)])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert any(item.get("error") for item in payload["agent_hooks"]["files"])
+    assert "repair the settings errors" in payload["suggestions"][0]
+    assert _path(scaffolded, LOCAL).read_text() == broken
 
 
 def test_managed_hook_identity_is_by_command() -> None:
