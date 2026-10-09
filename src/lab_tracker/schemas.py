@@ -22,6 +22,7 @@ from pydantic import (
 from pydantic.json_schema import SkipJsonSchema
 from pydantic_core import CoreSchema, core_schema
 
+from lab_tracker.ai_model_audit import AIModelStatus
 from lab_tracker.auth import Role
 from lab_tracker.claim_effective_status import ClaimInterpretation
 from lab_tracker.data_store_definition import (
@@ -446,6 +447,7 @@ class AuthSetupReadiness(BaseModel):
     provider: str
     provider_credential_configured: bool
     source_revision: str
+    ai_models: list[AIModelStatus] = Field(default_factory=list)
 
 
 class AuthTokenRead(BaseModel):

@@ -16,6 +16,7 @@ from typing import Any, Protocol, TypeAlias, runtime_checkable
 
 import httpx
 
+from lab_tracker.ai_model_catalog import OPENAI_TRANSCRIPTION
 from lab_tracker.capture_setup_catalog import (
     CANDIDATES_PACKET_KEY,
     RESPONSE_FIELD,
@@ -392,7 +393,7 @@ class OpenAIGraphDraftClient:
         model: str,
         reasoning_effort: str | None = None,
         reasoning_mode: str | None = None,
-        transcription_model: str = "gpt-4o-mini-transcribe",
+        transcription_model: str = OPENAI_TRANSCRIPTION.recommended_model,
         base_url: str = "https://api.openai.com/v1",
         timeout_seconds: float = 60.0,
         transport: httpx.BaseTransport | None = None,

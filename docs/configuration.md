@@ -837,25 +837,27 @@ otherwise bounded and provider-side spending limits are acceptable. Exact
 - `LAB_TRACKER_OPENAI_API_KEY`: required when the provider is `openai` and for
   OpenAI voice-note transcription
 - `LAB_TRACKER_OPENAI_MODEL`: OpenAI model for graph drafts (default:
-  `gpt-4o-mini`; set another compatible model to override)
+  `gpt-6.1-sol`; set another compatible model to override)
 - `LAB_TRACKER_OPENAI_REASONING_EFFORT`: optional Responses API reasoning
   effort for graph drafts (`none`, `low`, `medium`, `high`, `xhigh`, or
-  `max`; omitted by default)
+  `max`; omitted by default). GPT-6.1 Sol accepts `low` through `max` and
+  rejects `none`; omitting the setting uses the model’s default `medium`
 - `LAB_TRACKER_OPENAI_REASONING_MODE`: optional Responses API reasoning mode
   for graph drafts (`standard` or `pro`; omitted by default). For a
-  quality-first GPT-5.6 Sol deployment, use model `gpt-5.6-sol`, effort
-  `max`, and mode `pro`. Codex Ultra is a separate agent-orchestration mode,
+  quality-first deployment, the default model is `gpt-6.1-sol`; leave mode
+  unset unless the chosen model explicitly supports it. Codex Ultra is a
+  separate agent-orchestration mode,
   not an API reasoning value.
 - `LAB_TRACKER_OPENAI_TRANSCRIPTION_MODEL`: OpenAI model for voice-note
   transcription (default: `gpt-4o-mini-transcribe`)
 - `LAB_TRACKER_OPENAI_BASE_URL`: OpenAI API base URL (default:
   `https://api.openai.com/v1`)
 - `LAB_TRACKER_OPENAI_TIMEOUT_SECONDS`: OpenAI graph draft API timeout in
-  seconds (default: `60`)
+  seconds (default: `300`, allowing time for reasoning and structured output)
 - `LAB_TRACKER_ANTHROPIC_API_KEY`: required when the provider is `anthropic` or
   `claude`
 - `LAB_TRACKER_ANTHROPIC_MODEL`: Anthropic model for graph drafts (default:
-  `claude-3-5-sonnet-latest`)
+  `claude-sonnet-5-5`)
 - `LAB_TRACKER_ANTHROPIC_BASE_URL`: Anthropic API base URL (default:
   `https://api.anthropic.com/v1`)
 - `LAB_TRACKER_ANTHROPIC_TIMEOUT_SECONDS`: Anthropic graph draft API timeout in
@@ -871,11 +873,16 @@ otherwise bounded and provider-side spending limits are acceptable. Exact
 - `LAB_TRACKER_GOOGLE_API_KEY`: required when the provider is `google` or
   `gemini`; also required for Google voice-note transcription
 - `LAB_TRACKER_GOOGLE_MODEL`: Google Gemini model for graph drafts and
-  transcription (default: `gemini-2.5-flash`)
+  transcription (default: `gemini-3.8-flash`)
 - `LAB_TRACKER_GOOGLE_BASE_URL`: Google Generative Language API base URL
   (default: `https://generativelanguage.googleapis.com/v1beta`)
 - `LAB_TRACKER_GOOGLE_TIMEOUT_SECONDS`: Google graph draft API timeout in
   seconds (default: `60`)
+
+Model choices are centralized in a dated registry. `lab-tracker models --json`
+reports every AI use, configured overrides, reviewed recommendations and review
+due dates. `--check-availability` explicitly queries model metadata; ordinary
+Setup reads never call a provider. See [AI model maintenance](ai-models.md).
 
 Provider generation is recovered with token-fenced leases. Each bounded
 provider attempt receives the active client's configured timeout plus a
@@ -1316,7 +1323,7 @@ key. To try the local image review loop with the default provider:
 
 ```powershell
 $env:LAB_TRACKER_OPENAI_API_KEY = "<your OpenAI API key>"
-$env:LAB_TRACKER_OPENAI_MODEL = "gpt-4o-mini"
+$env:LAB_TRACKER_OPENAI_MODEL = "gpt-6.1-sol"
 uv run alembic upgrade head
 uv run uvicorn lab_tracker.asgi:app --reload
 ```

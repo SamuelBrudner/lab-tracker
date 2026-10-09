@@ -46,9 +46,9 @@ Anthropic, and Google are equally supported — the choice is yours.** Set
 
 | Provider | `LAB_TRACKER_GRAPH_DRAFT_PROVIDER` | API key variable | Default model | Voice transcription |
 | --- | --- | --- | --- | --- |
-| OpenAI | `openai` (default) | `LAB_TRACKER_OPENAI_API_KEY` | `gpt-4o-mini` | Yes |
-| Anthropic (Claude) | `anthropic` or `claude` | `LAB_TRACKER_ANTHROPIC_API_KEY` | `claude-3-5-sonnet-latest` | No — voice notes need OpenAI or Google |
-| Google (Gemini) | `google` or `gemini` | `LAB_TRACKER_GOOGLE_API_KEY` | `gemini-2.5-flash` | Yes |
+| OpenAI | `openai` (default) | `LAB_TRACKER_OPENAI_API_KEY` | `gpt-6.1-sol` | Yes |
+| Anthropic (Claude) | `anthropic` or `claude` | `LAB_TRACKER_ANTHROPIC_API_KEY` | `claude-sonnet-5-5` | No — voice notes need OpenAI or Google |
+| Google (Gemini) | `google` or `gemini` | `LAB_TRACKER_GOOGLE_API_KEY` | `gemini-3.8-flash` | Yes |
 
 Per-provider model, base URL, and timeout overrides are in the
 [configuration reference](configuration.md#graph-draft-providers-and-transcription).
@@ -61,17 +61,23 @@ budget.
 For institutional deployments, point the provider's base URL at an approved
 gateway.
 
-For quality-first OpenAI drafting with GPT-5.6 Sol, set:
+For quality-first OpenAI drafting with GPT-6.1 Sol, set:
 
 ```dotenv
-LAB_TRACKER_OPENAI_MODEL=gpt-5.6-sol
-LAB_TRACKER_OPENAI_REASONING_EFFORT=max
-LAB_TRACKER_OPENAI_REASONING_MODE=pro
+LAB_TRACKER_OPENAI_MODEL=gpt-6.1-sol
+LAB_TRACKER_OPENAI_REASONING_EFFORT=medium
+LAB_TRACKER_OPENAI_TIMEOUT_SECONDS=300
 ```
 
 These are Responses API settings. Codex Ultra additionally uses agent
 orchestration; it is not a valid `reasoning.effort` value and is not enabled by
 this configuration.
+
+The Setup page shows the active model and flags known older choices or an
+overdue recommendation review. Operators can inspect the full inventory with
+`lab-tracker models --json` and query account access with
+`lab-tracker models --check-availability --json`. See
+[AI model maintenance](ai-models.md) for the monthly review procedure.
 
 Two setup facts worth knowing up front:
 

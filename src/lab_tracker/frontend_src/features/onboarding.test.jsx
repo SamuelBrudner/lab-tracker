@@ -66,6 +66,42 @@ function expectClientStepWithheld() {
 
 describe("OnboardingPage", () => {
   it.each([
+    {currency: "superseded", overdue: false, label: "Upgrade available", recommend: true},
+    {currency: "recommended", overdue: true, label: "Review overdue", recommend: false},
+    {currency: "custom_endpoint", overdue: false, label: "Needs model review", recommend: false},
+  ])("shows active model currency: $label", async ({currency, overdue, label, recommend}) => {
+    installFetchMock([
+      {
+        match: "/auth/setup-readiness",
+        response: apiResponse({
+          ...READY_RUNTIME,
+          ai_models: [{
+            provider: "openai",
+            setting: "LAB_TRACKER_OPENAI_MODEL",
+            workloads: ["note_graph_draft", "daily_review"],
+            active: true,
+            configured_model: "gpt-4o-mini",
+            recommended_model: "gpt-6.1-sol",
+            currency,
+            reviewed_on: "2026-10-08",
+            review_due_on: "2026-11-07",
+            review_overdue: overdue,
+            source_url: "https://developers.openai.com/api/docs/models/gpt-6.1-sol",
+            rationale: "Graph reasoning",
+          }],
+        }),
+      },
+    ]);
+    renderPage();
+    const status = await screen.findByLabelText("Automation readiness");
+    expect(status).toHaveTextContent("Draft model: gpt-4o-mini");
+    expect(status).toHaveTextContent(label);
+    expect(status).toHaveTextContent("next review due 2026-11-07");
+    if (recommend) expect(status).toHaveTextContent("update to gpt-6.1-sol");
+    else expect(status).not.toHaveTextContent("update to gpt-6.1-sol");
+  });
+
+  it.each([
     {
       readiness: READY_RUNTIME,
       expectedWorker: "Ready",

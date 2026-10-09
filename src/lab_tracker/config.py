@@ -15,6 +15,12 @@ from pydantic_settings import (
     SettingsConfigDict,
 )
 
+from lab_tracker.ai_model_catalog import (
+    ANTHROPIC_GRAPH,
+    GOOGLE_MULTIMODAL,
+    OPENAI_GRAPH,
+    OPENAI_TRANSCRIPTION,
+)
 from lab_tracker.artifact_resolution_admission import (
     DEFAULT_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT,
     DEFAULT_ARTIFACT_RESOLUTION_PER_ACTOR_IN_FLIGHT_LIMIT,
@@ -227,14 +233,14 @@ class Settings(BaseSettings):
     store_scans: str = ""
     store_scan_hash_max_bytes: int = 64 * 1024 * 1024
     openai_api_key: str = Field(default="", repr=False)
-    openai_model: str = "gpt-4o-mini"
+    openai_model: str = OPENAI_GRAPH.recommended_model
     openai_reasoning_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] | None = None
     openai_reasoning_mode: Literal["standard", "pro"] | None = None
-    openai_transcription_model: str = "gpt-4o-mini-transcribe"
+    openai_transcription_model: str = OPENAI_TRANSCRIPTION.recommended_model
     openai_base_url: str = "https://api.openai.com/v1"
-    openai_timeout_seconds: float = 60.0
+    openai_timeout_seconds: float = 300.0
     anthropic_api_key: str = Field(default="", repr=False)
-    anthropic_model: str = "claude-3-5-sonnet-latest"
+    anthropic_model: str = ANTHROPIC_GRAPH.recommended_model
     anthropic_base_url: str = "https://api.anthropic.com/v1"
     # Sized with the output budget below: a non-streaming call returns nothing
     # until the model finishes, and 16000 output tokens can take minutes.
@@ -243,7 +249,7 @@ class Settings(BaseSettings):
     # narrative plus one operation per finding, so 4096 truncated real days.
     anthropic_max_output_tokens: int = Field(default=16000, ge=1)
     google_api_key: str = Field(default="", repr=False)
-    google_model: str = "gemini-2.5-flash"
+    google_model: str = GOOGLE_MULTIMODAL.recommended_model
     google_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
     google_timeout_seconds: float = 60.0
 

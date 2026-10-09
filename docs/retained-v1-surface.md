@@ -681,6 +681,13 @@ research record:
   A failed `lt-mcp` probe, including a client that cannot be built, is written
   to stderr and startup continues.
   See [setup.md](setup.md#know-when-a-client-install-is-broken-or-behind-its-server).
+- Advisory AI model currency checks: a source-backed registry identifies the
+  reviewed model for every retained AI workload and expires its recommendation
+  review after 30 days. The authenticated Setup page shows active model choices;
+  `lab-tracker models` audits actual configured overrides, and its explicit
+  `--check-availability` option queries provider metadata without inference or
+  research data. Availability is separate from quality and billing readiness.
+  See [ai-models.md](ai-models.md).
 - Read-only assistant and MCP endpoints over the retained graph. Remote agents
   can orient with `graph_overview`, locate a typed anchor with `search_graph`,
   and inspect its bounded neighborhood before requesting task-specific decision

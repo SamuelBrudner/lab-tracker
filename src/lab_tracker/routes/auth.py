@@ -12,6 +12,7 @@ from fastapi import APIRouter
 from starlette import status as http_status
 from starlette.requests import Request
 
+from lab_tracker.ai_model_audit import audit_ai_models
 from lab_tracker.auth import (
     LOCAL_AUTH_USERNAME,
     AuthService,
@@ -291,6 +292,7 @@ def build_auth_router(
                 provider=provider,
                 provider_credential_configured=credential_configured,
                 source_revision=settings.source_revision,
+                ai_models=[item for item in audit_ai_models(settings).models if item.active],
             )
         )
 

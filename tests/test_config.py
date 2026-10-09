@@ -1457,11 +1457,11 @@ def test_compose_forwards_store_health_control_plane_settings():
         assert f"{variable}: ${{{variable}:-{default}}}" in compose
 
 
-def test_default_openai_model_is_standard_account_model(monkeypatch):
+def test_default_openai_model_is_reviewed_graph_reasoning_model(monkeypatch):
     _clear_auth_env(monkeypatch)
     monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
     settings = _settings_from_environment()
-    assert settings.openai_model == "gpt-4o-mini"
+    assert settings.openai_model == "gpt-6.1-sol"
     assert settings.openai_reasoning_effort is None
     assert settings.openai_reasoning_mode is None
 

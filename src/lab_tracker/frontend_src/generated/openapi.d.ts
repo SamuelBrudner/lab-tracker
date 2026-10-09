@@ -592,6 +592,23 @@ export interface operations {
 
 export interface components {
   schemas: {
+    "AIModelStatus": {
+      "active": boolean;
+      "availability"?: components["schemas"]["ModelAvailability"];
+      "configured_model": string;
+      "currency": "recommended" | "superseded" | "unreviewed" | "custom_endpoint";
+      "provider": string;
+      "rationale": string;
+      "recommendation_availability"?: components["schemas"]["ModelAvailability"];
+      "recommended_model": string;
+      "review_due_on": string;
+      "review_overdue": boolean;
+      "reviewed_on": string;
+      "setting": string;
+      "source_url": string;
+      "warnings"?: Array<string>;
+      "workloads": Array<string>;
+    };
     "AcceptanceMode": "human_selected" | "bulk_accepted" | "auto_accepted";
     "AuthBootstrapStatus": {
       "bootstrap_admin_configured": boolean;
@@ -630,6 +647,7 @@ export interface components {
       "username": string;
     };
     "AuthSetupReadiness": {
+      "ai_models"?: Array<components["schemas"]["AIModelStatus"]>;
       "background_worker_enabled": boolean;
       "provider": string;
       "provider_credential_configured": boolean;
@@ -1121,6 +1139,12 @@ export interface components {
       "project_id": string;
       "role": components["schemas"]["ProjectMembershipRole"];
       "state": "not_started" | "checkpoint_ready" | "alignment_ready" | "awaiting_owner" | "changes_requested" | "rejected" | "committed" | "capture_pending" | "complete";
+    };
+    "ModelAvailability": {
+      "checked_at"?: (string | null);
+      "message"?: (string | null);
+      "resolved_model"?: (string | null);
+      "status"?: "not_checked" | "credential_missing" | "available" | "unavailable" | "error";
     };
     "Note": {
       "archived_at"?: (string | null);

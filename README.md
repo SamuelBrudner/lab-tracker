@@ -247,7 +247,10 @@ Set `LAB_TRACKER_GRAPH_DRAFT_PROVIDER` and the matching server-held API key.
 With a vision-capable model, each provider can draft directly from an individual
 image note or figure as well as text. Scheduled batch drafts currently use
 text, voice transcripts, capture hints, links, and metadata rather than image
-bytes. Voice transcription currently requires OpenAI or Google; Anthropic can
+bytes. For the configured models and recommendation review dates, run
+`lab-tracker models --json`; see [AI model maintenance](docs/ai-models.md).
+
+Voice transcription currently requires OpenAI or Google; Anthropic can
 draft from a transcript created another way. The manual Transcribe action is
 always available. Operators can opt into best-effort transcription after each
 new audio upload with `LAB_TRACKER_AUTO_TRANSCRIBE_VOICE_CAPTURES=true`, but it
