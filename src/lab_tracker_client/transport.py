@@ -52,7 +52,7 @@ HEALTH_PROBE_MAX_BODY_BYTES = 64 * 1024
 _WIRE_ENCODING_HEADERS = frozenset({"content-encoding", "content-length", "transfer-encoding"})
 # What a stalled read raises once the watchdog has closed its connection. Connect
 # and proxy failures are not in it: they keep their own, more specific diagnosis.
-_READ_FAILURES = (httpx.ReadError, httpx.RemoteProtocolError)
+_READ_FAILURES = (httpx.ReadError, httpx.ReadTimeout, httpx.RemoteProtocolError)
 
 
 def request_within_deadline(
@@ -97,7 +97,7 @@ def request_within_deadline(
         )
 
     def check_deadline() -> None:
-        if time.monotonic() - started > deadline_seconds:
+        if time.monotonic() - started >= deadline_seconds:
             raise out_of_time()
 
     def close_client() -> None:
@@ -113,8 +113,9 @@ def request_within_deadline(
         )
     except _READ_FAILURES as exc:
         # The watchdog closed the connection under a read that was still waiting;
-        # a plain socket reports that as a read error, a TLS one as a disconnect.
-        if expired.is_set():
+        # a socket can report a read timeout/error and TLS can report a disconnect.
+        # The socket may fail before the timer thread gets a chance to set its flag.
+        if expired.is_set() or time.monotonic() - started >= deadline_seconds:
             raise out_of_time() from exc
         raise
     finally:
@@ -135,9 +136,9 @@ def _read_response(
         check_deadline()
         for chunk in response.iter_bytes():
             body += chunk
+            check_deadline()
             if len(body) >= max_body_bytes:
                 break
-            check_deadline()
         headers = [
             (name, value)
             for name, value in response.headers.multi_items()

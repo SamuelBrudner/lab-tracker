@@ -250,6 +250,10 @@ text, voice transcripts, capture hints, links, and metadata rather than image
 bytes. For the configured models and recommendation review dates, run
 `lab-tracker models --json`; see [AI model maintenance](docs/ai-models.md).
 
+Use `lab-tracker maintenance run --config /absolute/path/inventory.json` for
+scheduled operator checks and review packets; see
+[supervised maintenance](docs/maintenance-coordinator.md).
+
 Voice transcription currently requires OpenAI or Google; Anthropic can
 draft from a transcript created another way. The manual Transcribe action is
 always available. Operators can opt into best-effort transcription after each

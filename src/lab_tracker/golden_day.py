@@ -7,10 +7,12 @@ all three agree on what a good batch draft looks like for this day.
 
 The day has twelve questions (two near-duplicates of the dose-response
 question and one that a refactor superseded), a closed bench session and an
-open imaging session, a dead-end exploration node, a paper goal, and fourteen
+open imaging session, a dead-end exploration node, a paper goal, and fifteen
 staged captures: bench and imaging notes, a figure, a git commit, a meeting
 note, an identifier-only capture that can only be resolved by asking, and a
-stray thought that belongs nowhere yet. ``golden_day_expected_patch`` is the
+grounded follow-up and an unassigned dose comparison. Three known dose captures
+declare their researcher-selected question; the unassigned capture requires a
+choice among the active near-duplicates. ``golden_day_expected_patch`` is the
 draft a careful reviewer would want back; ``score_golden_day`` measures any
 READY change set against it.
 """
@@ -48,11 +50,11 @@ if TYPE_CHECKING:
 
 GOLDEN_DAY_PROVIDER: Final = "golden-day"
 GOLDEN_DAY_MODEL: Final = "scripted-v1"
-GOLDEN_DAY_CAPTURE_PREFIX: Final = "golden-day-v1-"
+GOLDEN_DAY_FIXTURE_VERSION: Final = "golden-day-v2-explicit-routing"
+GOLDEN_DAY_SCORER_VERSION: Final = "golden-day-score-v5"
+GOLDEN_DAY_CAPTURE_PREFIX: Final = "golden-day-v2-"
 GOLDEN_DAY_IDENTIFIER_CAPTURE: Final = "M7-0925-03"
-GOLDEN_DAY_CLARIFICATION: Final = (
-    "Which session and animal does capture 'M7-0925-03' refer to?"
-)
+GOLDEN_DAY_CLARIFICATION: Final = "Which session and animal does capture 'M7-0925-03' refer to?"
 GOLDEN_DAY_MEETING_QUESTION: Final = (
     "Does a partial agonist saturate the calcium response at a lower dose?"
 )
@@ -63,6 +65,8 @@ SUPERSEDED_QUESTION_SLUG: Final = "old_timing"
 REPLACEMENT_QUESTION_SLUG: Final = "timing_latency"
 MEETING_CAPTURE_SLUG: Final = "meeting"
 IDENTIFIER_CAPTURE_SLUG: Final = "identifier"
+AMBIGUOUS_CAPTURE_SLUG: Final = "unassigned_dose"
+DOSE_QUESTION_SLUGS: Final = ("dose_response", "dose_response_near_dup", "dose_response_near_dup2")
 
 _LINK_CONFIDENCE: Final = 0.9
 _SUGGEST_CONFIDENCE: Final = 0.7
@@ -153,6 +157,7 @@ class GoldenDayCapture:
     raw_content: str
     link_session: str | None = None
     metadata: Mapping[str, str] = field(default_factory=dict)
+    declared_question_slug: str | None = None
 
 
 GOLDEN_DAY_CAPTURES: Final[tuple[GoldenDayCapture, ...]] = (
@@ -160,11 +165,13 @@ GOLDEN_DAY_CAPTURES: Final[tuple[GoldenDayCapture, ...]] = (
         "bench_dose_1",
         "Bench: 1 uM agonist on slice 3 gave a clear calcium rise.",
         BENCH_SESSION,
+        declared_question_slug="dose_response",
     ),
     GoldenDayCapture(
         "bench_dose_2",
         "Bench: 10 uM agonist on slice 3, larger rise than at 1 uM.",
         BENCH_SESSION,
+        declared_question_slug="dose_response",
     ),
     GoldenDayCapture(
         "bench_pipette",
@@ -204,6 +211,7 @@ GOLDEN_DAY_CAPTURES: Final[tuple[GoldenDayCapture, ...]] = (
     GoldenDayCapture(
         "figure",
         "Regenerated the dose-response figure from today's traces.",
+        declared_question_slug="dose_response",
         metadata={
             "evidence_source_provider": "matplotlib",
             "evidence_capture_kind": "figure",
@@ -230,6 +238,12 @@ GOLDEN_DAY_CAPTURES: Final[tuple[GoldenDayCapture, ...]] = (
     GoldenDayCapture(
         "followup",
         "Thought: check whether focal drift tracks bath temperature.",
+    ),
+    GoldenDayCapture(
+        AMBIGUOUS_CAPTURE_SLUG,
+        "Unassigned dose comparison: higher agonist dose gave a larger cortical-slice calcium "
+        "rise. No question was selected for this capture; the three active dose-response "
+        "questions remain indistinguishable for this observation.",
     ),
 )
 
@@ -360,7 +374,7 @@ def stage_golden_day_captures(
     *,
     actor: AuthContext,
 ) -> tuple[GoldenDayGraph, list[Note]]:
-    """Stage the fourteen captures in order, closing the bench session midway.
+    """Stage the fifteen captures in order, closing the bench session midway.
 
     The bench captures land while the morning session is open; it is then
     closed and the imaging session opened so the afternoon captures fall in a
@@ -384,10 +398,20 @@ def stage_golden_day_captures(
                 actor=actor,
             )
             sessions[IMAGING_SESSION] = imaging_session.session_id
+        metadata = dict(capture.metadata)
+        if capture.declared_question_slug is not None:
+            metadata["declared_question_id"] = str(
+                graph.question_id(capture.declared_question_slug)
+            )
+            metadata["question_routing_basis"] = (
+                "Researcher-selected question for this capture only; retain this selection "
+                "rather than choosing another near-duplicate. "
+                "Other captures have no implied selection."
+            )
         note = api.create_note(
             project_id=graph.project_id,
             raw_content=capture.raw_content,
-            metadata=dict(capture.metadata),
+            metadata=metadata,
             client_capture_id=note_capture_id(capture.slug),
             actor=actor,
         )
@@ -451,8 +475,8 @@ def golden_day_expected_patch(graph: GoldenDayGraph, notes: Sequence[Note]) -> d
 
     Question links come first, then session links that carry the question
     targets forward (an update replaces a note's target list, so the later
-    operation must include what the earlier one set), then the one new
-    question the meeting implies and the one clarification request.
+    operation must include what the earlier one set), then two grounded new
+    questions and two specific clarification requests.
     """
 
     by_slug = _notes_by_slug(notes)
@@ -463,8 +487,7 @@ def golden_day_expected_patch(graph: GoldenDayGraph, notes: Sequence[Note]) -> d
             continue
         note = by_slug[capture.slug]
         question_targets = [
-            _question_target(graph.question_id(question_slug))
-            for question_slug in sorted(links)
+            _question_target(graph.question_id(question_slug)) for question_slug in sorted(links)
         ]
         operations.append(
             _operation(
@@ -526,6 +549,44 @@ def golden_day_expected_patch(graph: GoldenDayGraph, notes: Sequence[Note]) -> d
             source_note_id=meeting_note.note_id,
         )
     )
+    followup_note = by_slug["followup"]
+    operations.append(
+        _operation(
+            client_ref="temperature_drift_followup",
+            op=GraphChangeOp.CREATE,
+            entity_type=EntityType.QUESTION,
+            semantic_type=GraphDraftSemanticType.SUGGEST_FOLLOWUP,
+            target_entity_id=None,
+            payload={
+                "project_id": str(graph.project_id),
+                "text": "Does focal drift track bath temperature?",
+                "question_type": QuestionType.HYPOTHESIS_DRIVEN.value,
+                "status": QuestionStatus.STAGED.value,
+            },
+            rationale="The thought explicitly proposes a temperature/drift check.",
+            confidence=_SUGGEST_CONFIDENCE,
+            source_note_id=followup_note.note_id,
+        )
+    )
+    for note, reference in (
+        (meeting_note, "meeting_followup"),
+        (followup_note, "temperature_drift_followup"),
+    ):
+        operations.append(
+            _operation(
+                client_ref=None,
+                op=GraphChangeOp.UPDATE,
+                entity_type=EntityType.NOTE,
+                semantic_type=GraphDraftSemanticType.UPDATE_ENTITY,
+                target_entity_id=note.note_id,
+                payload={
+                    "targets": [{"entity_type": "question", "entity_id": {"$ref": reference}}]
+                },
+                rationale="Link the proposal to the capture that explicitly raised it.",
+                confidence=_LINK_CONFIDENCE,
+                source_note_id=note.note_id,
+            )
+        )
     identifier_note = by_slug[IDENTIFIER_CAPTURE_SLUG]
     operations.append(
         _operation(
@@ -540,13 +601,33 @@ def golden_day_expected_patch(graph: GoldenDayGraph, notes: Sequence[Note]) -> d
             source_note_id=identifier_note.note_id,
         )
     )
+    ambiguity_request = (
+        "Which question should receive the Unassigned dose comparison capture: "
+        + ", ".join(str(graph.question_id(slug)) for slug in DOSE_QUESTION_SLUGS)
+        + "?"
+    )
+    ambiguous_note = by_slug[AMBIGUOUS_CAPTURE_SLUG]
+    operations.append(
+        _operation(
+            client_ref=None,
+            op=GraphChangeOp.UPDATE,
+            entity_type=EntityType.NOTE,
+            semantic_type=GraphDraftSemanticType.REQUEST_CLARIFICATION,
+            target_entity_id=ambiguous_note.note_id,
+            payload={"metadata": {"needs_clarification": ambiguity_request}},
+            rationale="This capture has no declared routing anchor among three near-duplicates.",
+            confidence=_CLARIFY_CONFIDENCE,
+            source_note_id=ambiguous_note.note_id,
+        )
+    )
     return {
         "summary": (
             "Linked the bench and imaging captures to their questions and sessions, "
-            "proposed one question from the meeting, and asked about one bare identifier."
+            "proposed two grounded questions, and asked about an identifier "
+            "and unassigned dose capture."
         ),
-        "uncertain_fields": [IDENTIFIER_CAPTURE_SLUG],
-        "clarification_requests": [GOLDEN_DAY_CLARIFICATION],
+        "uncertain_fields": [IDENTIFIER_CAPTURE_SLUG, AMBIGUOUS_CAPTURE_SLUG],
+        "clarification_requests": [GOLDEN_DAY_CLARIFICATION, ambiguity_request],
         "operations": operations,
     }
 
@@ -627,6 +708,10 @@ class GoldenDayScore:
     link_recall: float
     duplicate_create_rate: float
     clarification_rate: float
+    clarification_recall: float
+    ambiguity_link_rate: float
+    proposal_precision: float
+    proposal_recall: float
     operation_count: int
 
 
@@ -634,23 +719,70 @@ def _normalize_question_text(text: str) -> str:
     return re.sub(r"\s+", " ", text.casefold()).strip().rstrip("?.!")
 
 
-def _predicted_link_pairs(change_set: GraphChangeSet) -> set[tuple[UUID, UUID]]:
-    pairs: set[tuple[UUID, UUID]] = set()
+def _predicted_link_pairs(change_set: GraphChangeSet) -> set[tuple[UUID, UUID | str]]:
+    by_note: dict[UUID, set[tuple[UUID, UUID | str]]] = {}
     for operation in change_set.operations:
-        if operation.semantic_type != GraphDraftSemanticType.LINK_NOTE_TO_QUESTION:
+        if operation.entity_type != EntityType.NOTE or operation.op != GraphChangeOp.UPDATE:
             continue
         if operation.target_entity_id is None:
             continue
         targets = operation.payload.get("targets")
         if not isinstance(targets, list):
             continue
+        # targets replaces the note's full target list regardless of the semantic
+        # label. A combined session/question update must count, and a later
+        # session-only update must remove a question link it overwrites.
+        pairs: set[tuple[UUID, UUID | str]] = set()
         for target in targets:
             if not isinstance(target, dict):
                 continue
             if target.get("entity_type") != EntityType.QUESTION.value:
                 continue
-            pairs.add((operation.target_entity_id, UUID(str(target["entity_id"]))))
-    return pairs
+            raw_id = target.get("entity_id")
+            try:
+                question_id: UUID | str = UUID(str(raw_id))
+            except ValueError:
+                # Same-patch references are graded separately for grounding and
+                # source placement; they are not existing-question predictions.
+                question_id = "unresolved:" + json.dumps(raw_id, sort_keys=True, default=str)
+            pairs.add((operation.target_entity_id, question_id))
+        by_note[operation.target_entity_id] = pairs
+    return set().union(*by_note.values())
+
+
+def golden_day_link_diagnostics(
+    change_set: GraphChangeSet, graph: GoldenDayGraph, notes: Sequence[Note]
+) -> dict[str, Any]:
+    """Explain link mismatches using stable synthetic capture/question slugs."""
+
+    expected = expected_link_pairs(graph, notes)
+    predicted = {pair for pair in _predicted_link_pairs(change_set) if isinstance(pair[1], UUID)}
+    note_slugs = {note.note_id: capture_slug(note) for note in notes}
+    question_slugs: dict[UUID | str, str] = {
+        identifier: slug for slug, identifier in graph.questions.items()
+    }
+    question_slugs[graph.replacement_question_id] = REPLACEMENT_QUESTION_SLUG
+
+    def describe(pairs: set[Any]) -> list[dict[str, str]]:
+        return sorted(
+            [
+                {
+                    "capture": note_slugs.get(note_id, "unknown_capture"),
+                    "question": question_slugs.get(question_id, "unmatched_question"),
+                }
+                for note_id, question_id in pairs
+            ],
+            key=lambda item: (item["capture"], item["question"]),
+        )
+
+    return {
+        "expected_count": len(expected),
+        "predicted_count": len(predicted),
+        "missing_links": describe(expected - predicted),
+        "unexpected_links": describe(predicted - expected),
+        "proposals": _proposal_diagnostics(change_set, notes),
+        "clarifications": _clarification_diagnostics(change_set, graph, notes),
+    }
 
 
 def _is_duplicate_question_text(candidate: str, existing_texts: Sequence[str]) -> bool:
@@ -663,6 +795,165 @@ def _is_duplicate_question_text(candidate: str, existing_texts: Sequence[str]) -
     )
 
 
+# This is a deliberately bounded synthetic rubric, not a general semantic judge.
+# Required concepts accept common paraphrases; novel scientific qualifiers fail
+# closed rather than treating a keyword match as evidence for an invented claim.
+_PROPOSAL_CONCEPTS: Final = {
+    MEETING_CAPTURE_SLUG: (r"partial", r"agonist", r"saturat\w*|plateau", r"dose|concentration"),
+    "followup": (r"focal|focus", r"drift", r"bath", r"temperature"),
+}
+_PROPOSAL_WORDS: Final = (
+    "a an the at in of to from for per and or does do is are can could will would how what whether "
+    "with on by during between than compared relative lower low smaller less that this as be "
+    "condition conditions intended comparison comparator reference lab meeting "
+    "test check across runs sessions specified unspecified"
+)
+_PROPOSAL_SCIENTIFIC_WORDS: Final = {
+    MEETING_CAPTURE_SLUG: (
+        "dose doses concentration concentrations partial agonist agonists saturate saturates "
+        "saturation saturating saturated calcium response responses cortical slice slices reach "
+        "reaches maximum maximal plateau amplitude"
+    ),
+    "followup": (
+        "focal focus plane drift bath temperature temperatures imaging track tracks tracking "
+        "correlate correlates correlated correlation covary covaries covariance "
+        "associate associates "
+        "associated association relationship relation depend depends dependence vary varies "
+        "variation change changes affect affects influence influences "
+        "predict predicts predictability"
+    ),
+}
+_PROPOSAL_SUPPORTING_CAPTURES: Final = {
+    MEETING_CAPTURE_SLUG: (MEETING_CAPTURE_SLUG, "bench_dose_1", "bench_dose_2", "figure"),
+    "followup": ("followup", "imaging_drift", "bench_temperature"),
+}
+
+
+def _proposal_diagnostics(change_set: GraphChangeSet, notes: Sequence[Note]) -> dict[str, Any]:
+    by_slug = _notes_by_slug(notes)
+    creates = [
+        operation
+        for operation in change_set.operations
+        if operation.op == GraphChangeOp.CREATE and operation.entity_type == EntityType.QUESTION
+    ]
+    new_links = {pair for pair in _predicted_link_pairs(change_set) if isinstance(pair[1], str)}
+    grounded: dict[str, str] = {}
+    seen: set[str] = set()
+    descriptions = []
+    valid_creates = 0
+    for operation in creates:
+        text = str(operation.payload.get("text") or "").casefold().strip()
+        words = set(re.findall(r"[a-z]+", text))
+        sources = {
+            str(identifier)
+            for ref in operation.source_refs
+            for identifier in ref.get("source_note_ids", [])
+        }
+        slug = next(
+            (
+                slug
+                for slug, concepts in _PROPOSAL_CONCEPTS.items()
+                if str(by_slug[slug].note_id) in sources
+                and sources
+                <= {
+                    str(by_slug[capture].note_id) for capture in _PROPOSAL_SUPPORTING_CAPTURES[slug]
+                }
+                and text.endswith("?")
+                and not re.search(r"\d", text)
+                and words <= set((_PROPOSAL_WORDS + " " + _PROPOSAL_SCIENTIFIC_WORDS[slug]).split())
+                and all(re.search(r"\b(?:" + concept + r")\b", text) for concept in concepts)
+            ),
+            None,
+        )
+        supported = slug is not None and slug not in seen
+        if supported and slug is not None:
+            seen.add(slug)
+            valid_creates += 1
+            if operation.client_ref is not None:
+                key = "unresolved:" + json.dumps({"$ref": operation.client_ref}, sort_keys=True)
+                grounded[key] = slug
+        descriptions.append(
+            {"client_ref": operation.client_ref, "capture": slug, "supported": supported}
+        )
+    valid_links = {
+        pair
+        for pair in new_links
+        if pair[1] in grounded and pair[0] == by_slug[grounded[str(pair[1])]].note_id
+    }
+    linked_slugs = {grounded[str(reference)] for _, reference in valid_links}
+    denominator = len(creates) + len(new_links)
+    return {
+        "precision": (valid_creates + len(valid_links)) / denominator if denominator else 0.0,
+        "recall": len(linked_slugs) / len(_PROPOSAL_CONCEPTS),
+        "created_count": len(creates),
+        "new_link_count": len(new_links),
+        "unsupported_create_count": len(creates) - valid_creates,
+        "unsupported_link_count": len(new_links) - len(valid_links),
+        "missing_proposals": sorted(set(_PROPOSAL_CONCEPTS) - linked_slugs),
+        "created_questions": descriptions,
+    }
+
+
+def _clarification_diagnostics(
+    change_set: GraphChangeSet, graph: GoldenDayGraph, notes: Sequence[Note]
+) -> dict[str, Any]:
+    by_slug = _notes_by_slug(notes)
+
+    def requests(slug: str) -> list[str]:
+        note = by_slug[slug]
+        marker = (
+            r"\bunassigned\b.*\b(dose|comparison)\b"
+            if slug == AMBIGUOUS_CAPTURE_SLUG
+            else re.escape(GOLDEN_DAY_IDENTIFIER_CAPTURE.casefold())
+        )
+        texts = [
+            str(operation.payload.get("metadata", {}).get("needs_clarification") or "")
+            for operation in change_set.operations
+            if operation.entity_type == EntityType.NOTE
+            and operation.op == GraphChangeOp.UPDATE
+            and operation.target_entity_id == note.note_id
+        ]
+        texts.extend(
+            text
+            for text in change_set.clarification_requests
+            if re.search(marker, text.casefold()) or str(note.note_id) in text
+        )
+        return texts
+
+    identifier_ok = any(
+        re.search(r"\b(which|what|confirm|clarify)\b", text.casefold())
+        and re.search(
+            r"animal|specimen|sample|recording|dataset|identif|refer|represent|mean",
+            text.casefold(),
+        )
+        and "?" in text
+        for text in requests(IDENTIFIER_CAPTURE_SLUG)
+    )
+    question_texts = golden_day_question_texts()
+    ambiguity_ok = any(
+        re.search(r"\b(which|choose|select|confirm|clarify)\b", text.casefold())
+        and "question" in text.casefold()
+        and "?" in text
+        and all(
+            str(graph.question_id(slug)) in text
+            or _normalize_question_text(question_texts[slug]) in _normalize_question_text(text)
+            for slug in DOSE_QUESTION_SLUGS
+        )
+        for text in requests(AMBIGUOUS_CAPTURE_SLUG)
+    )
+    ambiguous_links = {
+        pair
+        for pair in _predicted_link_pairs(change_set)
+        if pair[0] == by_slug[AMBIGUOUS_CAPTURE_SLUG].note_id
+    }
+    return {
+        "identifier_specific": identifier_ok,
+        "dose_choice_specific": bool(ambiguity_ok),
+        "recall": (int(identifier_ok) + int(bool(ambiguity_ok))) / 2,
+        "ambiguity_link_rate": float(bool(ambiguous_links)),
+    }
+
+
 def score_golden_day(
     change_set: GraphChangeSet,
     graph: GoldenDayGraph,
@@ -673,7 +964,7 @@ def score_golden_day(
     expected = expected_link_pairs(graph, notes)
     if not expected:
         raise ValueError("The golden day expects at least one note link.")
-    predicted = _predicted_link_pairs(change_set)
+    predicted = {pair for pair in _predicted_link_pairs(change_set) if isinstance(pair[1], UUID)}
     matched = len(predicted & expected)
     existing_texts = list(golden_day_question_texts().values())
     create_texts = [
@@ -689,6 +980,8 @@ def score_golden_day(
         for operation in change_set.operations
         if operation.semantic_type == GraphDraftSemanticType.REQUEST_CLARIFICATION
     )
+    proposals = _proposal_diagnostics(change_set, notes)
+    clarification_details = _clarification_diagnostics(change_set, graph, notes)
     return GoldenDayScore(
         provider=change_set.provider,
         model=change_set.model,
@@ -697,5 +990,9 @@ def score_golden_day(
         link_recall=matched / len(expected),
         duplicate_create_rate=duplicates / len(create_texts) if create_texts else 0.0,
         clarification_rate=clarifications / len(notes),
+        clarification_recall=clarification_details["recall"],
+        ambiguity_link_rate=clarification_details["ambiguity_link_rate"],
+        proposal_precision=proposals["precision"],
+        proposal_recall=proposals["recall"],
         operation_count=len(change_set.operations),
     )

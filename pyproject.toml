@@ -201,6 +201,8 @@ files = [
   "src/lab_tracker/provider_error_redaction.py",
   "src/lab_tracker/ai_model_catalog.py",
   "src/lab_tracker/ai_model_audit.py",
+  "src/lab_tracker/maintenance",
+  "src/lab_tracker/golden_day.py",
   "src/lab_tracker/client_release.py",
   "src/lab_tracker/capture_client_release.py",
   "src/lab_tracker/deployment_probe.py",

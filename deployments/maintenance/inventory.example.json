@@ -1,0 +1,22 @@
+{
+  "state_dir": "../../backups/maintenance",
+  "docker_context": null,
+  "interval_seconds": 3600,
+  "probe_timeout_seconds": 15,
+  "backup_timeout_seconds": 60,
+  "run_timeout_seconds": 300,
+  "check_availability": true,
+  "check_openai_sources": true,
+  "deployments": [
+    {
+      "name": "primary",
+      "container": "lab-tracker-app-1",
+      "base_url": "http://127.0.0.1:8000",
+      "expected_revision": "0000000000000000000000000000000000000000",
+      "expected_graph_model": "gpt-6.1-sol",
+      "backup_root": "../../backups/primary",
+      "backup_max_age_hours": 24,
+      "restore_evidence": null
+    }
+  ]
+}

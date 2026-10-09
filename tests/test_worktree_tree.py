@@ -9,6 +9,7 @@ object store, never raise into a capture, and stay bounded.
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -29,6 +30,7 @@ from lab_tracker_client.gitinfo import (
 )
 
 _REAL_GIT = shutil.which("git")
+_REAL_SLEEP = shutil.which("sleep")
 
 
 def _git(path: Path, *args: str) -> str:
@@ -244,13 +246,14 @@ def test_a_hanging_git_is_bounded_by_the_timeout(
     repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     assert _REAL_GIT is not None
+    assert _REAL_SLEEP is not None
     bin_dir = tmp_path / "hang-bin"
     bin_dir.mkdir()
     shim = bin_dir / "git"
     shim.write_text(
         "#!/bin/sh\n"
         'for arg in "$@"; do\n'
-        '  if [ "$arg" = status ]; then exec sleep 30; fi\n'
+        f'  if [ "$arg" = status ]; then exec {shlex.quote(_REAL_SLEEP)} 30; fi\n'
         "done\n"
         f'exec "{_REAL_GIT}" "$@"\n',
         encoding="utf-8",

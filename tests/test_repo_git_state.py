@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -28,6 +29,7 @@ from lab_tracker_client.gitinfo import (
 )
 
 _REAL_GIT = shutil.which("git")
+_REAL_SLEEP = shutil.which("sleep")
 
 
 def _git(path: Path, *args: str) -> str:
@@ -73,6 +75,7 @@ def _install_fake_git(
     """Put a git shim first on PATH whose ``status`` hangs, is slow, or fails."""
 
     assert _REAL_GIT is not None
+    assert _REAL_SLEEP is not None
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
     shim = bin_dir / "git"
@@ -82,8 +85,8 @@ def _install_fake_git(
         '  if [ "$arg" = status ]; then\n'
         f"    case {status_behaviour} in\n"
         # exec so a timeout kill hits the sleeping process itself.
-        "      hang) exec sleep 30 ;;\n"
-        "      slow) sleep 1.5 ;;\n"
+        f"      hang) exec {shlex.quote(_REAL_SLEEP)} 30 ;;\n"
+        f"      slow) {shlex.quote(_REAL_SLEEP)} 1.5 ;;\n"
         "      fail) echo 'fatal: index file corrupt' >&2; exit 128 ;;\n"
         "    esac\n"
         "  fi\n"
@@ -355,13 +358,14 @@ def _hide_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _install_hanging_rev_parse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert _REAL_GIT is not None
+    assert _REAL_SLEEP is not None
     bin_dir = tmp_path / "hang-bin"
     bin_dir.mkdir()
     shim = bin_dir / "git"
     shim.write_text(
         "#!/bin/sh\n"
         'for arg in "$@"; do\n'
-        '  if [ "$arg" = rev-parse ]; then exec sleep 30; fi\n'
+        f'  if [ "$arg" = rev-parse ]; then exec {shlex.quote(_REAL_SLEEP)} 30; fi\n'
         "done\n"
         f'exec "{_REAL_GIT}" "$@"\n',
         encoding="utf-8",

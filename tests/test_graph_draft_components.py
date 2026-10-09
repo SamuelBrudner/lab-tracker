@@ -267,7 +267,7 @@ def test_graph_patch_response_schema_requires_non_empty_source_note_ids() -> Non
 
 def test_graph_draft_prompt_versions_and_source_ref_contract_are_updated() -> None:
     assert PROMPT_VERSION == "multimodal-graph-draft-v4"
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v8"
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v10"
     assert ANALYSIS_PROMPT_VERSION == "analysis-graph-draft-v4"
     for instructions in (_instructions(), _batch_instructions(), _analysis_instructions()):
         assert "source_note_ids" in instructions
@@ -573,7 +573,11 @@ def test_batch_instructions_ask_the_drafter_to_pick_and_explain_capture_setup() 
         assert sum(line.startswith(f"- {kind.value}: ") for line in instructions.splitlines()) == 1
     # The paragraph sits right after the routing of unplaceable captures.
     unplaced = instructions.index("do not narrate it as if it happened")
-    assert unplaced < instructions.index(RESPONSE_FIELD) < instructions.index("declared target")
+    assert (
+        unplaced
+        < instructions.index(RESPONSE_FIELD)
+        < instructions.index("Each note's targets are anchors")
+    )
     for other in (_instructions(), _analysis_instructions()):
         for marker in _CAPTURE_SETUP_MARKERS:
             assert marker not in other
@@ -1175,7 +1179,7 @@ def test_batch_instructions_are_narrative_first_with_terse_capture_guardrail() -
     assert "observed_at_source" in instructions
     assert "still raise clarification_requests" in instructions
     # The summary contract changed (now a narrative), so the version bumps.
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v8"
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v10"
 
 
 def test_semantic_types_match_domain_enum() -> None:
@@ -1287,7 +1291,7 @@ def test_batch_instructions_carry_review_memory_guidance() -> None:
     assert pending_sentence in instructions
     assert "review_memory.recent_rejections" in instructions
     assert rejection_sentence in instructions
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v8"
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v10"
 
     batch_context = {
         "batch_notes": [{"note_id": "source-1", "raw_content": "Observed result"}],
@@ -1335,6 +1339,41 @@ def _recording_validator(
         return SimpleNamespace(entity_type=entity_type, entity_id=entity_id)
 
     return GraphPatchValidator(get_graph_entity=get_entity)
+
+
+def test_batch_metadata_contract_matches_api_and_rejects_nested_provenance() -> None:
+    from lab_tracker.schemas import NoteCreate, NoteUpdate
+
+    instructions = _batch_instructions()
+    contract = json.loads(
+        instructions.split("<trusted_note_metadata_contract>", 1)[1].split(
+            "</trusted_note_metadata_contract>", 1
+        )[0]
+    )
+    assert contract == {
+        "create": NoteCreate.model_json_schema()["properties"]["metadata"],
+        "update": NoteUpdate.model_json_schema()["properties"]["metadata"],
+    }
+    assert "Supporting note ID lists belong in source_refs.source_note_ids" in instructions
+    assert "targets replaces its entire target list" in instructions
+    assert "Adding a session target must not erase a supported question link" in instructions
+    assert "rather than linking every near-duplicate variant" in instructions
+    assert "shared subject words alone are insufficient" in instructions
+    validator = _recording_validator([])
+    source_ids = [str(uuid4())]
+    invalid = _operation(
+        op=GraphChangeOp.UPDATE,
+        entity_type=EntityType.NOTE,
+        semantic_type=GraphDraftSemanticType.UPDATE_ENTITY,
+        payload={"metadata": {"source_note_ids": source_ids}},
+        target_entity_id=uuid4(),
+    )
+    with pytest.raises(ValidationError, match=r"metadata.*source_note_ids"):
+        validator.validate_operation(invalid, invalid.payload)
+    valid = invalid.model_copy(
+        update={"payload": {"metadata": {"source_note_ids": json.dumps(source_ids)}}}
+    )
+    validator.validate_operation(valid, valid.payload)
 
 
 def _exploration_payload(
@@ -1615,9 +1654,9 @@ def test_prompt_instructions_and_response_schema_include_resolve_prediction() ->
     assert contract["entity_type"] == "claim"
     assert contract["controlled_values"] == {"status": ["supported", "rejected"]}
     assert contract["when_rejected_required_fields"] == ["terminal_reason"]
-    # Prompt text only; versions are pinned by the binding decision for this wave.
+    # Batch v10 adds metadata/target guidance; the other prompts retain their identities.
     assert PROMPT_VERSION == "multimodal-graph-draft-v4"
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v8"
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v10"
     assert ANALYSIS_PROMPT_VERSION == "analysis-graph-draft-v4"
 
 

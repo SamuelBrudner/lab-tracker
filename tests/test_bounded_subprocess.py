@@ -1237,17 +1237,20 @@ escaped = subprocess.Popen(
 open({str(pid_file)!r}, "w").write(str(escaped.pid))
 """
     before = {thread.ident for thread in threading.enumerate()}
+    executor = BoundedSubprocessExecutor(
+        terminate_grace_seconds=0.1,
+        kill_grace_seconds=0.1,
+    )
+    started = time.monotonic()
     try:
-        with pytest.raises(ProcessCleanupError):
-            BoundedSubprocessExecutor(
-                terminate_grace_seconds=0.1,
-                kill_grace_seconds=0.1,
-            ).run(
+        with pytest.raises((ProcessCleanupError, ProcessDeadlineExceeded)):
+            executor.run(
                 _python(source),
                 deadline=_deadline(1.0),
                 stdout_limit_bytes=1024,
                 stderr_limit_bytes=1024,
             )
+        assert time.monotonic() - started < 1.0 + executor.maximum_cleanup_seconds + 1.0
         stranded = [
             thread
             for thread in threading.enumerate()
@@ -1255,9 +1258,9 @@ open({str(pid_file)!r}, "w").write(str(escaped.pid))
             and thread.name.startswith("lab-tracker-process-")
             and thread.is_alive()
         ]
-        # The escaped descendant still holds the pipes, so the readers stay
-        # blocked; they must not keep the interpreter alive at exit.
-        assert stranded
+        # Linux can leave readers blocked on inherited pipes, while macOS can
+        # unblock them when cleanup closes our descriptors. Any stranded reader
+        # must not keep the interpreter alive, and neither case may report success.
         assert all(thread.daemon for thread in stranded)
     finally:
         with suppress(FileNotFoundError, ValueError, ProcessLookupError):

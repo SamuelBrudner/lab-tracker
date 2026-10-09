@@ -101,3 +101,8 @@ entry's date unless its source was also reviewed.
 Use `lab-tracker models --strict --json` in an operator's scheduled check or
 release process to detect an overdue review or an older active pin. The registry
 does not automatically rank future releases or silently switch a deployment.
+
+The [supervised maintenance coordinator](maintenance-coordinator.md) schedules
+these audits against deployed containers, tracks official OpenAI retirement and
+model release information, and prepares persistent review packets. Its explicit
+candidate evaluation reuses the synthetic graph-quality fixture.

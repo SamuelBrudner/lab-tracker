@@ -433,7 +433,9 @@ def test_quota_eviction_never_touches_directories_the_cache_did_not_create(
     # remove per-remote caches, and foreign bytes must not count against the quota.
     root = tmp_path / "cache"
     root.mkdir(mode=0o700)
-    foreign = [root / "operator-data", root / "0123456789ABCDEF", root / "sha512-0123456789abcdef"]
+    # The uppercase foreign name must differ from the owned cache even on a
+    # case-insensitive filesystem, while still exercising the lowercase-only rule.
+    foreign = [root / "operator-data", root / "FEDCBA9876543210", root / "sha512-0123456789abcdef"]
     for path in foreign:
         path.mkdir()
         (path / "payload").write_bytes(b"x" * 4096)

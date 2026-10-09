@@ -1,5 +1,9 @@
 # Self-Hosted Operations
 
+The [supervised maintenance coordinator](maintenance-coordinator.md) checks
+actual container configuration, HTTP identity, AI model maintenance, and backup
+evidence on a schedule. It prepares review packets for operator action.
+
 Use this for the Docker/Postgres path in `docker-compose.yml`.
 
 ## Data Locations

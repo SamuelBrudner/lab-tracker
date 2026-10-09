@@ -688,6 +688,14 @@ research record:
   `--check-availability` option queries provider metadata without inference or
   research data. Availability is separate from quality and billing readiness.
   See [ai-models.md](ai-models.md).
+- Supervised operator maintenance: an independent host CLI schedules deployment
+  identity, HTTP health, installed model audits, official OpenAI source review,
+  and backup integrity/freshness checks. Durable state suppresses repeated
+  findings and preserves unresolved incidents when evidence is unavailable.
+  Review packets propose explicit older-model setting changes; an opt-in,
+  contained synthetic evaluation compares candidate graph quality and latency.
+  Production configuration changes and deployment remain operator decisions.
+  See [maintenance-coordinator.md](maintenance-coordinator.md).
 - Read-only assistant and MCP endpoints over the retained graph. Remote agents
   can orient with `graph_overview`, locate a typed anchor with `search_graph`,
   and inspect its bounded neighborhood before requesting task-specific decision
