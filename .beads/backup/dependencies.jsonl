@@ -156,6 +156,7 @@
 {"created_at":"2026-07-23T22:10:43Z","created_by":"import","depends_on_id":"lab-tracker-fz1e.10","issue_id":"lab-tracker-2rlw.4","type":"relates-to"}
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-7x77","issue_id":"lab-tracker-2sn1","type":"discovered-from"}
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-chv8","issue_id":"lab-tracker-2sn1","type":"parent-child"}
+{"created_at":"2026-10-08T21:53:33Z","created_by":"SamuelBrudner","depends_on_id":"lab-tracker-na1y","issue_id":"lab-tracker-3f6w","type":"discovered-from"}
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-wmbm.4","issue_id":"lab-tracker-3zz1","type":"discovered-from"}
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-4zxi","issue_id":"lab-tracker-42r9","type":"discovered-from"}
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-ui5z","issue_id":"lab-tracker-43s7","type":"parent-child"}
@@ -733,6 +734,7 @@
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-krnj","issue_id":"lab-tracker-krnj.2","type":"parent-child"}
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-krnj","issue_id":"lab-tracker-krnj.3","type":"parent-child"}
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-krnj.1","issue_id":"lab-tracker-krnj.3","type":"blocks"}
+{"created_at":"2026-10-08T21:53:31Z","created_by":"SamuelBrudner","depends_on_id":"lab-tracker-na1y","issue_id":"lab-tracker-kyxa","type":"discovered-from"}
 {"created_at":"2026-10-08T14:17:37Z","created_by":"SamuelBrudner","depends_on_id":"lab-tracker-dl26","issue_id":"lab-tracker-l9hn","type":"discovered-from"}
 {"created_at":"2026-07-23T22:10:43Z","created_by":"import","depends_on_id":"lab-tracker-gn3b","issue_id":"lab-tracker-lb2d","type":"discovered-from"}
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-lmc3","issue_id":"lab-tracker-lmc3.1","type":"parent-child"}
