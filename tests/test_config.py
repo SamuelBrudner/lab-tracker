@@ -260,6 +260,17 @@ def test_dotenv_ignores_non_lab_tracker_keys(tmp_path, monkeypatch):
     assert settings.openai_model == "gpt-test"
 
 
+def test_operator_dotenv_cannot_change_default_test_settings(tmp_path, monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    dotenv_path = tmp_path / ".env"
+    dotenv_path.write_text("LAB_TRACKER_OPENAI_MODEL=operator-model\n", encoding="utf-8")
+    expected = Settings(_env_file=None).openai_model
+
+    assert Settings().openai_model == expected
+    assert Settings(_env_file=dotenv_path).openai_model == "operator-model"
+
+
 def test_store_authority_grants_default_to_deny_all_input(monkeypatch):
     _clear_auth_env(monkeypatch)
 

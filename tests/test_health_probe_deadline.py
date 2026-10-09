@@ -27,6 +27,7 @@ from lab_tracker.mcp_api_client import (
     MCPSettings,
 )
 from lab_tracker_client import setup as setup_helpers
+from lab_tracker_client import transport
 from lab_tracker_client.transport import (
     HEALTH_PROBE_DEADLINE_SECONDS,
     HEALTH_PROBE_MAX_BODY_BYTES,
@@ -215,12 +216,13 @@ class StalledTransport(httpx.BaseTransport):
 @pytest.mark.parametrize(
     "failure",
     [
+        lambda: httpx.ReadTimeout("timed out"),
         # A plain socket closed under a read raises a read error; a TLS one reports
         # that the server disconnected.
         lambda: httpx.ReadError("Bad file descriptor"),
         lambda: httpx.RemoteProtocolError("Server disconnected without sending a response."),
     ],
-    ids=["read-error", "tls-disconnect"],
+    ids=["read-timeout", "read-error", "tls-disconnect"],
 )
 def test_a_read_the_watchdog_closed_reads_as_the_deadline(
     failure: Callable[[], Exception],
@@ -240,6 +242,48 @@ def test_a_read_the_watchdog_closed_reads_as_the_deadline(
 def test_a_connect_failure_after_the_deadline_keeps_its_own_error() -> None:
     transport = StalledTransport(lambda: httpx.ConnectTimeout("connect timed out"))
     with httpx.Client(transport=transport) as client, pytest.raises(httpx.ConnectTimeout):
+        request_within_deadline(
+            client, "GET", "http://lab.invalid/health", deadline_seconds=TEST_DEADLINE_SECONDS
+        )
+
+
+def test_a_read_timeout_before_the_deadline_keeps_its_own_error() -> None:
+    failure = httpx.ReadTimeout("shorter read timeout")
+
+    def fail(_request: httpx.Request) -> httpx.Response:
+        raise failure
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(fail)) as client,
+        pytest.raises(httpx.ReadTimeout) as caught,
+    ):
+        request_within_deadline(client, "GET", "http://lab.invalid/health", deadline_seconds=2)
+    assert caught.value is failure
+
+
+def test_an_expired_read_timeout_does_not_depend_on_timer_scheduling(monkeypatch) -> None:
+    now = [100.0]
+
+    class DelayedTimer:
+        def __init__(self, _interval, _callback):
+            pass
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            pass
+
+    def fail(_request: httpx.Request) -> httpx.Response:
+        now[0] += 1
+        raise httpx.ReadTimeout("timed out")
+
+    monkeypatch.setattr(transport.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(transport.threading, "Timer", DelayedTimer)
+    with (
+        httpx.Client(transport=httpx.MockTransport(fail)) as client,
+        pytest.raises(httpx.ReadTimeout, match="did not finish within 0.3 seconds"),
+    ):
         request_within_deadline(
             client, "GET", "http://lab.invalid/health", deadline_seconds=TEST_DEADLINE_SECONDS
         )

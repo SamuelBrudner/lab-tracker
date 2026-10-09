@@ -1,7 +1,7 @@
 """Score a graph-draft client against the golden day. Opt-in; never run by CI.
 
 Seeds the golden-day project into a throwaway in-memory database, asks one
-draft client for a batch draft of its fourteen captures, and prints link
+draft client for a batch draft of its fifteen captures, and prints link
 precision/recall, duplicate-question rate and clarification rate so prompt
 versions can be compared on the same day.
 
@@ -107,6 +107,10 @@ def summarize(scores: list[GoldenDayScore]) -> dict[str, Any]:
         "mean_link_recall": mean(score.link_recall for score in scores),
         "mean_duplicate_create_rate": mean(score.duplicate_create_rate for score in scores),
         "mean_clarification_rate": mean(score.clarification_rate for score in scores),
+        "mean_clarification_recall": mean(score.clarification_recall for score in scores),
+        "mean_ambiguity_link_rate": mean(score.ambiguity_link_rate for score in scores),
+        "mean_proposal_precision": mean(score.proposal_precision for score in scores),
+        "mean_proposal_recall": mean(score.proposal_recall for score in scores),
     }
 
 

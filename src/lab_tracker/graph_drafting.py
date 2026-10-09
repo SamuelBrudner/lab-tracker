@@ -28,7 +28,7 @@ from lab_tracker.config import Settings
 from lab_tracker.provider_error_redaction import provider_error_message
 
 PROMPT_VERSION = "multimodal-graph-draft-v4"
-BATCH_PROMPT_VERSION = "daily-batch-graph-draft-v8"
+BATCH_PROMPT_VERSION = "daily-batch-graph-draft-v10"
 ANALYSIS_PROMPT_VERSION = "analysis-graph-draft-v4"
 # Default provider label only. Callers stamping provenance must prefer the active
 # client's `.provider` (e.g. getattr(client, "provider", PROVIDER)); transcripts and
@@ -1181,7 +1181,32 @@ def _capture_setup_instructions() -> str:
 
 
 def _batch_instructions() -> str:
+    from lab_tracker.schemas import NoteCreate, NoteUpdate
+
+    metadata_contract = {
+        "create": NoteCreate.model_json_schema()["properties"]["metadata"],
+        "update": NoteUpdate.model_json_schema()["properties"]["metadata"],
+    }
     return _instructions() + (
+        "\n\nNote payload metadata must satisfy this API-derived field contract: "
+        "<trusted_note_metadata_contract>"
+        f"{json.dumps(metadata_contract, sort_keys=True, separators=(',', ':'))}"
+        "</trusted_note_metadata_contract> "
+        "Metadata values must be scalars, never arrays or objects. Supporting note "
+        "ID lists belong in source_refs.source_note_ids. If structured metadata is "
+        "needed, encode it as a JSON string rather than a nested list or object. "
+        "Updating a note's targets replaces its entire target list; it does not "
+        "append. Include all still-supported existing and proposed question, "
+        "session, and dataset targets, including links proposed earlier in this "
+        "patch. Adding a session target must not erase a supported question link. "
+        "Each new question link must be supported by the capture's specific "
+        "observation or comparison; shared subject words alone are insufficient. "
+        "When several questions express the same underlying question, choose the "
+        "best supported existing question using declared targets and available "
+        "aliases rather than linking every near-duplicate variant. If the capture "
+        "does not resolve that choice, request clarification. Distinct scientific "
+        "and method questions may both be linked only when the capture directly "
+        "supports each. "
         "\n\nFor create note operations, payload_json must contain project_id and "
         "a non-empty raw_content field. Do not use text, content, or body as aliases "
         "for raw_content, and do not add a top-level title field; put an optional "

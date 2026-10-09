@@ -17,10 +17,18 @@ from sqlalchemy.engine.url import make_url
 
 from lab_tracker.app import create_app
 from lab_tracker.auth import Role
+from lab_tracker.config import Settings
 
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture(autouse=True)
+def _isolate_operator_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ignore the developer's default .env; dotenv tests select their own file."""
+
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
 
 
 @pytest.fixture(autouse=True)

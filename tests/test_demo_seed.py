@@ -77,14 +77,15 @@ def test_seed_demo_with_review_stages_captures_and_a_ready_batch() -> None:
     assert result.created is True
     assert result.review_change_set_id is not None
     assert result.as_dict()["review_change_set_id"] == str(result.review_change_set_id)
-    assert result.staged_note_count == 14
+    assert result.staged_note_count == 15
     change_set = api.get_graph_change_set(result.review_change_set_id)
     assert change_set.project_id == result.project_id
     assert change_set.status == GraphChangeSetStatus.READY
     assert change_set.draft_mode == GraphDraftMode.GRAPH_BATCH
     assert change_set.provider == GOLDEN_DAY_PROVIDER
     assert change_set.operations
-    assert change_set.clarification_requests == [GOLDEN_DAY_CLARIFICATION]
+    assert len(change_set.clarification_requests) == 2
+    assert change_set.clarification_requests[0] == GOLDEN_DAY_CLARIFICATION
     assert change_set.review_assignee is not None
 
 
@@ -97,7 +98,7 @@ def test_seed_demo_with_review_is_idempotent() -> None:
     assert second.created is False
     assert second.project_id == first.project_id
     assert second.review_change_set_id == first.review_change_set_id
-    assert second.staged_note_count == first.staged_note_count == 14
+    assert second.staged_note_count == first.staged_note_count == 15
     batches, total = api.query_graph_change_sets(
         project_id=first.project_id,
         draft_mode=GraphDraftMode.GRAPH_BATCH,
@@ -116,5 +117,5 @@ def test_seed_demo_with_review_adds_review_to_an_existing_demo_project() -> None
     assert reviewed.created is False
     assert reviewed.project_id == plain.project_id
     assert reviewed.review_change_set_id is not None
-    assert reviewed.staged_note_count == 14
+    assert reviewed.staged_note_count == 15
     assert len(api.list_projects()) == 1

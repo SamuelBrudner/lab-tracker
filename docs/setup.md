@@ -124,8 +124,9 @@ It refuses to write into a non-local (`LAB_TRACKER_ENVIRONMENT` other than
 `local`) or auth-enabled database unless you pass `--allow-non-local`.
 This is the same seeded data behind the read-only public demo.
 
-Add `--with-review` to also stage a golden day of fourteen captures (bench and
-imaging notes, a figure, a git commit, a meeting note, a bare identifier) and
+Add `--with-review` to also stage a golden day of fifteen captures (bench and
+imaging notes, a figure, a git commit, a meeting note, a bare identifier,
+a proposed follow-up and an unassigned dose comparison) and
 one READY batch draft over them, so the review page has something to review:
 
 ```bash

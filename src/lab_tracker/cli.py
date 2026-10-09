@@ -884,6 +884,9 @@ def main(argv: list[str] | None = None) -> None:
         default=".",
         help="Consumer repo path to inspect. Defaults to the current directory.",
     )
+    from lab_tracker.maintenance.cli import add_parser as add_maintenance_parser
+
+    add_maintenance_parser(subcommands)
     models_parser = subcommands.add_parser(
         "models",
         help="Audit configured AI models against dated, source-backed recommendations.",
@@ -1000,6 +1003,10 @@ def main(argv: list[str] | None = None) -> None:
         print(json.dumps(payload, indent=2))
         if _doctor_exit_code(payload):
             raise SystemExit(1)
+    elif args.command == "maintenance":
+        from lab_tracker.maintenance.cli import run_command as run_maintenance_command
+
+        raise SystemExit(run_maintenance_command(args))
     elif args.command == "models":
         from lab_tracker.ai_model_audit import audit_ai_models
 
