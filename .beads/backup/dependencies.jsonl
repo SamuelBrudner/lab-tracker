@@ -388,6 +388,7 @@
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-chv8","issue_id":"lab-tracker-9j90","type":"parent-child"}
 {"created_at":"2026-05-24T18:15:14Z","created_by":"bootstrap","depends_on_id":"lab-tracker-9iu","issue_id":"lab-tracker-9qm","type":"blocks"}
 {"created_at":"2026-05-24T18:15:14Z","created_by":"bootstrap","depends_on_id":"lab-tracker-mgr","issue_id":"lab-tracker-9qm","type":"discovered-from"}
+{"created_at":"2026-10-09T10:47:41Z","created_by":"SamuelBrudner","depends_on_id":"lab-tracker-pc0s","issue_id":"lab-tracker-a2kp","type":"discovered-from"}
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-aai","issue_id":"lab-tracker-aai.1","type":"parent-child"}
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-aai","issue_id":"lab-tracker-aai.2","type":"parent-child"}
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-aai.8","issue_id":"lab-tracker-aai.2","type":"relates-to"}
