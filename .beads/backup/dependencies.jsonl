@@ -803,6 +803,7 @@
 {"created_at":"2026-05-24T18:15:14Z","created_by":"bootstrap","depends_on_id":"lab-tracker-0g9","issue_id":"lab-tracker-p1a","type":"blocks"}
 {"created_at":"2026-05-24T18:15:14Z","created_by":"bootstrap","depends_on_id":"lab-tracker-cif","issue_id":"lab-tracker-p1a","type":"blocks"}
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-53fv","issue_id":"lab-tracker-p9ju","type":"discovered-from"}
+{"created_at":"2026-10-08T22:13:09Z","created_by":"SamuelBrudner","depends_on_id":"lab-tracker-na1y","issue_id":"lab-tracker-pc0s","type":"discovered-from"}
 {"created_at":"2026-10-08T15:50:31Z","created_by":"SamuelBrudner","depends_on_id":"lab-tracker-dl26","issue_id":"lab-tracker-pdpy","type":"discovered-from"}
 {"created_at":"2026-07-29T23:40:59Z","created_by":"SamuelBrudner","depends_on_id":"lab-tracker-w4xi","issue_id":"lab-tracker-pfqn","type":"discovered-from"}
 {"created_at":"2026-07-16T20:29:08Z","created_by":"import","depends_on_id":"lab-tracker-stkn","issue_id":"lab-tracker-pfyv","type":"discovered-from"}
