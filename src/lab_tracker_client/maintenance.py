@@ -41,7 +41,7 @@ def add_parser_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--upgrade-client",
         action="store_true",
-        help="Check GitHub main and upgrade a uv tool install when its commit differs.",
+        help="Upgrade a uv tool install to --revision, or opt into GitHub main if omitted.",
     )
     parser.add_argument(
         "--revision",
@@ -123,7 +123,8 @@ def _json_command(
 
 
 def _roots(args: argparse.Namespace) -> list[Path]:
-    if not args.repo and not args.all:
+    machine_upkeep = args.upgrade_client or args.refresh_skills
+    if not args.repo and not args.all and not machine_upkeep:
         raise MaintenanceError("Choose --all or at least one --repo.")
     roots = list(args.repo)
     if args.all:
@@ -146,7 +147,7 @@ def _roots(args: argparse.Namespace) -> list[Path]:
             except (OSError, ValueError, AttributeError) as exc:
                 raise MaintenanceError("The applied-repos registry could not be read.") from exc
     resolved = list(dict.fromkeys(Path(root).expanduser().resolve() for root in roots))
-    if not resolved:
+    if not resolved and not machine_upkeep:
         raise MaintenanceError("No repos selected; supply --repo or enroll repos first.")
     return resolved
 
@@ -227,6 +228,30 @@ def _upgrade(
         raise MaintenanceError("Installed client revision differs from the requested revision.")
     payload["status"] = "updated"
     return payload
+
+
+def _mcp_follow_up(lt: Path, client_update: dict[str, Any]) -> dict[str, Any]:
+    """Report a real launch check to run after restarting; never claim it ran."""
+
+    command = lt.resolve().with_name("lt-mcp.exe" if os.name == "nt" else "lt-mcp")
+    argv = [str(lt), "setup", "verify-mcp", "--command", str(command)]
+    revision = client_update.get("target_revision")
+    if revision:
+        argv.extend(["--expected-revision", revision])
+    return {
+        "command": str(command),
+        "verification_argv": argv,
+        "verified": False,
+        "host_restart_required": client_update.get("status") == "updated",
+        "host_restart_after_apply": client_update.get("status") == "would-update",
+        "next_step": (
+            "The package supplies both lt and lt-mcp. After a package update, restart "
+            "the MCP host and run verification for the absolute lt-mcp path it registered. "
+            "The command above checks the selected installation; if the app registered "
+            "a different executable, select its companion lt with --lt-path. "
+            "Doctor checks the selected Python environment's import, not the app registration."
+        ),
+    }
 
 
 def _update_summary(payload: dict[str, Any], *, preview: bool = False) -> dict[str, Any]:
@@ -314,6 +339,7 @@ def maintain(args: argparse.Namespace) -> dict[str, Any]:
             if args.upgrade_client:
                 report["client_update"] = {"status": "checking"}
                 report["client_update"] = _upgrade(args, lt, cwd=cwd, env=env)
+            report["lt_mcp"] = _mcp_follow_up(lt, report["client_update"])
             if report["client_update"]["status"] == "would-update":
                 report["warnings"] = [
                     "Repo previews below use the installed client. Apply to upgrade first, "

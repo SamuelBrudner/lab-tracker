@@ -38,6 +38,7 @@ from lab_tracker.decision_context_constants import (
     AGENTS_CODE_CONVENTIONS_BLOCK_END,
     CLAUDE_BLOCK_BEGIN,
     CLAUDE_BLOCK_END,
+    CLIENT_MAINTENANCE_POLICY,
     CODE_CONVENTIONS_BLOCK_BEGIN,
     CODE_CONVENTIONS_BLOCK_END,
     COMMIT_CAPTURE_RECOVERY_POLICY,
@@ -1595,6 +1596,8 @@ def _agents_fragment() -> str:
         rather than applying them unprompted.
 
         {AGENT_SESSION_CAPTURE_DISCOVERY_POLICY}
+
+        {CLIENT_MAINTENANCE_POLICY}
 
         Capture that needs no code changes, once this checkout is bound to a
         project: `lt setup autotrack` captures figures notebooks save or

@@ -142,11 +142,25 @@ def test_probe_names_both_releases_and_the_pinned_update(monkeypatch) -> None:
     assert notice.startswith("UPDATE AVAILABLE: this Lab Tracker MCP client runs release 0.1.0")
     assert "server runs release 0.2.0" in notice
     assert "Tell the person" in notice
-    assert f"lab-tracker.git@{SERVER_REVISION}" in notice
+    assert f"lab-tracker.git@{SERVER_REVISION}" in notice  # Older-client fallback.
+    assert f"lt maintain --all --upgrade-client --revision {SERVER_REVISION}" in notice
+    assert "--refresh-skills --dry-run" in notice
+    assert "--refresh-skills --yes" in notice
+    assert "restart the MCP host" in notice
+    assert "registered lt-mcp" in notice
     # Bounded well below the API client's ordinary request timeout, and the
     # whole response by one shared wall-clock deadline.
     assert _HealthProbe.seen_timeouts[-1] == 2.0
     assert _HealthProbe.seen_deadlines[-1] == HEALTH_PROBE_DEADLINE_SECONDS
+
+
+def test_newer_server_without_revision_does_not_prescribe_main(monkeypatch) -> None:
+    notice = _probe_with(monkeypatch, {"app": {"version": "0.2.0"}})
+    assert notice is not None
+    assert "Agents page" in notice
+    assert "maintenance waits for that pin" in notice
+    assert "lt maintain --" not in notice
+    assert "uv tool install" not in notice
 
 
 @pytest.mark.parametrize(
@@ -184,9 +198,7 @@ def test_probe_ignores_an_installed_release_it_cannot_read(monkeypatch) -> None:
     assert _probe_with(monkeypatch, health, client_version=OVERSIZED_VERSION) is None
 
 
-def test_probe_fails_open_and_says_why_when_the_client_cannot_be_built(
-    monkeypatch, capsys
-) -> None:
+def test_probe_fails_open_and_says_why_when_the_client_cannot_be_built(monkeypatch, capsys) -> None:
     def unbuildable(_settings: MCPSettings) -> None:
         raise ImportError(SOCKS_WITHOUT_SOCKSIO)
 

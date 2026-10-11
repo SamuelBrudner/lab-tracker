@@ -700,8 +700,9 @@ def _assert_coverage_names_the_stale_machine(
         "lab-tracker on the machine watching `fly_walking_data` (rig-7) is behind this server: "
         "it captured with release 0.3.0, and the server runs release 0.5.0."
     )
-    assert "install command on the server's Agents page" in rig_watch["update_notice"]
-    assert "`lt update`" in rig_watch["update_notice"]
+    assert "server's Agents page" in rig_watch["update_notice"]
+    assert "maintenance waits for that pin" in rig_watch["update_notice"]
+    assert "lt maintain --" not in rig_watch["update_notice"]
     # A machine idle for longer than the window is behind but not addressed.
     assert old_rig["release_status"] == "behind"
     assert [source["update_notice"] for source in (manual, laptop, old_rig)] == [None, None, None]

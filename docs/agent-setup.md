@@ -605,6 +605,32 @@ describe them, and the [capture guide](capture-guide.md) maps all of them.
 7. Accept one proposal and commit—as a person, in the app. That's the whole
    loop.
 
+## Keep the client and MCP current
+
+`lt doctor` and local `lt-mcp` update notices give the same server-pinned
+maintenance flow. From the Setup page or doctor's `client.server.revision`,
+use the server's full Git revision:
+
+```bash
+lt maintain --all --upgrade-client --revision <server-sha> --refresh-skills --dry-run
+lt maintain --all --upgrade-client --revision <server-sha> --refresh-skills --yes
+```
+
+Review the preview before applying. Use `--repo <path>` for selected repos,
+including unregistered ones, and `--lt-path /absolute/path/to/lt` for the
+installation the MCP host uses. Omitting the revision opts into GitHub main;
+wait for a pin from the server operator if it is unknown. For an older CLI,
+the checkout bootstrap takes the same flags, or use the Setup page's pinned
+install followed by `lt update` and `lt update --skills-only`.
+
+Both commands ship in the package. Restart the MCP host after the upgrade,
+then run `lt setup verify-mcp --expected-revision <server-sha> --command
+/absolute/path/to/lt-mcp` using the path registered above, and ask the assistant
+to list one project in the app. Maintenance reports that follow-up explicitly;
+doctor's import check only covers its own Python environment. Analysis-repo
+Python dependencies need their own pinned `uv add` update. See
+[client maintenance](setup.md#maintain-a-set-of-repos-with-one-command).
+
 ## What agents can and cannot do
 
 | Can | Cannot |
