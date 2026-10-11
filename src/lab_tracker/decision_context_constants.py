@@ -60,6 +60,22 @@ AGENT_SESSION_CAPTURE_DISCOVERY_POLICY = (
     "Missing optional hooks are advisory, and diagnostics never install them."
 )
 
+CLIENT_MAINTENANCE_POLICY = (
+    "For client upkeep, read-only `lt doctor` and `lt setup status` report release and "
+    "integration drift. When they recommend an update, preview "
+    "`lt maintain --all --upgrade-client --revision <full-server-revision> "
+    "--refresh-skills --dry-run`, then offer the same command with `--yes` after review. "
+    "Use `--repo <path>` for selected repos and `--lt-path <absolute path to lt>` for "
+    "the installation the MCP host uses. Server-directed updates require its full "
+    "revision; never omit the pin to choose GitHub main. The package supplies both "
+    "lt and lt-mcp. After upgrading, restart the MCP host and run `lt setup verify-mcp "
+    "--expected-revision <full-server-revision> --command <registered lt-mcp path>`. "
+    "Doctor's import check covers its own environment, not the app registration. "
+    "The setup guide describes the pinned fallback for older clients and separate "
+    "analysis-repository dependency updates."
+)
+
+
 AGENT_CONSULTATION_POLICY = f"""# Lab Tracker Agent Consultation Policy
 
 {RESEARCH_FACING_DECISION_POLICY}
@@ -105,6 +121,7 @@ MCP_SERVER_INSTRUCTIONS = " ".join(
         "pipeline, and cluster runs; coding-agent sessions; bench and server "
         "channels); read-only `lt setup status` is safe to consult.",
         AGENT_SESSION_CAPTURE_DISCOVERY_POLICY,
+        CLIENT_MAINTENANCE_POLICY,
     )
 )
 
@@ -170,6 +187,8 @@ def managed_agent_activation_block() -> str:
             "optional capture path.",
             "",
             AGENT_SESSION_CAPTURE_DISCOVERY_POLICY,
+            "",
+            CLIENT_MAINTENANCE_POLICY,
             CLAUDE_BLOCK_END,
             "",
         ]
@@ -237,6 +256,8 @@ def code_facing_idioms(*, symbols: Iterable[str] | None = None) -> str:
         "offer them rather than wrapping commands unasked.",
         "",
         AGENT_SESSION_CAPTURE_DISCOVERY_POLICY,
+        "",
+        CLIENT_MAINTENANCE_POLICY,
     ]
     if {"savefig", "capture_figures"}.issubset(symbol_set):
         sections.extend(

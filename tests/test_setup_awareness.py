@@ -732,6 +732,9 @@ def test_doctor_warns_when_the_client_is_a_patch_release_behind(
     [warning] = payload["warnings"]
     assert "(release 0.4.0) is behind its server (release 0.4.1)" in warning
     assert f"lab-tracker.git@{SERVER_REVISION}" in warning
+    assert f"lt maintain --all --upgrade-client --revision {SERVER_REVISION}" in warning
+    assert "--refresh-skills --dry-run" in warning
+    assert "restart the MCP host" in warning
     assert not any(target["drifted"] for target in payload["targets"])
 
 
@@ -903,6 +906,9 @@ def test_status_names_a_client_behind_the_server_release(
     assert payload["client"]["server"] == {"version": "99.0.0", "revision": SERVER_REVISION}
     [suggestion] = payload["suggestions"]
     assert suggestion.startswith("This lab-tracker client (release ")
+    assert f"lt maintain --all --upgrade-client --revision {SERVER_REVISION}" in suggestion
+    assert "--refresh-skills --dry-run" in suggestion
+    assert "registered lt-mcp" in suggestion
     assert "is behind its server (release 99.0.0)" in suggestion
     assert f"lab-tracker.git@{SERVER_REVISION}" in suggestion
     assert "`lt update`" in suggestion

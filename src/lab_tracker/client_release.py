@@ -198,13 +198,27 @@ def project_install_command(revision: str | None) -> str | None:
 
 
 def update_steps(server: ReleaseIdentity) -> str:
-    """Non-imperative steps that move the ``uv tool`` install onto ``server``'s release."""
+    """Shared, server-pinned maintenance advice for doctor, MCP and coverage."""
 
-    command = client_install_command(server.revision)
-    install = f"`{command}`" if command else "the install command on the server's Agents page"
+    revision = normalized_revision(server.revision)
+    if revision is None:
+        return (
+            "the server's Agents page supplies the matching install once its full source "
+            "revision is available; maintenance waits for that pin instead of choosing main"
+        )
+    maintain = f"lt maintain --all --upgrade-client --revision {revision} --refresh-skills"
+    install = client_install_command(revision)
     return (
-        f"{install} installs the server's release, then `lt update` refreshes each "
-        "consumer repo and a restarted MCP host picks up the new lt-mcp"
+        f"`{maintain} --dry-run` previews the matching package, repo and skill updates; "
+        f"`{maintain} --yes` applies them after review. "
+        "Use `--repo <path>` instead of `--all` for selected or unregistered repos, and "
+        "`--lt-path <absolute path to lt>` to select the installation used by the MCP host. "
+        f"If that lt has no maintain command, `{install}` installs the server's release, "
+        "then `lt update` refreshes each repo and `lt update --skills-only` refreshes skills. "
+        "The package contains both lt and lt-mcp; restart the MCP host after an upgrade, "
+        f"then `lt setup verify-mcp --expected-revision {revision} "
+        "--command <absolute path to the registered lt-mcp>` verifies that executable. "
+        "Doctor's import check covers its own Python environment, not the app registration"
     )
 
 

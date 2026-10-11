@@ -35,9 +35,11 @@ def setup_guide_markdown() -> str:
         "  checks. `lt setup verify-mcp` launches the configured executable but\n"
         "  makes only health and project-list reads.\n"
         "- Repository setup writes that support `--dry-run` are previewed\n"
-        "  before applying. Package installs (`uv tool install`, `uv add`) do\n"
-        "  not have a Lab Tracker dry run, so a person reviews and runs each\n"
-        "  exact server-pinned command separately.\n"
+        "  before applying. `lt maintain --dry-run` previews package, repo and\n"
+        "  skill maintenance as one job; a person reviews that plan before\n"
+        "  approving the matching `--yes` command. Direct package installs\n"
+        "  (`uv tool install`, `uv add`) have no Lab Tracker dry run, so a\n"
+        "  person reviews each exact server-pinned command separately.\n"
         "- A person approves each applying command. `lt setup connect`,\n"
         "  `lt project bind`, and `lt hooks install` additionally require an\n"
         "  explicit `--yes`.\n"
@@ -178,7 +180,8 @@ def setup_guide_markdown() -> str:
         "graph automatically. Server-side AI drafting uses the operator's\n"
         "configured provider credential; no local OpenAI key is needed for Lab\n"
         "Tracker. `lt doctor` and `lt setup status` surface drift after package\n"
-        "upgrades and confirm that `lt-mcp` can start, and both compare this\n"
+        "upgrades and check the MCP import in this CLI's Python environment;\n"
+        "they do not verify the app's registered executable. Both compare this\n"
         "client's release with the server's (`lt doctor` only warns when the\n"
         "server cannot be reached). `lt update` is the refresh path for a repo\n"
         "(`lt update --skills-only` is the one for the setup skill alone). When\n"
@@ -188,11 +191,34 @@ def setup_guide_markdown() -> str:
         "judged by its captures: `lt watch`, `lt run`, `lt pipeline`, `lt hpc`,\n"
         "the repo hooks, agent sessions, notebook saves, and figure saves record\n"
         "their client's release, notes made by hand or import do not); the same\n"
-        "release at a different commit is reported, never suggested. The\n"
-        "`uv tool` install updates with the Setup page's server-pinned install,\n"
-        "then `lt update` refreshes each repo; an analysis repo updates by\n"
-        "rerunning its pinned `uv add` (step 5), which `lt update` does not\n"
-        "change.\n"
+        "release at a different commit is reported, never suggested.\n"
+        "\n"
+        "For an update recommended by doctor or MCP, use the server's full\n"
+        "revision in `lt maintain --all --upgrade-client --revision <revision>\n"
+        "--refresh-skills --dry-run`. Review the package, repo and skill plan,\n"
+        "then the same command with `--yes` applies it. `--repo <path>` selects\n"
+        "individual repos, including ones not registered yet. An MCP-only\n"
+        "machine with no registered repos can still update its package and\n"
+        "skills; repo options are optional for those requested steps. `--lt-path\n"
+        "<absolute path to lt>` selects the MCP host's installation. Omitting\n"
+        "`--revision` deliberately targets GitHub main, so keep it for\n"
+        "server-directed updates. If the server cannot report its full\n"
+        "revision, ask its operator for a pinned release before upgrading.\n"
+        "\n"
+        "Both `lt` and `lt-mcp` come from that package. Restart the MCP host\n"
+        "after a package upgrade, then `lt setup verify-mcp --expected-revision\n"
+        "<revision> --command <absolute path to the registered lt-mcp>` checks\n"
+        "the real launch and authenticated reads. Confirm in the app by asking\n"
+        "the assistant to list one Lab Tracker project.\n"
+        "\n"
+        "If the installed CLI lacks `maintain`, run the same arguments through\n"
+        "`python3 scripts/maintain_lab_tracker.py` from a current Lab Tracker\n"
+        "checkout; it needs only the standard library. Without a checkout,\n"
+        "the Setup page's exact server-pinned `uv tool install` updates both\n"
+        "commands, then `lt update` refreshes each repo and `lt update\n"
+        "--skills-only` refreshes both skills. An analysis repo updates by\n"
+        "rerunning its pinned `uv add` (step 5), which neither `lt update` nor\n"
+        "`lt maintain` changes.\n"
     )
 
 
@@ -266,8 +292,10 @@ _SKILL_CONVERSATION = """\
 4. Commit hooks are per-repo consent: name the repo, show the preview, and
    let the user apply `lt hooks install --yes` themselves when in doubt.
 5. Close by re-running `lt setup status` and reflecting the healthy state
-   back; mention that after upgrades `lt update` refreshes a repo's files
-   and `lt update --skills-only` refreshes this skill.
+   back. For package upkeep, offer the server-pinned `lt maintain` preview
+   above; after upgrading, restart and verify the app's registered `lt-mcp`.
+   `lt update` refreshes repo files and `lt update --skills-only` refreshes
+   both skills without upgrading the package.
 
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.

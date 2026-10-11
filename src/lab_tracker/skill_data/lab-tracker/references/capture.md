@@ -5,6 +5,24 @@ files. The generated `scripts/lt.py` is a thin shim over `lab_tracker_client`,
 and the generated `.mcp.json` uses the portable `lt-mcp` command instead of a
 workstation-specific Python path.
 
+Doctor, setup status and local MCP notices share a maintenance prescription:
+`lt maintain --all --upgrade-client --revision <full-server-revision>
+--refresh-skills --dry-run` previews the package, repo files and complete skills;
+the same command with `--yes` applies after review. `--repo <path>` selects a
+smaller set or an unregistered repo. `--lt-path <absolute path to lt>` selects
+the MCP host's installation. Keep the full server revision: omitting it opts
+into GitHub main. Wait for the server's operator to supply a pin if unknown.
+
+Both `lt` and `lt-mcp` come from the package. Restart the MCP host after an
+upgrade, then run `lt setup verify-mcp --expected-revision <full-server-revision>
+--command <absolute path to the registered lt-mcp>` and ask the assistant to
+list one project in the app. Doctor checks its own environment's import; it
+does not verify the app registration. If the installed `lt` lacks `maintain`,
+use `python3 scripts/maintain_lab_tracker.py` with the same arguments from a
+current Lab Tracker checkout, or use the Setup page's pinned `uv tool install`
+followed by repo and skill refresh below. Analysis repos have their own pinned
+`uv add` dependency; neither maintenance nor repo refresh changes that pin.
+
 After upgrading the installed package, run `lt update` inside a consumer repo to
 refresh everything to the new version in one step: managed prompt blocks are
 re-rendered in place (consent decisions preserved; add missing conventions

@@ -188,30 +188,38 @@ it when a skill is missing or stale. Because it never reads a repo, it refuses
 
 `lt maintain` runs the check and repair flow as a job that returns one JSON
 report. Choose repos with repeated `--repo` paths, or use `--all` to read the
-existing applied-repos registry. No repo is selected by default.
+existing applied-repos registry. No repo is selected by default. On an MCP-only
+machine, `--upgrade-client` or `--refresh-skills` can run without repo options;
+those requested steps also work when `--all` finds no enrolled repos. A repo-only
+sweep with no repos still returns an actionable error.
 
-Preview the job, then apply it:
+Doctor and local MCP update notices prescribe a job pinned to the connected
+server's full revision (`client.server.revision` in doctor, or the Setup page).
+Preview that plan, then apply it:
 
 ```bash
-lt maintain --all --upgrade-client --dry-run
-lt maintain --all --upgrade-client --yes
+lt maintain --all --upgrade-client --revision <server-sha> --refresh-skills --dry-run
+lt maintain --all --upgrade-client --revision <server-sha> --refresh-skills --yes
 ```
 
 For a smaller set:
 
 ```bash
-lt maintain --repo /path/to/veritas --repo /path/to/flyvis --upgrade-client --yes
+lt maintain --repo /path/to/veritas --repo /path/to/flyvis --upgrade-client --revision <server-sha> --dry-run
 ```
 
-With `--upgrade-client`, the job compares the installed Git commit with GitHub
-`main`, even when both packages have the same version number. If they differ,
-it installs the exact commit it found and checks the install metadata again.
+With `--upgrade-client --revision <server-sha>`, the job compares the installed
+Git commit with the selected full 40-character revision, even when both packages
+have the same version number. If they differ, it installs that exact commit and
+checks the install metadata again. If the server's revision is unknown, obtain
+its pin from the operator before applying a server-directed update.
 This upgrade supports a `uv tool` install from the Lab Tracker GitHub repo.
 Other installs return a clear error rather than replacing another environment.
-The upgrade is opt-in: omit `--upgrade-client` to use the existing client, or
-add `--revision <full-git-sha>` to target a fixed commit, such as the one your
-server runs. `--lt-path /path/to/lt` selects an install when PATH has more than
-one. An analysis repo's Python dependency is a separate install and is not
+The upgrade is opt-in: omit `--upgrade-client` to use the existing client.
+Omitting `--revision` with `--upgrade-client` deliberately targets GitHub `main`;
+that developer option can move the client ahead of its server. Doctor and MCP
+prescriptions always include the server pin. `--lt-path /path/to/lt` selects
+an install when PATH has more than one. An analysis repo's Python dependency is a separate install and is not
 changed by this job.
 
 The job runs each doctor check and update in a fresh process using that install.
@@ -222,8 +230,23 @@ applies writes. Add `--refresh-skills` to preview or refresh the machine's setup
 skills once as part of the same job.
 
 The report includes the client commit, each repo's before and after checks,
-the files to update, and any failures. It lists the command for inspecting the
-full file diff locally; raw diffs and child error output are left out of the
+the files to update, and any failures. Its `lt_mcp` section names the companion
+executable, a `verification_argv` for a real launch check, and whether this
+package upgrade requires a host restart. The job reports `verified: false`:
+doctor checks the selected Python environment's import; maintenance does not
+inspect the app's registration or restart its running MCP process.
+
+The package contains both `lt` and `lt-mcp`. After upgrading, restart the MCP
+host and run the reported verification command with the absolute executable
+path it registered. If the app uses another installation, select its companion
+`lt` with `--lt-path`, and verify that registered `lt-mcp`:
+
+```bash
+lt setup verify-mcp --expected-revision <server-sha> --command /absolute/path/to/lt-mcp
+```
+
+Then ask the assistant in that app to list one Lab Tracker project.
+The report lists the command for inspecting the full file diff locally; raw diffs and child error output are left out of the
 aggregate report because old config files can contain credentials. A missing
 repo is reported and the job continues with the others. A failed client
 upgrade stops the job before any repo writes. Repeated runs skip repairs when
@@ -240,11 +263,14 @@ For an older installed `lt` that does not yet have `maintain`, the same job can
 run from a current Lab Tracker checkout using only Python's standard library:
 
 ```bash
-python3 scripts/maintain_lab_tracker.py --all --upgrade-client --dry-run
-python3 scripts/maintain_lab_tracker.py --all --upgrade-client --yes
+python3 scripts/maintain_lab_tracker.py --all --upgrade-client --revision <server-sha> --refresh-skills --dry-run
+python3 scripts/maintain_lab_tracker.py --all --upgrade-client --revision <server-sha> --refresh-skills --yes
 ```
 
 This bootstrap can update an older or broken client before running its checks.
+Without a checkout, use the Setup page's exact server-pinned `uv tool install`,
+then `lt update` in each repo and `lt update --skills-only` for both skills.
+Restart and verify the MCP host as above.
 In a dry run that finds a pending client upgrade, repo previews use the current
 install and the report says so. The apply run upgrades first, then makes new
 previews with the updated client.
@@ -276,8 +302,9 @@ consumer-relevant and a release is the unit a maintainer chose to cut.
   soft. A server that cannot be reached or read is a warning carrying the probe's
   diagnosis, and an address that does not parse is a warning with the diagnosis
   `server_check_failed`; either way the release check is skipped. A client behind
-  its server is a warning that names the update steps. Warnings never change the
-  exit code, which stays decided by drift and the `lt-mcp` check.
+  its server is a warning that names the server-pinned maintenance preview,
+  applying command, older-client fallback, and MCP restart/verification steps.
+  Warnings never change the exit code, which stays decided by drift and the `lt-mcp` check.
   `lt setup verify-mcp` remains the deeper connectivity check.
 - `lt setup status` reports the same `lt_mcp` check plus a `client` release
   comparison built from its existing `/health` probe (`status`,
@@ -310,7 +337,9 @@ consumer-relevant and a release is the unit a maintainer chose to cut.
   API has authentication enabled.
   When an update is recommended, the MCP `instructions` start with an
   `UPDATE AVAILABLE` notice and every tool result carries the same notice in
-  `_lab_tracker_update_notice`. A hosted endpoint skips the check; it ships
+  `_lab_tracker_update_notice`. This uses the same server-pinned maintenance
+  advice as doctor and setup status; the notice does not apply updates. A
+  hosted endpoint skips the check; it ships
   with its server.
 - A capture queued through the watch outbox (`lt watch`, including
   `lt watch touch`; `lt run`; `lt pipeline` with `report`, `nextflow`, or `dvc`,
@@ -348,11 +377,11 @@ One install id covers every Python environment on a machine, and the notice's
 fix depends on which environment made the capture:
 
 - **Tool environment** (`lt watch`, `lt run`, `lt pipeline`, `lt hpc`,
-  `lt git snapshot`, the repo hook, and the agent-session hook): install the
-  server's release with the Agents page's install command
-  (`uv tool install --force "lab-tracker @ git+https://github.com/SamuelBrudner/lab-tracker.git@<revision>"`),
-  then run `lt update` in each consumer repo and restart the MCP host so it
-  launches the new `lt-mcp`.
+  `lt git snapshot`, the repo hook, and the agent-session hook): use the
+  server-pinned `lt maintain` preview above, then apply the reviewed plan.
+  It upgrades the package and refreshes repos and skills. The notice includes
+  the pinned install fallback for older clients. Restart the MCP host and
+  verify its registered `lt-mcp` after the package upgrade.
 - **Analysis repo** (in-script captures such as `savefig` from
   `lab_tracker_client`, adapter `lab-tracker-client-figure`, the Jupyter save
   hook, adapter `lab-tracker-client-notebook`, or captures that carry `run_*`

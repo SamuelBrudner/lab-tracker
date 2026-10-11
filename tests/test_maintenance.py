@@ -158,6 +158,25 @@ def test_default_previews_have_no_package_or_repo_writes(machine, monkeypatch):
     assert all("--dry-run" in call for call in runner.calls if call[1] == "update")
 
 
+@pytest.mark.parametrize("upgrade", [True, False])
+def test_mcp_follow_up_does_not_claim_a_restart_or_launch_in_a_preview(
+    machine, monkeypatch, upgrade
+):
+    runner = _use_runner(monkeypatch, machine, changed=False)
+    argv = ["--repo", str(machine[2]), "--lt-path", str(machine[1]), "--dry-run"]
+    if upgrade:
+        argv.extend(["--upgrade-client", "--revision", NEW])
+    report = m.maintain(_args(*argv))
+    follow_up = report["lt_mcp"]
+    assert follow_up["verified"] is False
+    assert follow_up["host_restart_required"] is False
+    assert follow_up["host_restart_after_apply"] is upgrade
+    assert follow_up["verification_argv"][0] == str(machine[1])
+    assert ("--expected-revision" in follow_up["verification_argv"]) is upgrade
+    assert not any("verify-mcp" in call for call in runner.calls)
+    assert not any(call[:3] == ["uv", "tool", "install"] for call in runner.calls)
+
+
 def test_matching_commit_skips_install_even_when_version_string_is_unchanged(machine, monkeypatch):
     runner = _use_runner(monkeypatch, machine, revision=NEW, changed=False)
     report = m.maintain(_args("--repo", str(machine[2]), "--upgrade-client", "--yes"))
@@ -224,6 +243,18 @@ def test_explicit_revision_does_not_query_moving_main(machine, monkeypatch):
     )
     assert report["ok"] is True
     assert not any(call[0] == "git" for call in runner.calls)
+    assert report["lt_mcp"]["host_restart_required"] is True
+    assert report["lt_mcp"]["verified"] is False
+    assert report["lt_mcp"]["verification_argv"] == [
+        str(machine[1]),
+        "setup",
+        "verify-mcp",
+        "--command",
+        str(machine[1].with_name("lt-mcp.exe" if m.os.name == "nt" else "lt-mcp")),
+        "--expected-revision",
+        NEW,
+    ]
+    assert not any("verify-mcp" in call for call in runner.calls)
 
 
 def test_all_and_explicit_repos_are_deduplicated_and_missing_repo_does_not_stop_sweep(
@@ -428,3 +459,33 @@ def test_preview_file_list_omits_cancelled_intermediate_updates():
         preview=True,
     )
     assert summary["overwritten"] == ["CLAUDE.md"]
+
+
+@pytest.mark.parametrize("selection", [[], ["--all"]])
+def test_mcp_only_machine_can_upgrade_without_enrolled_repos(machine, monkeypatch, selection):
+    runner = _use_runner(monkeypatch, machine)
+    report = m.maintain(_args(*selection, "--upgrade-client", "--revision", NEW, "--yes"))
+    assert report["ok"] is True
+    assert report["client_update"]["status"] == "updated"
+    assert report["lt_mcp"]["host_restart_required"] is True
+    assert report["repos"] == []
+    assert not any(call[1] in {"doctor", "update"} for call in runner.calls)
+    assert not (machine[2].parent / "config/applied-repos.json").exists()
+
+
+def test_skills_only_maintenance_does_not_touch_a_repo(machine, monkeypatch):
+    runner = _use_runner(monkeypatch, machine)
+    report = m.maintain(_args("--refresh-skills", "--yes"))
+    assert report["ok"] is True
+    assert report["skills"]["status"] == "updated"
+    assert report["repos"] == []
+    assert all("--skills-only" in call for call in runner.calls)
+    assert not (machine[2].parent / "config/applied-repos.json").exists()
+
+
+def test_empty_repo_only_sweep_is_still_actionable(machine, monkeypatch):
+    runner = _use_runner(monkeypatch, machine)
+    report = m.maintain(_args("--all", "--yes"))
+    assert report["ok"] is False
+    assert "No repos selected" in report["errors"][0]
+    assert runner.calls == []

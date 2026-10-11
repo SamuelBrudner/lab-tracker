@@ -7,9 +7,11 @@ import lab_tracker_client
 from lab_tracker.decision_context_constants import (
     CODE_CONVENTIONS_BLOCK_BEGIN,
     CODE_CONVENTIONS_BLOCK_END,
+    MCP_SERVER_INSTRUCTIONS,
     code_conventions_version_line,
     code_facing_idioms,
     cursor_rules_mdc,
+    managed_agent_activation_block,
     managed_code_conventions_block,
 )
 from lab_tracker_client import __all__ as client_symbols
@@ -93,3 +95,19 @@ def test_package_docstring_names_first_wave_idioms() -> None:
     assert "lt_ids.json" in doc
     assert "content-hash evidence imports" in doc
     assert "fail-soft figure capture" in doc
+
+
+def test_client_upkeep_is_discoverable_in_every_agent_instruction_surface() -> None:
+    from lab_tracker.cli import _agents_fragment
+
+    for text in (
+        MCP_SERVER_INSTRUCTIONS,
+        managed_agent_activation_block(),
+        code_facing_idioms(),
+        _agents_fragment(),
+    ):
+        assert "--revision <full-server-revision>" in text
+        assert "--refresh-skills --dry-run" in text
+        assert "--lt-path" in text
+        assert "restart the MCP host" in text
+        assert "registered lt-mcp path" in text

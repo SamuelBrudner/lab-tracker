@@ -196,9 +196,7 @@ def test_install_command_matches_the_agents_page() -> None:
 
     assert match is not None
     assert match.group(1) == client_release.SOURCE_REPOSITORY_URL
-    assert "toolInstallCommand: `uv tool install --force \"${installRequirement}\"`" in (
-        client_setup
-    )
+    assert 'toolInstallCommand: `uv tool install --force "${installRequirement}"`' in (client_setup)
     assert client_install_command(REVISION_B) == (
         f'uv tool install --force "lab-tracker @ git+{match.group(1)}@{REVISION_B}"'
     )
@@ -209,7 +207,7 @@ def test_project_install_command_matches_the_setup_page() -> None:
         encoding="utf-8"
     )
 
-    assert "projectInstallCommand: `uv add \"${installRequirement}\"`" in client_setup
+    assert 'projectInstallCommand: `uv add "${installRequirement}"`' in client_setup
     assert project_install_command(REVISION_B) == (
         f'uv add "lab-tracker @ git+{client_release.SOURCE_REPOSITORY_URL}@{REVISION_B}"'
     )
@@ -242,9 +240,27 @@ def test_update_steps_pin_the_server_revision_when_known() -> None:
     unpinned = update_steps(ReleaseIdentity(version="0.2.0"))
 
     assert f"@{REVISION_B}" in pinned
-    assert "`lt update`" in pinned
+    assert f"lt maintain --all --upgrade-client --revision {REVISION_B}" in pinned
+    assert "--refresh-skills --dry-run" in pinned
+    assert "--refresh-skills --yes" in pinned
+    assert "`lt update`" in pinned  # Pinned fallback for older clients.
+    assert "lt update --skills-only" in pinned
+    assert "restart the MCP host" in pinned
+    assert f"lt setup verify-mcp --expected-revision {REVISION_B}" in pinned
+    assert "registered lt-mcp" in pinned
+    assert "--lt-path" in pinned
     assert "Agents page" in unpinned
+    assert "lt maintain" not in unpinned
     assert "uv tool install" not in unpinned
+
+
+@pytest.mark.parametrize("revision", [None, "main", "unknown", "bad; echo token"])
+def test_update_advice_never_substitutes_main_or_an_untrusted_revision(revision) -> None:
+    advice = update_steps(ReleaseIdentity(version="0.2.0", revision=revision))
+    assert "maintenance waits for that pin" in advice
+    assert "lt maintain --" not in advice
+    assert "git+" not in advice
+    assert "echo token" not in advice
 
 
 def test_installed_release_reads_version_and_pep610_revision(monkeypatch) -> None:

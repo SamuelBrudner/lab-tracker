@@ -74,6 +74,17 @@ watched-file captures for human review, with a bound project and a Read + stage
 evidence connection required for delivery. The full transcript stays local.
 See [capture and integration](references/capture.md) for every capture path.
 
+For upkeep, doctor and MCP update notices prescribe a server-pinned
+`lt maintain --all --upgrade-client --revision <full-server-revision>
+--refresh-skills --dry-run`; review before applying the matching `--yes` command.
+Use `--repo <path>` to select repos and `--lt-path <absolute path to lt>` to select
+the MCP host's installation. The package supplies both `lt` and `lt-mcp`;
+restart the host after upgrading, then verify its registered executable with
+`lt setup verify-mcp --expected-revision <full-server-revision> --command
+<absolute path to the registered lt-mcp>`. Doctor checks its own Python import.
+The [capture and integration guide](references/capture.md) covers older clients
+and separate analysis dependency pins.
+
 ## Load details for the current workflow
 
 Resolve these links relative to this skill directory. Read only the reference
