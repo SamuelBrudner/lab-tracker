@@ -240,6 +240,7 @@
 {"created_at":"2026-05-24T18:15:14Z","created_by":"bootstrap","depends_on_id":"lab-tracker-j75","issue_id":"lab-tracker-53a","type":"blocks"}
 {"created_at":"2026-10-08T17:38:15Z","created_by":"SamuelBrudner","depends_on_id":"lab-tracker-v06u","issue_id":"lab-tracker-58jy","type":"discovered-from"}
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-chv8","issue_id":"lab-tracker-5944","type":"parent-child"}
+{"created_at":"2026-10-11T11:36:01Z","created_by":"SamuelBrudner","depends_on_id":"lab-tracker-dl26","issue_id":"lab-tracker-5945","type":"discovered-from"}
 {"created_at":"2026-10-02T17:00:42Z","created_by":"SamuelBrudner","depends_on_id":"lab-tracker-y9sc","issue_id":"lab-tracker-5jq7","type":"discovered-from"}
 {"created_at":"2026-09-20T21:31:10Z","created_by":"SamuelBrudner","depends_on_id":"lab-tracker-5qcg","issue_id":"lab-tracker-5pr9","type":"discovered-from"}
 {"created_at":"2026-07-25T10:40:00Z","created_by":"SamuelBrudner","depends_on_id":"lab-tracker-1igm","issue_id":"lab-tracker-5rbk","type":"parent-child"}
@@ -915,6 +916,7 @@
 {"created_at":"2026-07-23T22:10:43Z","created_by":"import","depends_on_id":"lab-tracker-t4x0","issue_id":"lab-tracker-t4x0.9","type":"parent-child"}
 {"created_at":"2026-07-23T22:10:43Z","created_by":"import","depends_on_id":"lab-tracker-t4x0.1","issue_id":"lab-tracker-t4x0.9","type":"relates-to"}
 {"created_at":"2026-07-23T22:10:43Z","created_by":"import","depends_on_id":"lab-tracker-t4x0.4","issue_id":"lab-tracker-t4x0.9","type":"relates-to"}
+{"created_at":"2026-10-12T17:05:41Z","created_by":"SamuelBrudner","depends_on_id":"lab-tracker-5945","issue_id":"lab-tracker-t5a3","type":"discovered-from"}
 {"created_at":"2026-07-23T22:10:43Z","created_by":"import","depends_on_id":"lab-tracker-ggzs.3","issue_id":"lab-tracker-tcj7","type":"relates-to"}
 {"created_at":"2026-07-23T22:10:43Z","created_by":"import","depends_on_id":"lab-tracker-0if.11","issue_id":"lab-tracker-tcj7.1","type":"relates-to"}
 {"created_at":"2026-07-23T22:10:43Z","created_by":"import","depends_on_id":"lab-tracker-0if.2","issue_id":"lab-tracker-tcj7.1","type":"relates-to"}
