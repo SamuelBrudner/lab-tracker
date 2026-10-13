@@ -8,10 +8,16 @@ its own edit locality. These are mixins: LabTrackerAPI inherits them, so
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
+from uuid import UUID
 
 
 class UsageApiMixin:
+    def review_engagement(self, project_id: UUID, since: datetime) -> dict[str, Any]:
+        repository = self._service_context.active_repository()
+        return repository.graph_change_sets.review_engagement(project_id, since)
+
     def query_usage_events(self, *args: Any, **kwargs: Any) -> Any:
         repository = self._service_context.active_repository()
         return repository.query_usage_events(*args, **kwargs)

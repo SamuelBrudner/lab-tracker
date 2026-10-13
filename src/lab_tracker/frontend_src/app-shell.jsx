@@ -559,6 +559,8 @@ function App({ onReloadForUpdate = null }) {
           {route.kind === "batches" ? (
             <BatchReviewPage
               token={auth.token}
+              user={auth.user}
+              canWrite={canContributeToProject}
               projects={workspaceData.projects}
               selectedProjectId={workspaceData.selectedProjectId}
               onSelectedProjectChange={(event) =>

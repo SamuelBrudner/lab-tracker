@@ -13,6 +13,7 @@ import { ProvenanceDetails } from "./graph-drafts/ProvenanceDetails.jsx";
 import { ProvenanceLinkProposals } from "./graph-drafts/ProvenanceLinkProposals.jsx";
 import { SourceArtifactEvidence } from "./graph-drafts/SourceArtifactEvidence.jsx";
 import { SourceNoteActions } from "./graph-drafts/SourceNoteActions.jsx";
+import { TriageReview } from "./graph-drafts/TriageReview.jsx";
 import { decisionCounts, spokenReviewScript } from "./graph-drafts/format.js";
 import { REJECT_REASONS, reasonForKey } from "./graph-drafts/review-reasons.js";
 import { buildSourceArtifactReview } from "./graph-drafts/source-artifacts.js";
@@ -104,8 +105,10 @@ function GraphDraftDetailCard({
   setFlash,
   backPath = "/app",
   allowBulkAccept = true,
+  initialTriageGroupId = "",
+  onChangeSet = null,
 }) {
-  const [reviewView, setReviewView] = React.useState("proposals");
+  const [chosenReviewView, setReviewView] = React.useState("triage");
   const workflow = useGraphDraftWorkflow({
     token,
     changeSetId,
@@ -144,6 +147,14 @@ function GraphDraftDetailCard({
     canReviewDraft,
     canCommitDraft,
   } = workflow;
+  React.useEffect(() => {
+    if (changeSet?.change_set_id === changeSetId) {
+      onChangeSet?.(changeSet);
+    }
+  }, [changeSet, changeSetId, onChangeSet]);
+  const triageAvailable = Boolean(changeSet?.triage?.summary) &&
+    changeSet?.purpose !== "member_checkpoint_alignment";
+  const reviewView = chosenReviewView === "triage" && !triageAvailable ? "proposals" : chosenReviewView;
   const sourceReview = React.useMemo(
     () => buildSourceArtifactReview(changeSet),
     [changeSet]
@@ -332,8 +343,8 @@ function GraphDraftDetailCard({
                 ))}
             </div>
           ) : null}
-          <DraftQualityLine projectId={changeSet.project_id} token={token} changeSet={changeSet} />
-          <p className="review-lead subtle">
+          {reviewView !== "triage" ? <DraftQualityLine projectId={changeSet.project_id} token={token} changeSet={changeSet} /> : null}
+          {reviewView !== "triage" ? <p className="review-lead subtle">
             {changeSet.source_note_count || (changeSet.source_note_ids || []).length || 1}{" "}
             {(changeSet.source_note_count || (changeSet.source_note_ids || []).length || 1) === 1
               ? "capture"
@@ -343,7 +354,10 @@ function GraphDraftDetailCard({
               ? "1 proposal"
               : `${(changeSet.operations || []).length} proposals`}{" "}
             for your graph. Keep what&apos;s right, then commit — nothing changes until you do.
-          </p>
+          </p> : null}
+          <details className="context-details triage-source-details" open={reviewView !== "triage"}>
+          <summary>Full account, audio, and source captures</summary>
+          {reviewView === "triage" && changeSet.summary ? <p>{changeSet.summary}</p> : null}
           <AudioReviewConsole
             speechStatus={dictation.speechStatus}
             speechSupported={dictation.speechSupported}
@@ -390,10 +404,12 @@ function GraphDraftDetailCard({
             pendingCommands={pendingCommands}
             onArchive={workflow.archiveSourceNote}
           />
+          </details>
 
           <div className="review-view-switch">
             <span className="subtle">Review as</span>
             <div className="review-view-toggle" role="group" aria-label="Review view">
+              {triageAvailable ? <button type="button" className={reviewView === "triage" ? "active" : ""} aria-pressed={reviewView === "triage"} onClick={() => setReviewView("triage")}>Triage</button> : null}
               <button
                 type="button"
                 className={reviewView === "narrative" ? "active" : ""}
@@ -413,7 +429,13 @@ function GraphDraftDetailCard({
             </div>
           </div>
 
-          {reviewView === "narrative" ? (
+          {reviewView === "triage" ? (
+            <TriageReview key={changeSetId} changeSet={changeSet} workflow={workflow}
+              initialGroupId={initialTriageGroupId}
+              sourceReview={sourceReview} sourcePreviews={sourcePreviews}
+              onCarryover={(id) => navigate(`/app/batches/${id}`)}
+              onShowProposals={() => setReviewView("proposals")} onPause={() => navigate(backPath)} />
+          ) : reviewView === "narrative" ? (
             <NarrativeReview
               changeSet={changeSet}
               payloads={payloads}
@@ -508,7 +530,7 @@ function GraphDraftDetailCard({
                   · {counts.rejected} rejected · {counts.proposed} undecided
                 </span>
               </span>
-              {effectiveAllowBulkAccept ? (
+              {effectiveAllowBulkAccept && reviewView !== "triage" ? (
                 <button
                   type="button"
                   className="btn-secondary"
@@ -540,23 +562,30 @@ function GraphDraftDetailCard({
                   }
                   onClick={workflow.undoAcceptAll}
                 >
-                  Undo accept all
+                  {reviewView === "triage" ? "Undo last kept decision" : "Undo accept all"}
                 </button>
               </div>
             ) : null}
 
-            <div className="inline">
+            {!(reviewView === "triage" && canCommitDraft && acceptedCount > 0) ? <div className="inline">
               <button
                 type="button"
                 className="btn-secondary"
-                disabled={!canSubmitDraft || Boolean(pendingCommands.submit)}
+                disabled={!canSubmitDraft || Boolean(pendingCommands.submit) || Boolean(pendingCommands.triage) || (reviewView === "triage" && acceptedCount === 0 && (changeSet.triage?.groups || []).some((group) => !group.resolved))}
                 onClick={workflow.submitDraft}
               >
-                Submit for review
+                {reviewView === "triage" ? (acceptedCount ? "Send kept decisions to owner" : "Finish without keeping graph changes") : "Submit for review"}
               </button>
-            </div>
+            </div> : null}
 
-            <form className="form" onSubmit={workflow.commitDraft}>
+            {reviewView === "triage" && canReviewDraft && acceptedCount === 0 ? <button
+              type="button"
+              className="btn-secondary"
+              disabled={Boolean(pendingCommands.review) || Boolean(pendingCommands.triage)}
+              onClick={() => workflow.reviewDraft("rejected")}
+            >Close review without graph changes</button> : null}
+
+            {reviewView !== "triage" || (canCommitDraft && acceptedCount > 0) ? <form className="form" onSubmit={workflow.commitDraft}>
               {canReviewDraft ? (
                 <label>
                   Review note
@@ -583,6 +612,8 @@ function GraphDraftDetailCard({
                   </button>
                 </div>
               ) : null}
+              <details className="context-details" open={reviewView !== "triage"}>
+              <summary>Optional review message</summary>
               <label>
                 Commit message (optional)
                 <input
@@ -592,13 +623,14 @@ function GraphDraftDetailCard({
                   placeholder={suggestedCommitMessage}
                 />
               </label>
+              </details>
               <button
                 className="btn-primary"
-                disabled={!canCommitDraft || acceptedCount === 0 || Boolean(pendingCommands.commit)}
+                disabled={!canCommitDraft || acceptedCount === 0 || Boolean(pendingCommands.commit) || Boolean(pendingCommands.triage)}
               >
-                Commit accepted changes
+                {reviewView === "triage" ? "Finish review and commit kept changes" : "Commit accepted changes"}
               </button>
-            </form>
+            </form> : null}
 
             {changeSet.status === "committed" ? (
               <AfterCommitActions

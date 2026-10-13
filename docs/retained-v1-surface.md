@@ -257,6 +257,14 @@ research record:
   Markdown and LaTeX comment forms; UUID-bearing tokens should be stripped
   before external sharing unless the recipient should see Lab Tracker-local
   identifiers.
+- Decision-first review triage with grouped confirmations, source-grounded
+  corrections, dated clarification answers, explicit deferral/resumption, and
+  catch-up across pending reviews. Group verdicts validate a current revision,
+  apply atomically, and record bulk acceptance honestly. Partial commits retain
+  unfinished triage in a linked follow-up review; reviewer state is stored in
+  `review_metadata`, separately from provider input. Owners can read review
+  participation by opening, triage start, submission, and commit; background
+  prefetch does not count as opening. See [review triage](review-triage.md).
 - Human-gated graph draft review for uploaded image notes, voice-note
   transcripts, photo+voice bundles, and scheduled or user-triggered batches over
   staged notes. Drafting may be note-scoped or batch-scoped, but every proposed
