@@ -655,7 +655,9 @@ A reachable server whose project has no records at all answers
 `lab_tracker_graph_overview` and `lab_tracker_get_decision_context` with a
 `suggest_orientation_checkpoint` next action. Agents say the project is empty
 and suggest the web app's **Orient me to this project** checkpoint once per
-session; earlier history is not imported, and the person writes the checkpoint
+session. Contributors and owners can record it; a viewer sees **View project
+orientation** and needs edit access first. Earlier history is not imported, and
+the person writes the checkpoint
 ([member-onboarding.md](member-onboarding.md#with-the-lt-cli)).
 
 ## Diagnose an unavailable connection

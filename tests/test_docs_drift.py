@@ -1357,6 +1357,7 @@ def test_capture_setup_doc_gap_table_matches_the_catalog_and_thresholds() -> Non
 
 
 _ORIENT_LABEL = "Orient me to this project"
+_VIEWER_ORIENT_LABEL = "View project orientation"
 _ORIENT_PATH = "/app/projects/<project-id>/onboarding"
 _WORKSPACE_HOME = _FRONTEND_SRC / "features" / "workspace" / "WorkspaceHome.jsx"
 _ROUTING = _FRONTEND_SRC / "shared" / "routing.jsx"
@@ -1381,7 +1382,17 @@ def test_orient_checkpoint_pointers_name_a_real_button_and_route() -> None:
         if _ORIENT_LABEL not in text or _ORIENT_PATH not in text
     ]
     assert not stale, f"these point at the Orient checkpoint without its label or path: {stale}"
-    assert _component_shows(_ORIENT_LABEL, _read(_WORKSPACE_HOME))
+    workspace = _read(_WORKSPACE_HOME)
+    assert _component_shows(_ORIENT_LABEL, workspace)
+    # A viewer gets a read-only page under another label; the hint, the agent
+    # policy, and the guide must say so rather than offer a button they lack.
+    assert _component_shows(_VIEWER_ORIENT_LABEL, workspace)
+    for name, text in (
+        ("setup guide", pointers["setup guide"]),
+        ("MCP hint", pointers["MCP hint"]),
+        ("member-onboarding.md", pointers["member-onboarding.md"]),
+    ):
+        assert _VIEWER_ORIENT_LABEL in text, name
     assert _ORIENT_ROUTE.search(_without_js_comments(_read(_ROUTING))), (
         f"routing.jsx no longer serves the member-onboarding page at {_ORIENT_PATH}"
     )

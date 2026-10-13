@@ -77,11 +77,12 @@ CLIENT_MAINTENANCE_POLICY = (
 
 
 EMPTY_PROJECT_ORIENTATION_POLICY = (
-    "When a bound project has no records yet, the graph overview and decision "
-    "context return a `suggest_orientation_checkpoint` next action. Say so, and "
-    "suggest once per session that the person use \"Orient me to this project\" "
-    "in the web app to record where the work stands; earlier history is not "
-    "imported, and orienting is their action, not yours."
+    "When a project has no records yet, the graph overview and decision context "
+    "return a `suggest_orientation_checkpoint` next action. Say so, and suggest "
+    "once per session that the person use \"Orient me to this project\" in the "
+    "web app to record where the work stands (contributors and owners can; a "
+    "viewer needs edit access first). It is their action, not yours, and "
+    "earlier history is not imported."
 )
 
 AGENT_CONSULTATION_POLICY = f"""# Lab Tracker Agent Consultation Policy

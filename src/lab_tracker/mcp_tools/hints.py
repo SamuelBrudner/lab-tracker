@@ -109,13 +109,14 @@ def orientation_checkpoint_hint(project_id: str) -> JsonObject:
     return next_action(
         None,
         "This project has no records yet: every graph type counts zero and "
-        "nothing has been captured. If the person's work is already underway, "
-        'suggest once that they use "Orient me to this project" in the Lab '
-        f"Tracker web app (/app/projects/{project_id}/onboarding). It records "
-        "one attributed checkpoint of where the work stands, its live "
-        "questions, and the next move, and capture continues from there; "
-        "earlier history is not imported. Orienting is the person's action, "
-        "so do not create records for it.",
+        "nothing has been captured. Suggest once per session that the person "
+        'use "Orient me to this project" in the Lab Tracker web app '
+        f"(/app/projects/{project_id}/onboarding). It records one attributed "
+        "checkpoint of where the work stands, its live questions, and the next "
+        "move, and capture continues from there; earlier history is not "
+        "imported. Project contributors and owners can record it; a viewer "
+        'sees "View project orientation" there and needs edit access first. '
+        "Orienting is the person's action, so do not create records for it.",
         action=ORIENTATION_CHECKPOINT_ACTION,
     )
 

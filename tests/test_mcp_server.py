@@ -1775,6 +1775,8 @@ def test_read_only_viewer_lpat_reaches_decision_context_through_mcp_tool(
         assert request.headers["authorization"].startswith("Bearer lpat_")
         assert request.headers["x-labtracker-surface"] == "mcp"
     assert payload["next_action"]["action"] == "suggest_orientation_checkpoint"
+    # This caller is a viewer, so the hint must not promise them the button.
+    assert "View project orientation" in payload["next_action"]["reason"]
     assert json.loads(requests[0].content) == {
         "task_kind": "summary",
         "query": "MCP scoped context",

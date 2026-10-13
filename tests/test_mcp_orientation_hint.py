@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -13,7 +14,7 @@ from lab_tracker.decision_context_constants import (
     MCP_SERVER_INSTRUCTIONS,
     managed_agent_activation_block,
 )
-from lab_tracker.mcp_api_client import LabTrackerAPIUnavailableError
+from lab_tracker.mcp_api_client import LabTrackerAPIError, LabTrackerAPIUnavailableError
 from lab_tracker.mcp_tools import read as read_tools
 from lab_tracker.mcp_tools.hints import (
     ORIENTATION_CHECKPOINT_ACTION,
@@ -71,8 +72,12 @@ def _packet(**lists: list[object]) -> Any:
         (_overview(last_capture_at="2026-10-01T00:00:00Z"), None),
         ({"data": {"project": {"project_id": PROJECT_ID}}}, None),
         ({"error": {"code": "not_found"}, "data": None}, None),
+        (
+            {"data": {**_overview()["data"], "counts": {}}},
+            None,
+        ),
     ],
-    ids=["empty", "a-goal", "staged-notes", "captured-once", "older-server", "error"],
+    ids=["empty", "a-goal", "staged-notes", "captured-once", "older-server", "error", "no-counts"],
 )
 def test_only_an_overview_with_no_records_is_empty(overview: Any, expected: str | None) -> None:
     assert empty_project_id(overview) == expected
@@ -99,6 +104,7 @@ def test_a_boolean_count_is_not_read_as_zero() -> None:
 def test_an_empty_looking_packet_names_its_project_and_a_full_one_does_not() -> None:
     assert empty_decision_context_project_id(_packet()) == PROJECT_ID
     assert empty_decision_context_project_id(_packet(notes=[{"note_id": "n"}])) is None
+    assert empty_decision_context_project_id(_packet(exploration_nodes=[{"node_id": "x"}])) is None
     assert empty_decision_context_project_id({"error": {"code": "x"}, "data": None}) is None
 
 
@@ -191,12 +197,19 @@ def test_decision_context_skips_the_overview_read_when_the_packet_has_records(
     assert client.overview_calls == []
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        LabTrackerAPIUnavailableError("server went away"),
+        LabTrackerAPIError("forbidden", code="forbidden"),
+        httpx.ConnectError("connection refused"),
+    ],
+    ids=["unavailable", "api-error", "transport"],
+)
 def test_a_failed_confirmation_leaves_the_decision_context_intact(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, error: Exception
 ) -> None:
-    client = _FakeClient(
-        packet=_packet(), overview_error=LabTrackerAPIUnavailableError("server went away")
-    )
+    client = _FakeClient(packet=_packet(), overview_error=error)
     _use(monkeypatch, client)
 
     payload = _decision_context()
@@ -234,3 +247,13 @@ def test_the_server_overview_of_a_new_project_reads_as_empty_until_it_has_a_reco
     )
     assert question.status_code == 201, question.text
     assert empty_project_id(overview()) is None
+
+
+def test_a_next_action_the_server_already_set_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    overview = _overview()
+    overview["next_action"] = {"tool": None, "arguments": {}, "reason": "server says"}
+    _use(monkeypatch, _FakeClient(overview=overview))
+
+    assert read_tools.lab_tracker_graph_overview(PROJECT_ID)["next_action"]["reason"] == (
+        "server says"
+    )
