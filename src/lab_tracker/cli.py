@@ -1282,15 +1282,21 @@ def _set_planned_text(path: Path, content: str, twins: list[Path], result: InitR
         result._planned_identities[path] = _file_identity(path)
 
 
+# How Windows reports a symlink loop (ERROR_CANT_RESOLVE_FILENAME), not as ELOOP.
+_WINERROR_LOOP = 1921
+
+
 def _file_identity(path: Path) -> tuple[object, ...]:
     """What makes two paths one file: its inode when it exists, else its resolved path."""
 
     try:
         stat = path.stat()
     except OSError as exc:
-        if exc.errno == errno.ELOOP:
+        if exc.errno == errno.ELOOP or getattr(exc, "winerror", None) == _WINERROR_LOOP:
             # A symlink loop can be neither read nor written; say so first.
-            raise _RefusedFile(path, os.strerror(errno.ELOOP)) from exc
+            raise _RefusedFile(
+                path, "a symlink loop, which can be neither read nor written"
+            ) from exc
         return ("path", str(path.resolve()))
     return ("inode", stat.st_dev, stat.st_ino)
 

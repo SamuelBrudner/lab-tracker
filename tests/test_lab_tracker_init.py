@@ -1390,7 +1390,17 @@ def test_upsert_splices_only_between_the_markers(existing: str, expected: str) -
 
 
 def _symlink(link: Path, target: Path) -> None:
-    link.symlink_to(target.name)
+    try:
+        link.symlink_to(target.name)
+    except (OSError, NotImplementedError) as exc:  # pragma: no cover - Windows without rights
+        pytest.skip(f"cannot create symlinks here: {exc}")
+
+
+def _hardlink(link: Path, target: Path) -> None:
+    try:
+        os.link(target, link)
+    except (OSError, NotImplementedError) as exc:  # pragma: no cover - no hard links here
+        pytest.skip(f"cannot create hard links here: {exc}")
 
 
 def _write_count(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
@@ -1660,7 +1670,7 @@ def test_uninstall_strips_a_file_behind_three_paths_as_its_preview_shows(
         if link == "symlink":
             _symlink(tmp_path / name, agents)
         else:
-            os.link(agents, tmp_path / name)
+            _hardlink(tmp_path / name, agents)
     init_consumer_repo(tmp_path, yes=True)
 
     preview = init_consumer_repo(tmp_path, uninstall=True, dry_run=True)
@@ -1688,8 +1698,8 @@ def test_uninstall_skips_a_missing_file_once(tmp_path: Path) -> None:
 
 
 def test_a_symlink_loop_stops_init_and_update_before_any_write(tmp_path: Path) -> None:
-    (tmp_path / "CLAUDE.md").symlink_to("GEMINI.md")
-    (tmp_path / "GEMINI.md").symlink_to("CLAUDE.md")
+    _symlink(tmp_path / "CLAUDE.md", tmp_path / "GEMINI.md")
+    _symlink(tmp_path / "GEMINI.md", tmp_path / "CLAUDE.md")
 
     for run in (init_consumer_repo, update_consumer_repo):
         with pytest.raises(SystemExit, match="CLAUDE.md"):
@@ -1786,7 +1796,7 @@ def test_a_managed_file_that_is_a_scaffold_file_stops_the_run(tmp_path: Path, li
             _symlink(agents, sidecar)
         else:
             agents.unlink()
-            os.link(sidecar, agents)
+            _hardlink(agents, sidecar)
     before = _tree(tmp_path)
 
     # Refreshing AGENTS.lt.md would drop the activation block that adding it
@@ -1895,3 +1905,43 @@ def test_uninstall_removes_every_copy_of_a_block_in_one_run(tmp_path: Path) -> N
     assert "middle" in content and "## Notes" in content
     assert _buckets(first, claude) == ["overwritten"]
     assert _buckets(second, claude) == ["skipped"]
+
+
+def test_a_refused_uninstall_leaves_the_installed_skills_alone(tmp_path: Path) -> None:
+    init_consumer_repo(tmp_path, install_skills=True)
+    skills_home = Path(os.environ["LAB_TRACKER_SKILLS_HOME"])
+    (tmp_path / "CLAUDE.md").write_text(_HIDDEN_BY_A_REPAIR, encoding="utf-8")
+    skills = _tree(skills_home)
+    repo = _tree(tmp_path)
+    assert skills
+
+    with pytest.raises(SystemExit, match="CLAUDE.md.*comes before"):
+        init_consumer_repo(tmp_path, uninstall=True, install_skills=True)
+
+    assert _tree(skills_home) == skills
+    assert _tree(tmp_path) == repo
+
+
+def test_uninstall_lists_only_the_files_it_strips(tmp_path: Path) -> None:
+    init_consumer_repo(tmp_path)
+    claude = tmp_path / "CLAUDE.md"
+    claude.write_text("# Mine, with no Lab Tracker blocks\n", encoding="utf-8")
+
+    result = init_consumer_repo(tmp_path, uninstall=True)
+
+    assert claude not in result.stripped
+    assert _buckets(result, claude) == ["skipped"]
+    assert result.stripped == [tmp_path / "AGENTS.md", tmp_path / "GEMINI.md"]
+
+
+def test_a_lone_end_repair_keeps_text_glued_after_the_version_comment(tmp_path: Path) -> None:
+    claude = tmp_path / "CLAUDE.md"
+    lone_end = managed_code_conventions_block().replace(f"{CODE_CONVENTIONS_BLOCK_BEGIN}\n", "")
+    claude.write_text(
+        "# Mine\n\n" + lone_end.rstrip("\n") + " my note\n## More\n", encoding="utf-8"
+    )
+
+    update_consumer_repo(tmp_path, yes=True)
+
+    content = claude.read_text(encoding="utf-8")
+    assert content.startswith(managed_code_conventions_block() + "my note\n## More\n")
