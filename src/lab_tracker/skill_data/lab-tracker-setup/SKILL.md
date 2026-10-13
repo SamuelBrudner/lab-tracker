@@ -93,7 +93,9 @@ short, consent-gated sequence on the `lt` CLI.
    in the Lab Tracker repository lists each client's registration.
 7. **Project binding** — `lt project bind --project-id <project-id>
    --yes` verifies the selected project and records its exact id in
-   `lt_ids.json`.
+   `lt_ids.json`. Work already underway in a Lab Tracker project binds
+   that project rather than a new one (see *Projects already
+   underway* below).
 8. **Watch folders** — `lt watch add <folder> --include <glob>`
    registers a narrow results folder; broad roots such as `artifacts/`
    are usually skipped or narrowed to a run-specific subfolder. `lt
@@ -172,6 +174,30 @@ short, consent-gated sequence on the `lt` CLI.
     server settings an operator turns on. `docs/capture-guide.md` in the
     Lab Tracker repository maps every capture path to its setup.
 
+## Projects already underway
+
+Setup configures capture; it does not import the past. Commit hooks
+record commits made after `lt hooks install`, not earlier ones. A
+watch folder's first scan stages every matching file already in it, so
+a narrow `--include` keeps older material out unless it should become
+evidence. `lt setup status` reports configuration, not content, so a
+healthy checkout can still belong to a project with no records.
+
+For such a project, "Orient me to this project" in the web app
+(`/app/projects/<project-id>/onboarding`) records one attributed
+checkpoint of where the work stands, its live questions, and the next
+move, and capture continues from there. Earlier history is not
+imported; `docs/member-onboarding.md` in the Lab Tracker repository
+describes the checkpoint. Agents connected over MCP suggest it when the
+graph overview shows no records, and orienting stays the person's step.
+
+A folder that is not a git repository takes the same connection,
+binding, and watch steps without commit hooks, and `lt import-folder`
+stages the files a synced folder holds now, skipping duplicates on
+later runs (`docs/configuration.md`, *Local evidence inbox imports*).
+`lt repo install-hook` is another name for `lt hooks install`
+(`docs/repo-report-capture.md`).
+
 ## After setup
 
 Captures stage for human review — nothing commits to the research
@@ -238,4 +264,4 @@ rerunning its pinned `uv add` (step 5), which neither `lt update` nor
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.3.0 sha256=0065df556f58 -->
+<!-- lab-tracker-setup-guide version=0.3.0 sha256=b90908a686af -->

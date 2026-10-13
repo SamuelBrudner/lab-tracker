@@ -42,6 +42,7 @@ from lab_tracker.decision_context_constants import (
     CODE_CONVENTIONS_BLOCK_BEGIN,
     CODE_CONVENTIONS_BLOCK_END,
     COMMIT_CAPTURE_RECOVERY_POLICY,
+    EMPTY_PROJECT_ORIENTATION_POLICY,
     code_conventions_version_line,
     code_facing_idioms,
     cursor_rules_mdc,
@@ -1721,6 +1722,8 @@ def _agents_fragment() -> str:
         `lt hooks install`, `lt setup autotrack`, `lt setup schedule`, and
         `lt setup agent-hooks` also require `--yes`; suggest them to the user
         rather than applying them unprompted.
+
+        {EMPTY_PROJECT_ORIENTATION_POLICY}
 
         {AGENT_SESSION_CAPTURE_DISCOVERY_POLICY}
 

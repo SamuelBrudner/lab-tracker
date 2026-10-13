@@ -76,6 +76,14 @@ CLIENT_MAINTENANCE_POLICY = (
 )
 
 
+EMPTY_PROJECT_ORIENTATION_POLICY = (
+    "When a bound project has no records yet, the graph overview and decision "
+    "context return a `suggest_orientation_checkpoint` next action. Say so, and "
+    "suggest once per session that the person use \"Orient me to this project\" "
+    "in the web app to record where the work stands; earlier history is not "
+    "imported, and orienting is their action, not yours."
+)
+
 AGENT_CONSULTATION_POLICY = f"""# Lab Tracker Agent Consultation Policy
 
 {RESEARCH_FACING_DECISION_POLICY}
@@ -120,6 +128,7 @@ MCP_SERVER_INSTRUCTIONS = " ".join(
         "capture path (figure autotrack for notebooks, scripts, and R; command, "
         "pipeline, and cluster runs; coding-agent sessions; bench and server "
         "channels); read-only `lt setup status` is safe to consult.",
+        EMPTY_PROJECT_ORIENTATION_POLICY,
         AGENT_SESSION_CAPTURE_DISCOVERY_POLICY,
         CLIENT_MAINTENANCE_POLICY,
     )
@@ -175,6 +184,8 @@ def managed_agent_activation_block() -> str:
             "If Lab Tracker is unavailable or ambiguous, say that explicitly and "
             "proceed without graph context. Do not create or mutate Lab Tracker "
             "records unless the user explicitly asks.",
+            "",
+            EMPTY_PROJECT_ORIENTATION_POLICY,
             "",
             "If capture looks unconfigured or drifted here, `lt setup status` is a "
             "read-only inventory that is safe to consult. Setup writes happen "

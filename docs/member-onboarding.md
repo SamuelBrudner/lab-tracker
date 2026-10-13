@@ -10,6 +10,29 @@ history. Earlier coverage is labelled selective, and historical material can
 be added later through the ordinary note and evidence workflows when it is
 useful to a concrete question or decision.
 
+## With the `lt` CLI
+
+The checkpoint lives in the web app at `/app/projects/<project-id>/onboarding`
+(**Orient me to this project** on the project's workspace). The CLI steps of
+[guided setup](setup.md) configure capture around it and import nothing from
+before they run:
+
+- `lt project bind` records which project a checkout's captures belong to.
+  Work already underway binds the project it lives in rather than a new one.
+- `lt hooks install` records commits made after it runs, not earlier ones.
+- `lt watch add` registers a folder whose first scan stages every matching
+  file already in it, so a narrow `--include` keeps older material out.
+
+A folder that is not a git repository takes the same binding and watch steps
+without commit hooks; `lt import-folder` stages the files a synced folder holds
+now ([local evidence inbox imports](configuration.md#local-evidence-inbox-imports)).
+
+`lt setup status` reports configuration, not content, so a healthy checkout
+can belong to a project with no records. For such a project the MCP graph
+overview and decision context return a `suggest_orientation_checkpoint` next
+action, and connected agents suggest this checkpoint. They never complete it:
+the checkpoint is an attributed record, so the person writes it.
+
 ## Completion model
 
 Member onboarding is complete when the authenticated project contributor or

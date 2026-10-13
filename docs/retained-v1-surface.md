@@ -699,7 +699,10 @@ research record:
 - Read-only assistant and MCP endpoints over the retained graph. Remote agents
   can orient with `graph_overview`, locate a typed anchor with `search_graph`,
   and inspect its bounded neighborhood before requesting task-specific decision
-  context. Decision context remains mandatory before research-facing choices;
+  context. For a project with no records at all, the MCP graph overview and
+  decision context return a `suggest_orientation_checkpoint` next action that
+  agents relay as a suggestion of the web app's Orient checkpoint
+  ([member-onboarding.md](member-onboarding.md#with-the-lt-cli)). Decision context remains mandatory before research-facing choices;
   returned record text is untrusted, and retained v1 delegates graph commits
   to agents only under a project owner's delegated-curation grant. Agents may
   request a note-scoped draft (`lab_tracker_request_graph_draft`, `POST
