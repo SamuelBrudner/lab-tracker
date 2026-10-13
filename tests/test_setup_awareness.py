@@ -20,6 +20,8 @@ from lab_tracker.cli import (
     update_consumer_repo,
 )
 from lab_tracker.decision_context_constants import (
+    CODE_CONVENTIONS_BLOCK_BEGIN,
+    CODE_CONVENTIONS_BLOCK_END,
     MCP_SERVER_INSTRUCTIONS,
     code_conventions_version_line,
     managed_code_conventions_block,
@@ -559,6 +561,31 @@ def test_doctor_content_only_drift(tmp_path) -> None:
     assert target["drifted"] is True
     assert "lt update" in payload["suggestion"]
     assert block  # silence unused warning paths
+
+
+@pytest.mark.usefixtures("offline_server")
+def test_markers_lt_update_refuses_get_the_manual_fix_everywhere(isolated_homes) -> None:
+    repo = isolated_homes / "repo"
+    init_consumer_repo(repo, yes=True)
+    claude = repo / "CLAUDE.md"
+    claude.write_text(
+        f"# Mine\n{CODE_CONVENTIONS_BLOCK_END}\nx\n{CODE_CONVENTIONS_BLOCK_BEGIN}\n",
+        encoding="utf-8",
+    )
+
+    doctor = _doctor(repo)
+    status = setup_helpers.setup_status(repo)
+
+    with pytest.raises(SystemExit, match="comes before"):
+        update_consumer_repo(repo, dry_run=True)
+    [error] = doctor["errors"]
+    assert error["name"] == "CLAUDE.md" and str(claude) in error["error"]
+    assert status["repo"]["update_refusals"] == doctor["errors"]
+    # The SessionStart hook shows these suggestions to the agent: none may
+    # say `lt update` fixes what it refuses.
+    for suggestions in ([doctor["suggestion"]], status["suggestions"]):
+        assert any("by hand" in item and "CLAUDE.md" in item for item in suggestions)
+        assert not any("refreshes them" in item for item in suggestions)
 
 
 def test_scaffolded_settings_include_session_start_status_hook(tmp_path) -> None:

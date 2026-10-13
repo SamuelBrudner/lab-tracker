@@ -332,6 +332,54 @@ def test_doctor_all_sweeps_registry(home, monkeypatch, capsys) -> None:
     assert str(missing.resolve()) not in roots
 
 
+@pytest.mark.usefixtures("offline_server")
+def test_doctor_all_names_markers_lt_update_cannot_fix(home, capsys) -> None:
+    from lab_tracker.decision_context_constants import (
+        CLAUDE_BLOCK_BEGIN,
+        CLAUDE_BLOCK_END,
+        CODE_CONVENTIONS_BLOCK_BEGIN,
+        CODE_CONVENTIONS_BLOCK_END,
+    )
+
+    repo = home / "misordered-repo"
+    init_consumer_repo(repo, yes=True)
+    claude = repo / "CLAUDE.md"
+    claude.write_text(
+        f"# Mine\n{CODE_CONVENTIONS_BLOCK_END}\nx\n{CODE_CONVENTIONS_BLOCK_BEGIN}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit):
+        lt_cli.main(["doctor", "--all"])
+    payload = json.loads(capsys.readouterr().out)
+
+    [entry] = [item for item in payload["repos"] if Path(item["root"]).name == repo.name]
+    [error] = entry["errors"]
+    assert error["name"] == "CLAUDE.md"
+    assert str(claude) in error["error"] and "comes before" in error["error"]
+    # `lt update` refuses this file, so the advice is the manual fix.
+    assert "by hand" in entry["suggestion"] and "CLAUDE.md" in entry["suggestion"]
+    assert "refreshes them" not in entry["suggestion"]
+
+    # A refused activation block alone, with every conventions block in
+    # sync, still fails the sweep.
+    claude.unlink()
+    init_consumer_repo(repo, yes=True)
+    claude.write_text(
+        claude.read_text(encoding="utf-8")
+        .replace(CLAUDE_BLOCK_BEGIN, "<!-- swap -->")
+        .replace(CLAUDE_BLOCK_END, CLAUDE_BLOCK_BEGIN)
+        .replace("<!-- swap -->", CLAUDE_BLOCK_END),
+        encoding="utf-8",
+    )
+    with pytest.raises(SystemExit) as sweep:
+        lt_cli.main(["doctor", "--all"])
+    payload = json.loads(capsys.readouterr().out)
+    [entry] = [item for item in payload["repos"] if Path(item["root"]).name == repo.name]
+    assert sweep.value.code == 1
+    assert entry["drifted"] == [] and entry["errors"][0]["name"] == "CLAUDE.md"
+
+
 def test_watch_run_composes_scan_and_sync(home, monkeypatch, capsys) -> None:
     repo = home / "run-repo"
     inbox = repo / "inbox"

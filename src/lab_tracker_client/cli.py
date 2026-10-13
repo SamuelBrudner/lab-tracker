@@ -880,13 +880,13 @@ def _add_watch_parsers(subcommands: argparse._SubParsersAction) -> None:
         "--include",
         action="append",
         default=[],
-        help="Glob for relative paths to include. Repeatable.",
+        help="Glob for relative paths to include in files mode. Repeatable.",
     )
     add_parser.add_argument(
         "--exclude",
         action="append",
         default=[],
-        help="Glob for relative paths to exclude. Repeatable.",
+        help="Glob for relative paths to exclude in files mode. Repeatable.",
     )
     add_parser.add_argument("--name", help="Optional label for this watch entry.")
     add_parser.add_argument("--project", help="Project UUID override for this watch.")
@@ -1346,8 +1346,9 @@ def _add_repo_parsers(subcommands: argparse._SubParsersAction) -> None:
     hook_parser = repo_commands.add_parser(
         "install-hook",
         help=(
-            "Alias of 'lt hooks install': install the post-commit hook that runs "
-            "'lt repo report'."
+            "Older entry point to the 'lt hooks install' installer: writes the "
+            "post-commit hook that runs 'lt repo report' at once, with no "
+            "--dry-run preview, --yes gate, or --project; prefer 'lt hooks install'."
         ),
     )
     hook_parser.add_argument("--repo", default=".", help="Repository path. Defaults to cwd.")
@@ -2607,6 +2608,8 @@ def _cmd_doctor(args: argparse.Namespace) -> Any:
                 for target in targets
                 if isinstance(target, dict) and target.get("drifted")
             ]
+            if payload.get("errors"):
+                summary["errors"] = payload["errors"]
             if payload.get("suggestion"):
                 summary["suggestion"] = payload["suggestion"]
             summary["agent_hooks"] = payload["agent_hooks"]
@@ -2711,6 +2714,9 @@ def _payload_exit_code(payload: Any) -> int:
             return 1
         if not all(isinstance(target, dict) and not target.get("drifted") for target in targets):
             return 1
+        if payload.get("errors"):
+            # Files `lt update` refuses.
+            return 1
     if isinstance(payload, dict) and payload.get("command") == "hpc-submit":
         return int(payload.get("exit_code") or 0)
     if (
@@ -2748,7 +2754,10 @@ def _payload_exit_code(payload: Any) -> int:
         if not isinstance(repos, list):
             return 1
         if any(
-            repo.get("missing") or repo.get("drifted") or repo.get("error")
+            repo.get("missing")
+            or repo.get("drifted")
+            or repo.get("error")
+            or repo.get("errors")
             for repo in repos
         ):
             return 1

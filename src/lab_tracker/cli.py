@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import errno
 import importlib.util
 import ipaddress
 import json
@@ -42,6 +43,7 @@ from lab_tracker.decision_context_constants import (
     CODE_CONVENTIONS_BLOCK_BEGIN,
     CODE_CONVENTIONS_BLOCK_END,
     COMMIT_CAPTURE_RECOVERY_POLICY,
+    EMPTY_PROJECT_ORIENTATION_POLICY,
     code_conventions_version_line,
     code_facing_idioms,
     cursor_rules_mdc,
@@ -56,6 +58,15 @@ from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 @dataclass
 class InitResult:
+    """What an init, update, or uninstall run changed, or would change.
+
+    Each repo path lands in one of ``created``, ``skipped``, ``overwritten``
+    and ``up_to_date``. Uninstall also lists each file it strips a managed
+    block from, or deletes, under ``stripped``. ``diffs`` holds, in a dry
+    run, how every planned file would change and, after applying, how every
+    file that already existed changed (a created file is the canonical text).
+    """
+
     created: list[Path] = field(default_factory=list)
     skipped: list[Path] = field(default_factory=list)
     overwritten: list[Path] = field(default_factory=list)
@@ -67,6 +78,15 @@ class InitResult:
     warnings: list[str] = field(default_factory=list)
     _preview_contents: dict[Path, str] = field(default_factory=dict, repr=False)
     _preview_original_contents: dict[Path, str] = field(default_factory=dict, repr=False)
+    # Files whose managed blocks are planned but not yet written, in order,
+    # with the identity that tells two paths to one file (a symlinked
+    # CLAUDE.md -> AGENTS.md) apart from two files.
+    _planned_files: list[Path] = field(default_factory=list, repr=False)
+    _planned_identities: dict[Path, tuple[object, ...]] = field(
+        default_factory=dict, repr=False
+    )
+    # Backups a repair has planned, by backup path, written before the files.
+    _pending_backups: dict[Path, str] = field(default_factory=dict, repr=False)
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -94,42 +114,26 @@ def init_consumer_repo(
     install_skills: bool = False,
 ) -> InitResult:
     root = Path(target).expanduser().resolve()
-    if not dry_run:
-        root.mkdir(parents=True, exist_ok=True)
     result = InitResult()
+    # Checking and planning only read, and either can refuse (markers out of
+    # order); writing comes after both, so a refused run changes nothing.
     if uninstall:
+        blocks = _activation_blocks(root) + _conventions_blocks(root)
+        _refuse_misordered_markers(blocks)
+        # Until settled, so leftover copies of a block go in the same run.
+        _plan_until_settled(blocks, _plan_strip, result=result, dry_run=dry_run)
         if install_skills:
             _uninstall_setup_skill(result=result, dry_run=dry_run)
-        for activation_target in _ACTIVATION_BLOCK_TARGETS:
-            _strip_managed_block(
-                root / activation_target,
-                begin_marker=CLAUDE_BLOCK_BEGIN,
-                end_marker=CLAUDE_BLOCK_END,
-                result=result,
-                dry_run=dry_run,
-            )
-        _strip_managed_block(
-            root / "CLAUDE.md",
-            begin_marker=CODE_CONVENTIONS_BLOCK_BEGIN,
-            end_marker=CODE_CONVENTIONS_BLOCK_END,
-            result=result,
-            dry_run=dry_run,
-        )
-        _strip_managed_block(
-            root / "AGENTS.md",
-            begin_marker=AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN,
-            end_marker=AGENTS_CODE_CONVENTIONS_BLOCK_END,
-            result=result,
-            dry_run=dry_run,
-        )
-        _strip_managed_block(
-            root / ".cursor" / "rules" / "lab-tracker.mdc",
-            begin_marker=CODE_CONVENTIONS_BLOCK_BEGIN,
-            end_marker=CODE_CONVENTIONS_BLOCK_END,
-            result=result,
-            dry_run=dry_run,
+        result.stripped.extend(
+            _commit_planned_files(result, dry_run=dry_run, unchanged=result.skipped)
         )
         return result
+    blocks = _activation_blocks(root) + (_conventions_blocks(root) if yes else [])
+    _refuse_misordered_markers(blocks)
+    _refuse_managed_scaffold_files(root, blocks)
+    _plan_managed_blocks(blocks, result=result, dry_run=dry_run)
+    if not dry_run:
+        root.mkdir(parents=True, exist_ok=True)
     resolved_mcp_base_url = normalize_instance_base_url(
         mcp_base_url or DEFAULT_BASE_URL
     )
@@ -144,42 +148,12 @@ def init_consumer_repo(
     }
     for path, content in files.items():
         _write_scaffold_file(path, content, force=force, result=result, dry_run=dry_run)
-    for activation_target in _ACTIVATION_BLOCK_TARGETS:
-        _write_managed_activation_block(root / activation_target, result=result, dry_run=dry_run)
-    if yes:
-        _write_managed_block(
-            root / "CLAUDE.md",
-            managed_code_conventions_block(),
-            begin_marker=CODE_CONVENTIONS_BLOCK_BEGIN,
-            end_marker=CODE_CONVENTIONS_BLOCK_END,
-            result=result,
-            dry_run=dry_run,
-        )
-        _write_managed_block(
-            root / "AGENTS.md",
-            managed_code_conventions_block(
-                begin_marker=AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN,
-                end_marker=AGENTS_CODE_CONVENTIONS_BLOCK_END,
-            ),
-            begin_marker=AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN,
-            end_marker=AGENTS_CODE_CONVENTIONS_BLOCK_END,
-            result=result,
-            dry_run=dry_run,
-        )
-        _write_managed_block(
-            root / ".cursor" / "rules" / "lab-tracker.mdc",
-            managed_code_conventions_block(),
-            begin_marker=CODE_CONVENTIONS_BLOCK_BEGIN,
-            end_marker=CODE_CONVENTIONS_BLOCK_END,
-            result=result,
-            dry_run=dry_run,
-            document_transform=_normalize_cursor_rules_document,
-        )
-    else:
+    if not yes:
         result.offers.append(
             "Managed code-facing convention blocks are available with "
             "`lab_tracker init --yes`."
         )
+    _commit_planned_files(result, dry_run=dry_run, unchanged=result.skipped)
     result.offers.append(
         "Bind a project id into lt_ids.json with `lt project bind` "
         "(--dry-run previews the write)."
@@ -339,6 +313,7 @@ def _install_setup_skill_at_path(
         result.overwritten.append(path)
         return
     path.write_text(content, encoding="utf-8", newline="\n")
+    _record_diff(path, existing, content, result)
     result.overwritten.append(path)
 
 
@@ -385,6 +360,8 @@ def _uninstall_setup_skill_at_path(
         if path.exists():
             _record_dry_run_change(path, path.read_text(encoding="utf-8"), "", result)
         return
+    if path.exists():
+        _record_diff(path, path.read_text(encoding="utf-8"), "", result)
     for item in (path, backup):
         if item.exists():
             item.unlink()
@@ -393,6 +370,12 @@ def _uninstall_setup_skill_at_path(
 
 
 _UPDATE_BACKUP_SUFFIX = ".bak-lt-update"
+# The line managed_code_conventions_block writes right after its END marker.
+_CONVENTIONS_VERSION_LINE_PREFIX = "<!-- lab-tracker-code-conventions"
+# The blocks that write that line; the activation block has none.
+_VERSIONED_END_MARKERS = frozenset(
+    {CODE_CONVENTIONS_BLOCK_END, AGENTS_CODE_CONVENTIONS_BLOCK_END}
+)
 # The name the docs give this command, whichever installed script name ran it.
 _DOCUMENTED_PROG = "lab-tracker"
 
@@ -401,11 +384,133 @@ _DOCUMENTED_PROG = "lab-tracker"
 # Gemini CLI (GEMINI.md) all receive the same consultation policy.
 _ACTIVATION_BLOCK_TARGETS: tuple[str, ...] = ("CLAUDE.md", "AGENTS.md", "GEMINI.md")
 
+_CURSOR_RULES = ".cursor/rules/lab-tracker.mdc"
 _CONVENTIONS_TARGETS: tuple[tuple[str, str, str], ...] = (
     ("CLAUDE.md", CODE_CONVENTIONS_BLOCK_BEGIN, CODE_CONVENTIONS_BLOCK_END),
     ("AGENTS.md", AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN, AGENTS_CODE_CONVENTIONS_BLOCK_END),
-    (".cursor/rules/lab-tracker.mdc", CODE_CONVENTIONS_BLOCK_BEGIN, CODE_CONVENTIONS_BLOCK_END),
+    (_CURSOR_RULES, CODE_CONVENTIONS_BLOCK_BEGIN, CODE_CONVENTIONS_BLOCK_END),
 )
+
+
+@dataclass(frozen=True)
+class _ManagedBlock:
+    """One managed block and the file it belongs in."""
+
+    path: Path
+    text: str
+    begin_marker: str
+    end_marker: str
+    document_transform: Callable[[str], str] | None = None
+
+
+def _activation_blocks(root: Path) -> list[_ManagedBlock]:
+    block = managed_agent_activation_block()
+    return [
+        _ManagedBlock(root / target, block, CLAUDE_BLOCK_BEGIN, CLAUDE_BLOCK_END)
+        for target in _ACTIVATION_BLOCK_TARGETS
+    ]
+
+
+def _conventions_blocks(root: Path) -> list[_ManagedBlock]:
+    return [
+        _ManagedBlock(
+            root / Path(relative),
+            managed_code_conventions_block(begin_marker=begin_marker, end_marker=end_marker),
+            begin_marker,
+            end_marker,
+            _normalize_cursor_rules_document if relative == _CURSOR_RULES else None,
+        )
+        for relative, begin_marker, end_marker in _CONVENTIONS_TARGETS
+    ]
+
+
+def _read_managed_text(path: Path) -> str:
+    """``path``'s text, empty when there is no file; a run stops on one it cannot read."""
+
+    if not path.exists():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise _RefusedFile(path, f"cannot be read as UTF-8 text ({exc})") from exc
+
+
+def _disk_body(block: _ManagedBlock) -> str | None:
+    """``block``'s body in its file on disk, or ``None`` when it is not paired there.
+
+    Raises :class:`ManagedBlockMarkerError` when END comes before BEGIN.
+    """
+
+    return _extract_managed_body(
+        _read_managed_text(block.path),
+        begin_marker=block.begin_marker,
+        end_marker=block.end_marker,
+    )
+
+
+_SCAFFOLD_PATHS: tuple[str, ...] = (
+    ".mcp.json",
+    ".cursor/mcp.json",
+    ".gemini/settings.json",
+    ".claude/settings.json",
+    "scripts/lt.py",
+    "AGENTS.lt.md",
+    "lt_ids.json",
+)
+
+
+def _refuse_managed_scaffold_files(root: Path, blocks: list[_ManagedBlock]) -> None:
+    """Stop when a managed file is a scaffold file too (an AGENTS.md linked to AGENTS.lt.md).
+
+    Refreshing the scaffold text drops the managed blocks, and putting them
+    back changes the scaffold file, so no run could leave both current.
+    """
+
+    scaffold = {_file_identity(root / Path(name)): root / Path(name) for name in _SCAFFOLD_PATHS}
+    for block in blocks:
+        twin = scaffold.get(_file_identity(block.path))
+        if twin is not None:
+            raise _RefusedFile(
+                block.path,
+                f"the same file as {twin}, which Lab Tracker keeps separately; make "
+                f"{block.path.name} a file of its own, then run the command again.",
+            )
+
+
+def _refuse_misordered_markers(blocks: list[_ManagedBlock]) -> None:
+    """Stop, naming the file, when a block's END comes before its BEGIN on disk.
+
+    Planning stops there too, unless repairing another block of the file
+    dropped the stray marker first. Checking the files as they are keeps a
+    run in step with `lt doctor`, which reports the same markers.
+    """
+
+    for block in blocks:
+        try:
+            _disk_body(block)
+        except ManagedBlockMarkerError as exc:
+            raise _RefusedFile(block.path, str(exc)) from exc
+
+
+def _plan_update(root: Path, *, yes: bool, result: InitResult, dry_run: bool) -> bool:
+    """Plan update's managed blocks; True when a conventions block awaits ``yes``.
+
+    Checking and planning only read, and either can refuse with
+    :class:`_RefusedFile`, so a refused run changes nothing.
+    """
+
+    blocks = _activation_blocks(root)
+    conventions = _conventions_blocks(root)
+    _refuse_misordered_markers(blocks + conventions)
+    offer_needed = False
+    for block in conventions:
+        if yes or _disk_body(block) is not None:
+            blocks.append(block)
+        else:
+            offer_needed = True
+    _refuse_managed_scaffold_files(root, blocks)
+    _plan_managed_blocks(blocks, result=result, dry_run=dry_run)
+    return offer_needed
 
 
 def update_consumer_repo(
@@ -428,9 +533,10 @@ def update_consumer_repo(
     """
 
     root = Path(target).expanduser().resolve()
+    result = InitResult()
+    conventions_offer_needed = _plan_update(root, yes=yes, result=result, dry_run=dry_run)
     if not dry_run:
         root.mkdir(parents=True, exist_ok=True)
-    result = InitResult()
     resolved_mcp_base_url = normalize_instance_base_url(
         mcp_base_url or DEFAULT_BASE_URL
     )
@@ -453,36 +559,7 @@ def update_consumer_repo(
         _write_scaffold_file(
             ids_path, _ids_placeholder(None), force=False, result=result, dry_run=dry_run
         )
-
-    for activation_target in _ACTIVATION_BLOCK_TARGETS:
-        _write_managed_activation_block(root / activation_target, result=result, dry_run=dry_run)
-
-    conventions_offer_needed = False
-    for relative, begin_marker, end_marker in _CONVENTIONS_TARGETS:
-        path = root / Path(relative)
-        content = path.read_text(encoding="utf-8") if path.exists() else ""
-        present = (
-            _extract_managed_body(content, begin_marker=begin_marker, end_marker=end_marker)
-            is not None
-        )
-        if not present and not yes:
-            conventions_offer_needed = True
-            continue
-        _write_managed_block(
-            path,
-            managed_code_conventions_block(begin_marker=begin_marker, end_marker=end_marker)
-            if relative != ".cursor/rules/lab-tracker.mdc"
-            else managed_code_conventions_block(),
-            begin_marker=begin_marker,
-            end_marker=end_marker,
-            result=result,
-            dry_run=dry_run,
-            document_transform=(
-                _normalize_cursor_rules_document
-                if relative == ".cursor/rules/lab-tracker.mdc"
-                else None
-            ),
-        )
+    _commit_planned_files(result, dry_run=dry_run, unchanged=result.up_to_date)
     if conventions_offer_needed:
         result.offers.append(
             "Managed code-facing convention blocks are available with "
@@ -563,6 +640,7 @@ def _update_scaffold_file(
         return
     backup.write_text(existing, encoding="utf-8")
     path.write_text(content, encoding="utf-8")
+    _record_diff(path, existing, content, result)
     result.overwritten.append(path)
 
 
@@ -1097,74 +1175,218 @@ def _write_scaffold_file(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     if existed:
+        _record_diff(path, existing, content, result)
         result.overwritten.append(path)
     else:
         result.created.append(path)
 
 
-def _write_managed_activation_block(
-    path: Path,
-    *,
-    result: InitResult,
-    dry_run: bool = False,
+def _plan_managed_blocks(
+    blocks: list[_ManagedBlock], *, result: InitResult, dry_run: bool
 ) -> None:
-    _write_managed_block(
-        path,
-        managed_agent_activation_block(),
-        begin_marker=CLAUDE_BLOCK_BEGIN,
-        end_marker=CLAUDE_BLOCK_END,
-        result=result,
-        dry_run=dry_run,
+    """Plan every block into its file until a pass changes nothing.
+
+    A lone-marker repair keeps only the text on one side of the marker, which
+    can drop a block planned earlier in the same pass, so the next pass puts
+    it back. Nothing is written; :func:`_commit_planned_files` does that.
+    """
+
+    _plan_until_settled(blocks, _plan_managed_block, result=result, dry_run=dry_run)
+    _refuse_new_misorders(result)
+
+
+_MARKER_PAIRS: tuple[tuple[str, str], ...] = (
+    (CLAUDE_BLOCK_BEGIN, CLAUDE_BLOCK_END),
+    (CODE_CONVENTIONS_BLOCK_BEGIN, CODE_CONVENTIONS_BLOCK_END),
+    (AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN, AGENTS_CODE_CONVENTIONS_BLOCK_END),
+)
+
+
+def _refuse_new_misorders(result: InitResult) -> None:
+    """Stop when the plan leaves a block's END before its BEGIN where it was not.
+
+    Repairing one block can strand another's markers out of order, a block
+    the run leaves alone included (init without ``--yes`` plans no
+    conventions block), and `lt update` would then refuse the file.
+    """
+
+    for path in result._planned_files:
+        for begin_marker, end_marker in _MARKER_PAIRS:
+            if _misordered(
+                result._preview_contents[path], begin_marker, end_marker
+            ) and not _misordered(
+                result._preview_original_contents[path], begin_marker, end_marker
+            ):
+                raise _RefusedFile(path, str(_marker_order_error(begin_marker, end_marker)))
+
+
+def _misordered(text: str, begin_marker: str, end_marker: str) -> bool:
+    return (
+        begin_marker in text
+        and end_marker in text
+        and _managed_region(text, begin_marker, end_marker) is None
     )
 
 
-def _write_managed_block(
-    path: Path,
-    block: str,
+def _plan_until_settled(
+    blocks: list[_ManagedBlock],
+    plan: Callable[..., None],
     *,
-    begin_marker: str,
-    end_marker: str,
     result: InitResult,
-    dry_run: bool = False,
-    document_transform: Callable[[str], str] | None = None,
+    dry_run: bool,
 ) -> None:
-    if path.exists() or path in result._preview_contents:
-        existing = _planned_or_disk_text(path, result)
-        _backup_before_unpaired_marker_repair(
-            path,
-            existing,
-            begin_marker=begin_marker,
-            end_marker=end_marker,
-            result=result,
-            dry_run=dry_run,
-        )
-        content = _upsert_managed_block(
-            existing,
-            block,
-            begin_marker=begin_marker,
-            end_marker=end_marker,
-        )
-        if document_transform is not None:
-            content = document_transform(content)
-        if content == existing:
-            result.skipped.append(path)
+    """Run ``plan`` over every block until a pass changes no planned text.
+
+    Every pass that changes text but the last uses up at least one marker the
+    files held, so those markers bound the passes; past that bound something
+    else keeps moving, and the run stops.
+    """
+
+    markers = {marker for block in blocks for marker in (block.begin_marker, block.end_marker)}
+    changing_passes = 0
+    while True:
+        before = dict(result._preview_contents)
+        for block in blocks:
+            plan(block, result=result, dry_run=dry_run)
+        if result._preview_contents == before:
             return
-        if dry_run:
-            _record_dry_run_change(path, existing, content, result)
-            result.overwritten.append(path)
-            return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-        result.overwritten.append(path)
-        return
-    content = document_transform(block) if document_transform is not None else block
-    if dry_run:
-        _record_dry_run_change(path, "", content, result)
-        result.created.append(path)
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
-    result.created.append(path)
+        changing_passes += 1
+        held = sum(
+            text.count(marker)
+            for text in result._preview_original_contents.values()
+            for marker in markers
+        )
+        if changing_passes > held + 2:
+            moving = next(
+                path
+                for path in result._planned_files
+                if result._preview_contents[path] != before.get(path)
+            )
+            raise _RefusedFile(
+                moving, "its Lab Tracker markers did not settle; check them by hand."
+            )
+
+
+def _plan_managed_block(block: _ManagedBlock, *, result: InitResult, dry_run: bool) -> None:
+    """Plan ``block`` into its file over the text planned for that file so far.
+
+    Each block of a file is planned against the text the previous one left,
+    so a run writes a file at most once and files it in one bucket. Paths to
+    one file (a CLAUDE.md symlinked to AGENTS.md) share one plan.
+    """
+
+    path = block.path
+    existing, twins = _planned_text(path, result)
+    _backup_before_unpaired_marker_repair(
+        path,
+        existing,
+        begin_marker=block.begin_marker,
+        end_marker=block.end_marker,
+        result=result,
+        dry_run=dry_run,
+    )
+    content = _managed_upsert_at(
+        path,
+        existing,
+        block.text,
+        begin_marker=block.begin_marker,
+        end_marker=block.end_marker,
+    )
+    if block.document_transform is not None:
+        content = block.document_transform(content)
+    _set_planned_text(path, content, twins, result)
+
+
+def _planned_text(path: Path, result: InitResult) -> tuple[str, list[Path]]:
+    """The text this run has for ``path`` so far, and the other planned paths to its file.
+
+    The text is what an earlier block planned for the file, through any of
+    its paths, or else what is on disk (empty when there is no file yet).
+    """
+
+    identity = _file_identity(path)
+    twins = [
+        other
+        for other in result._planned_files
+        if other != path and result._planned_identities[other] == identity
+    ]
+    if path not in result._preview_original_contents:
+        result._preview_original_contents[path] = _read_managed_text(path)
+    planned_as = path if path in result._preview_contents else next(iter(twins), None)
+    if planned_as is None:
+        return result._preview_original_contents[path], twins
+    return result._preview_contents[planned_as], twins
+
+
+def _set_planned_text(path: Path, content: str, twins: list[Path], result: InitResult) -> None:
+    for same_file in (path, *twins):
+        result._preview_contents[same_file] = content
+    if path not in result._planned_files:
+        result._planned_files.append(path)
+        result._planned_identities[path] = _file_identity(path)
+
+
+# How Windows reports a symlink loop (ERROR_CANT_RESOLVE_FILENAME), not as ELOOP.
+_WINERROR_LOOP = 1921
+
+
+def _file_identity(path: Path) -> tuple[object, ...]:
+    """What makes two paths one file: its inode when it exists, else its resolved path."""
+
+    try:
+        stat = path.stat()
+    except OSError as exc:
+        if exc.errno == errno.ELOOP or getattr(exc, "winerror", None) == _WINERROR_LOOP:
+            # A symlink loop can be neither read nor written; say so first.
+            raise _RefusedFile(
+                path, "a symlink loop, which can be neither read nor written"
+            ) from exc
+        return ("path", str(path.resolve()))
+    return ("inode", stat.st_dev, stat.st_ino)
+
+
+def _commit_planned_files(
+    result: InitResult,
+    *,
+    dry_run: bool,
+    unchanged: list[Path],
+) -> list[Path]:
+    """Write each planned file once, file it as created, overwritten, or unchanged.
+
+    ``unchanged`` is the bucket a file whose final text equals its original
+    lands in: ``skipped`` for init and uninstall, ``up_to_date`` for update.
+    Each path is reported, but a file reached by two paths is written once,
+    after any backup a repair planned. Returns the paths whose text changes.
+    """
+
+    if not dry_run:
+        for backup, original in result._pending_backups.items():
+            backup.write_text(original, encoding="utf-8")
+    result._pending_backups.clear()
+    # Before any write, so a path to a file another path creates still
+    # counts as new.
+    existed = {path: path.exists() for path in result._planned_files}
+    written: set[tuple[object, ...]] = set()
+    changed: list[Path] = []
+    for path in result._planned_files:
+        content = result._preview_contents[path]
+        original = result._preview_original_contents[path]
+        if existed[path] and content == original:
+            result.diffs.pop(path, None)
+            unchanged.append(path)
+            continue
+        if dry_run or existed[path]:
+            _record_diff(path, original, content, result)
+        identity = result._planned_identities[path]
+        if not dry_run and identity not in written:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+            written.add(identity)
+        (result.overwritten if existed[path] else result.created).append(path)
+        changed.append(path)
+    result._planned_files.clear()
+    result._planned_identities.clear()
+    return changed
 
 
 def _normalize_cursor_rules_document(content: str) -> str:
@@ -1197,6 +1419,23 @@ def _upsert_managed_block(
     begin_marker: str = CLAUDE_BLOCK_BEGIN,
     end_marker: str = CLAUDE_BLOCK_END,
 ) -> str:
+    """Put ``block`` in place of the managed region, or after ``existing``.
+
+    Only the region from BEGIN through END (and the version line after END)
+    is Lab Tracker's: the text around it, blank lines included, is kept byte
+    for byte, so an up-to-date block leaves the file unchanged. A lone marker
+    is repaired by :func:`_managed_block_parts`; with no marker, the block is
+    appended after one blank line.
+    """
+
+    region = _managed_region(existing, begin_marker, end_marker)
+    if region is not None:
+        start, stop = region
+        rest = existing[stop:]
+        if rest.startswith("\n") and block.endswith("\n"):
+            # The newline after the old region ends the new one too.
+            return existing[:start] + block[:-1] + rest
+        return existing[:start] + block + rest
     prefix, suffix, removed = _managed_block_parts(existing, begin_marker, end_marker)
     if removed:
         return _join_surrounding_block(prefix, block, suffix)
@@ -1205,38 +1444,49 @@ def _upsert_managed_block(
     return block
 
 
-def _strip_managed_block(
+def _managed_upsert_at(
     path: Path,
+    existing: str,
+    block: str,
     *,
     begin_marker: str,
     end_marker: str,
-    result: InitResult,
-    dry_run: bool = False,
-) -> None:
-    if not path.exists() and path not in result._preview_contents:
-        result.skipped.append(path)
+) -> str:
+    try:
+        return _upsert_managed_block(
+            existing, block, begin_marker=begin_marker, end_marker=end_marker
+        )
+    except ManagedBlockMarkerError as exc:
+        raise _RefusedFile(path, str(exc)) from exc
+
+
+def _plan_strip(block: _ManagedBlock, *, result: InitResult, dry_run: bool) -> None:
+    """Plan removing ``block``'s region from its file, over the text planned so far."""
+
+    path = block.path
+    if not path.exists():
+        # Nothing to strip, a dangling or looping link included.
+        if path not in result.skipped:
+            result.skipped.append(path)
         return
-    existing = _planned_or_disk_text(path, result)
-    prefix, suffix, removed = _managed_block_parts(existing, begin_marker, end_marker)
-    if not removed:
-        result.skipped.append(path)
-        return
-    _backup_before_unpaired_marker_repair(
-        path,
-        existing,
-        begin_marker=begin_marker,
-        end_marker=end_marker,
-        result=result,
-        dry_run=dry_run,
-    )
-    content = _join_surrounding_text(prefix, suffix)
-    if path not in result.stripped:
-        result.stripped.append(path)
-    if dry_run:
-        _record_dry_run_change(path, existing, content, result)
-        return
-    path.write_text(content, encoding="utf-8")
-    result.overwritten.append(path)
+    existing, twins = _planned_text(path, result)
+    try:
+        prefix, suffix, removed = _managed_block_parts(
+            existing, block.begin_marker, block.end_marker
+        )
+    except ManagedBlockMarkerError as exc:
+        raise _RefusedFile(path, str(exc)) from exc
+    if removed:
+        _backup_before_unpaired_marker_repair(
+            path,
+            existing,
+            begin_marker=block.begin_marker,
+            end_marker=block.end_marker,
+            result=result,
+            dry_run=dry_run,
+        )
+        existing = _join_surrounding_text(prefix, suffix)
+    _set_planned_text(path, existing, twins, result)
 
 
 def _backup_before_unpaired_marker_repair(
@@ -1248,12 +1498,13 @@ def _backup_before_unpaired_marker_repair(
     result: InitResult,
     dry_run: bool,
 ) -> None:
-    """Save the file before a repair that drops text around a lone marker.
+    """Plan saving the file before a repair that drops text around a lone marker.
 
     With only one marker present there is no way to tell where the stale
     managed block ends, so the repair discards everything after a lone BEGIN
     (or before a lone END). Keep the original next to the file so nothing the
-    user wrote there is lost, and say so.
+    user wrote there is lost, and say so. :func:`_commit_planned_files`
+    writes the backup before the repaired file.
     """
 
     if (begin_marker in existing) == (end_marker in existing):
@@ -1270,8 +1521,77 @@ def _backup_before_unpaired_marker_repair(
         f"around it {tense} replaced during repair, and the original {tense} "
         f"saved at {backup}."
     )
-    if not dry_run:
-        backup.write_text(existing, encoding="utf-8")
+    # The original, not text an earlier block of this run only planned.
+    result._pending_backups[backup] = result._preview_original_contents[path]
+
+
+class ManagedBlockMarkerError(ValueError):
+    """A file holds both Lab Tracker markers of a block, but END comes first."""
+
+
+class _RefusedFile(SystemExit):
+    """A run stops before writing anything because of what one file is or holds."""
+
+    def __init__(self, path: Path, reason: str) -> None:
+        super().__init__(f"{path}: {reason}")
+        self.path = path
+
+
+def _marker_order_error(begin_marker: str, end_marker: str) -> ManagedBlockMarkerError:
+    return ManagedBlockMarkerError(
+        f"{end_marker} comes before {begin_marker}, so the managed block "
+        "cannot be found; remove or reorder the stray marker by hand, then "
+        "run the command again."
+    )
+
+
+def update_refusal_suggestion(names: list[str]) -> str:
+    """What to do about files `lt update` refuses (``errors`` in `lt doctor`)."""
+
+    return (
+        f"`lt update` stops before writing anything because of {', '.join(names)}; "
+        "fix what `lt doctor` reports there by hand (a Lab Tracker marker out of "
+        "order, for example), then run `lt update`."
+    )
+
+
+def _managed_region(existing: str, begin_marker: str, end_marker: str) -> tuple[int, int] | None:
+    """The span of the first BEGIN...END region, or ``None`` when it is not paired.
+
+    The span runs from BEGIN to the end of END or, for a code-conventions
+    block whose version comment is the next non-blank text, to where that
+    comment stops (see :func:`_version_comment_stop`). The newline after the
+    span and everything around it stay outside.
+    """
+
+    start = existing.find(begin_marker)
+    if start == -1:
+        return None
+    end = existing.find(end_marker, start + len(begin_marker))
+    if end == -1:
+        return None
+    stop = end + len(end_marker)
+    if end_marker in _VERSIONED_END_MARKERS:
+        after = existing[stop:]
+        following = after.lstrip()
+        if following.startswith(_CONVENTIONS_VERSION_LINE_PREFIX):
+            stop = _version_comment_stop(existing, stop + len(after) - len(following))
+    return start, stop
+
+
+def _version_comment_stop(text: str, comment_start: int) -> int:
+    """Where the version comment at ``comment_start`` stops being Lab Tracker's.
+
+    That is the end of its line or, when other text follows the comment on
+    that line, the end of its ``-->``, so the other text stays the user's.
+    """
+
+    line_end = text.find("\n", comment_start)
+    line_end = len(text) if line_end == -1 else line_end
+    comment_end = text.find("-->", comment_start, line_end)
+    if comment_end != -1 and text[comment_end + 3 : line_end].strip():
+        return comment_end + 3
+    return line_end
 
 
 def _managed_block_parts(
@@ -1279,18 +1599,22 @@ def _managed_block_parts(
     begin_marker: str,
     end_marker: str,
 ) -> tuple[str, str, bool]:
+    region = _managed_region(existing, begin_marker, end_marker)
+    if region is not None:
+        start, stop = region
+        return existing[:start], existing[stop:], True
     has_begin = begin_marker in existing
     has_end = end_marker in existing
     if has_begin and has_end:
-        prefix, rest = existing.split(begin_marker, 1)
-        _old_block, suffix = rest.split(end_marker, 1)
-        return prefix, _drop_trailing_version_line(suffix), True
+        raise _marker_order_error(begin_marker, end_marker)
     if has_begin:
         prefix, _rest = existing.split(begin_marker, 1)
         return prefix, "", True
     if has_end:
         _old_block, suffix = existing.split(end_marker, 1)
-        return "", _drop_trailing_version_line(suffix), True
+        if end_marker in _VERSIONED_END_MARKERS:
+            suffix = _drop_trailing_version_line(suffix)
+        return "", suffix, True
     return existing, "", False
 
 
@@ -1310,9 +1634,9 @@ def _join_surrounding_text(prefix: str, suffix: str) -> str:
 
 def _drop_trailing_version_line(suffix: str) -> str:
     stripped = suffix.lstrip()
-    if stripped.startswith("<!-- lab-tracker-code-conventions"):
-        _version_line, separator, rest = stripped.partition("\n")
-        return rest if separator else ""
+    if stripped.startswith(_CONVENTIONS_VERSION_LINE_PREFIX):
+        rest = stripped[_version_comment_stop(stripped, 0) :]
+        return rest[1:] if rest.startswith("\n") else rest
     return suffix
 
 
@@ -1330,8 +1654,14 @@ def _record_dry_run_change(
     content: str,
     result: InitResult,
 ) -> None:
-    original = result._preview_original_contents.setdefault(path, existing)
     result._preview_contents[path] = content
+    _record_diff(path, existing, content, result)
+
+
+def _record_diff(path: Path, existing: str, content: str, result: InitResult) -> None:
+    """Keep how ``path`` changes from the text it had before this run."""
+
+    original = result._preview_original_contents.setdefault(path, existing)
     diff = _text_diff(path, original, content)
     if diff:
         result.diffs[path] = diff
@@ -1357,11 +1687,14 @@ def _extract_managed_body(
     begin_marker: str,
     end_marker: str,
 ) -> str | None:
-    if begin_marker not in content or end_marker not in content:
+    region = _managed_region(content, begin_marker, end_marker)
+    if region is None:
+        if begin_marker in content and end_marker in content:
+            raise _marker_order_error(begin_marker, end_marker)
         return None
-    _prefix, rest = content.split(begin_marker, 1)
-    body, _suffix = rest.split(end_marker, 1)
-    return body.strip() + "\n"
+    body_start = region[0] + len(begin_marker)
+    body_end = content.find(end_marker, body_start)
+    return content[body_start:body_end].strip() + "\n"
 
 
 def _extract_version_line(
@@ -1373,9 +1706,9 @@ def _extract_version_line(
         return ""
     _prefix, suffix = content.split(end_marker, 1)
     stripped = suffix.lstrip()
-    if not stripped.startswith("<!-- lab-tracker-code-conventions"):
+    if not stripped.startswith(_CONVENTIONS_VERSION_LINE_PREFIX):
         return ""
-    return stripped.splitlines()[0]
+    return stripped[: _version_comment_stop(stripped, 0)]
 
 
 def _doctor(target: str | Path = ".") -> dict[str, object]:
@@ -1406,12 +1739,30 @@ def _doctor(target: str | Path = ".") -> dict[str, object]:
     ]
     targets: list[dict[str, object]] = []
     for name, path, begin_marker, end_marker in checks:
-        content = path.read_text(encoding="utf-8") if path.exists() else ""
-        found_body = _extract_managed_body(
-            content,
-            begin_marker=begin_marker,
-            end_marker=end_marker,
-        )
+        try:
+            content = _read_managed_text(path)
+            found_body = _extract_managed_body(
+                content,
+                begin_marker=begin_marker,
+                end_marker=end_marker,
+            )
+        except (ManagedBlockMarkerError, _RefusedFile) as exc:
+            # Present but unreadable: drifted, and named, so `lt doctor --all`
+            # still reports the other repos.
+            targets.append(
+                {
+                    "name": name,
+                    "path": str(path),
+                    "present": True,
+                    "in_sync": False,
+                    "body_in_sync": False,
+                    "version_in_sync": False,
+                    "drifted": True,
+                    "version_line": "",
+                    "error": _refusal_text(path, exc),
+                }
+            )
+            continue
         found_version = _extract_version_line(content, end_marker=end_marker)
         present = found_body is not None
         body_in_sync = present and found_body == body
@@ -1442,12 +1793,59 @@ def _doctor(target: str | Path = ".") -> dict[str, object]:
     agent_hooks = _agent_hooks_status(root)
     payload["agent_hooks"] = agent_hooks
     payload["suggestions"] = agent_capture_suggestions(agent_hooks)
-    if any(target["drifted"] for target in targets):
+    errors = [
+        {"name": target["name"], "error": target["error"]}
+        for target in targets
+        if "error" in target
+    ] + _activation_marker_errors(root)
+    # A file both checks read (CLAUDE.md, AGENTS.md) is reported once.
+    errors = list({str(error["error"]): error for error in errors}.values())
+    if not errors:
+        # A repair or a linked file can make `lt update` refuse files whose
+        # markers are each in order; its own planning finds those.
+        errors = _update_refusal(root)
+    if errors:
+        # `lt update` refuses these files, so it cannot be the advice.
+        payload["errors"] = errors
+        payload["suggestion"] = update_refusal_suggestion(
+            list(dict.fromkeys(str(error["name"]) for error in errors))
+        )
+    elif any(target["drifted"] for target in targets):
         payload["suggestion"] = (
             "Managed blocks differ from the installed package text; "
             "`lt update` refreshes them (`--dry-run` previews the changes)."
         )
     return payload
+
+
+def _activation_marker_errors(root: Path) -> list[dict[str, object]]:
+    """The activation blocks whose END comes before BEGIN, which `lt update` refuses."""
+
+    errors: list[dict[str, object]] = []
+    for block in _activation_blocks(root):
+        try:
+            _disk_body(block)
+        except (ManagedBlockMarkerError, _RefusedFile) as exc:
+            errors.append({"name": block.path.name, "error": _refusal_text(block.path, exc)})
+    return errors
+
+
+def _refusal_text(path: Path, exc: ManagedBlockMarkerError | _RefusedFile) -> str:
+    """The message `lt update` stops with for ``exc``, naming ``path``."""
+
+    return str(exc.code) if isinstance(exc, _RefusedFile) else f"{path}: {exc}"
+
+
+def _update_refusal(root: Path) -> list[dict[str, object]]:
+    """Why `lt update` would stop before writing, found by planning it without writing."""
+
+    try:
+        _plan_update(root, yes=False, result=InitResult(), dry_run=True)
+    except _RefusedFile as exc:
+        inside = exc.path.is_relative_to(root)
+        name = exc.path.relative_to(root).as_posix() if inside else str(exc.path)
+        return [{"name": name, "error": str(exc.code)}]
+    return []
 
 
 def _doctor_exit_code(payload: object) -> int:
@@ -1459,7 +1857,7 @@ def _doctor_exit_code(payload: object) -> int:
     all_targets_clean = all(
         isinstance(target, dict) and not target.get("drifted") for target in targets
     )
-    return 0 if all_targets_clean else 1
+    return 0 if all_targets_clean and not payload.get("errors") else 1
 
 
 def _mcp_json(base_url: str = DEFAULT_BASE_URL) -> str:
@@ -1594,6 +1992,8 @@ def _agents_fragment() -> str:
         `lt hooks install`, `lt setup autotrack`, `lt setup schedule`, and
         `lt setup agent-hooks` also require `--yes`; suggest them to the user
         rather than applying them unprompted.
+
+        {EMPTY_PROJECT_ORIENTATION_POLICY}
 
         {AGENT_SESSION_CAPTURE_DISCOVERY_POLICY}
 

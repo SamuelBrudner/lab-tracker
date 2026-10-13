@@ -482,6 +482,14 @@ def _suggestions(status: JsonObject) -> list[str]:
             "`lt setup init` scaffolds the integration files here "
             "(`--dry-run` previews)."
         )
+    elif repo.get("update_refusals"):
+        from lab_tracker.cli import update_refusal_suggestion
+
+        suggestions.append(
+            update_refusal_suggestion(
+                list(dict.fromkeys(str(item.get("name")) for item in repo["update_refusals"]))
+            )
+        )
     elif any(item.get("drifted") for item in repo["conventions"]):
         suggestions.append(
             "Managed blocks differ from the installed package; `lt update` "
@@ -1249,16 +1257,20 @@ def _repo_status(root: Path) -> JsonObject:
                 project_id = str(payload.get("project_id") or "")
                 project_name = str(payload.get("project_name") or "")
     conventions = []
+    update_refusals = []
     with suppress(Exception):
+        doctor = _doctor(root)
         conventions = [
             {
                 "name": item.get("name"),
                 "present": item.get("present"),
                 "drifted": item.get("drifted"),
             }
-            for item in _doctor(root).get("targets", [])
+            for item in doctor.get("targets", [])
             if isinstance(item, dict)
         ]
+        # Files `lt update` refuses, with the reasons doctor found.
+        update_refusals = [item for item in doctor.get("errors", []) if isinstance(item, dict)]
     return {
         "scaffold": scaffold,
         "claude_activation_block_present": activation_present,
@@ -1268,6 +1280,7 @@ def _repo_status(root: Path) -> JsonObject:
             "project_name": project_name,
         },
         "conventions": conventions,
+        "update_refusals": update_refusals,
     }
 
 

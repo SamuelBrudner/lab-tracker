@@ -131,7 +131,7 @@ def test_progress_review_through_mcp_is_person_and_window_scoped(
         response = client.request(
             request.method,
             request.url.path,
-            json=json.loads(request.content),
+            json=json.loads(request.content) if request.content else None,
             headers=admin_auth_headers,
         )
         return httpx.Response(response.status_code, json=response.json())
@@ -151,6 +151,9 @@ def test_progress_review_through_mcp_is_person_and_window_scoped(
             **scope,
         )
         assert "error" not in payload, payload
+        # A filter can empty the packet, but the project has a record, so the
+        # overview read that confirms emptiness must not suggest Orient.
+        assert payload["next_action"].get("action") != "suggest_orientation_checkpoint"
         data = payload["data"]
         assert isinstance(data, dict)
         return data
