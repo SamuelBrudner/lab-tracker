@@ -153,6 +153,10 @@ def test_graph_overview_of_an_empty_project_suggests_the_orient_checkpoint(
     assert f"/app/projects/{PROJECT_ID}/onboarding" in hint["reason"]
     assert "Orient me to this project" in hint["reason"]
     assert "earlier history is not imported" in hint["reason"]
+    # One rule for every empty project, the same as the agent policy: no
+    # guess about whether work is already underway.
+    assert "once per session" in hint["reason"]
+    assert "underway" not in hint["reason"]
 
 
 def test_graph_overview_of_a_project_with_records_keeps_the_search_hint(
@@ -225,6 +229,8 @@ def test_every_agent_instruction_surface_carries_the_orientation_policy() -> Non
     assert ORIENTATION_CHECKPOINT_ACTION in EMPTY_PROJECT_ORIENTATION_POLICY
     assert "once per session" in EMPTY_PROJECT_ORIENTATION_POLICY
     assert "earlier history is not imported" in EMPTY_PROJECT_ORIENTATION_POLICY
+    assert "a viewer needs edit access first" in EMPTY_PROJECT_ORIENTATION_POLICY
+    assert "underway" not in EMPTY_PROJECT_ORIENTATION_POLICY
 
 
 def test_the_server_overview_of_a_new_project_reads_as_empty_until_it_has_a_record(

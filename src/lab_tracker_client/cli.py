@@ -880,13 +880,13 @@ def _add_watch_parsers(subcommands: argparse._SubParsersAction) -> None:
         "--include",
         action="append",
         default=[],
-        help="Glob for relative paths to include. Repeatable.",
+        help="Glob for relative paths to include in files mode. Repeatable.",
     )
     add_parser.add_argument(
         "--exclude",
         action="append",
         default=[],
-        help="Glob for relative paths to exclude. Repeatable.",
+        help="Glob for relative paths to exclude in files mode. Repeatable.",
     )
     add_parser.add_argument("--name", help="Optional label for this watch entry.")
     add_parser.add_argument("--project", help="Project UUID override for this watch.")
@@ -1346,8 +1346,9 @@ def _add_repo_parsers(subcommands: argparse._SubParsersAction) -> None:
     hook_parser = repo_commands.add_parser(
         "install-hook",
         help=(
-            "Alias of 'lt hooks install': install the post-commit hook that runs "
-            "'lt repo report'."
+            "Older entry point to the 'lt hooks install' installer: writes the "
+            "post-commit hook that runs 'lt repo report' at once, with no "
+            "--dry-run preview, --yes gate, or --project; prefer 'lt hooks install'."
         ),
     )
     hook_parser.add_argument("--repo", default=".", help="Repository path. Defaults to cwd.")

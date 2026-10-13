@@ -22,10 +22,13 @@ stages files already in it:
 - `lt project bind` records which project a checkout's captures belong to.
   Work already underway binds the project it lives in rather than a new one.
 - `lt hooks install` records commits made after it runs, not earlier ones.
-- `lt watch add` registers a folder whose first scan stages every file already
-  in it that its `--include` and `--exclude` globs match. The globs filter by
-  path and name, not age, so watch a fresh or run-specific folder (or exclude
-  older paths) and preview with `lt watch scan --dry-run` before scheduling.
+- `lt watch add` registers a folder whose first scan stages files already in
+  it. In the default `files` mode that is every file its `--include` and
+  `--exclude` globs match. The globs filter by path and name, not age, so
+  watch a fresh or run-specific folder (or exclude older paths). A
+  `manifest`-mode watch ignores the globs and stages every
+  `lab-tracker-evidence.json` below its root, so give it a fresh root.
+  Preview with `lt watch scan --dry-run` before scheduling.
 
 A folder that is not a git repository takes the same binding and watch steps
 without commit hooks; `lt import-folder` stages the files a synced folder holds

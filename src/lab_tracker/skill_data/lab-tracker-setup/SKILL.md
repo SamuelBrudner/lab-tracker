@@ -178,13 +178,16 @@ short, consent-gated sequence on the `lt` CLI.
 
 Setup configures capture going forward, with one exception. Commit
 hooks record commits made after `lt hooks install`, not earlier ones,
-but a watch folder's first scan stages every file already in it that
-its `--include` and `--exclude` globs match. The globs filter by path
-and name, not age, so a fresh or run-specific folder (or an exclude
-for older paths) keeps old material out, and `lt watch scan
---dry-run` previews a scan. `lt setup status` reports configuration,
-not content, so a healthy checkout can still belong to a project with
-no records.
+but a watch folder's first scan stages files already in it. A watch
+in the default `files` mode stages every file its `--include` and
+`--exclude` globs match. The globs filter by path and name, not age,
+so a fresh or run-specific folder (or an exclude for older paths)
+keeps old material out. A `manifest`-mode watch ignores the globs and
+stages every `lab-tracker-evidence.json` below its root, so only a
+fresh root keeps old manifests out. `lt watch scan --dry-run`
+previews a scan. `lt setup status` reports configuration, not
+content, so a healthy checkout can still belong to a project with no
+records.
 
 For such a project, "Orient me to this project" in the web app
 (`/app/projects/<project-id>/onboarding`) records one attributed
@@ -271,4 +274,4 @@ rerunning its pinned `uv add` (step 5), which neither `lt update` nor
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.3.0 sha256=0007a46f8164 -->
+<!-- lab-tracker-setup-guide version=0.3.0 sha256=24679f2666bd -->

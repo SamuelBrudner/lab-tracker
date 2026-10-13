@@ -197,7 +197,8 @@ Judged alternatives, for the record:
    block, `LAB_TRACKER_PROJECT_ID`, or `lt_ids.json`; a conflicting
    `--project` is refused), and migrates a `GRAPH DRAFT` block in place,
    carrying its baked project id into `repo.json` and its base URL into the
-   new block. `lt repo install-hook` is an alias. `lt git snapshot` is
+   new block. `lt repo install-hook` runs the same installer without the
+   preview or consent gate. `lt git snapshot` is
    deprecated for one release and prints a migration notice; both paths share
    the `<normalized-remote>@<sha>` evidence identity and one commit filter
    (merge commits and `fixup!`/`squash!` subjects skipped by default, `wip`

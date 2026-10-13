@@ -40,7 +40,10 @@ from lab_tracker.capture_setup_catalog import (
 from lab_tracker.cli import _skills_homes, init_consumer_repo, update_consumer_repo
 from lab_tracker.cli import main as lab_tracker_main
 from lab_tracker.config import Settings
-from lab_tracker.decision_context_constants import AGENT_CONSULTATION_POLICY
+from lab_tracker.decision_context_constants import (
+    AGENT_CONSULTATION_POLICY,
+    EMPTY_PROJECT_ORIENTATION_POLICY,
+)
 from lab_tracker.mcp_tools import READ_TOOLS, WRITE_TOOLS
 from lab_tracker.mcp_tools.hints import orientation_checkpoint_hint
 from lab_tracker.services.graph_draft_capture_setup import (
@@ -1384,15 +1387,18 @@ def test_orient_checkpoint_pointers_name_a_real_button_and_route() -> None:
     assert not stale, f"these point at the Orient checkpoint without its label or path: {stale}"
     workspace = _read(_WORKSPACE_HOME)
     assert _component_shows(_ORIENT_LABEL, workspace)
-    # A viewer gets a read-only page under another label; the hint, the agent
-    # policy, and the guide must say so rather than offer a button they lack.
+    # A viewer's workspace shows another label and leads to a read-only page.
+    # Each text that names the button names that label too, and each text
+    # that tells agents when to suggest the step says a viewer needs edit
+    # access first, rather than offer a button the person lacks.
     assert _component_shows(_VIEWER_ORIENT_LABEL, workspace)
+    for name, text in (*pointers.items(), ("agent-setup.md", _read(_AGENT_SETUP_DOC))):
+        assert _VIEWER_ORIENT_LABEL in _collapsed_whitespace(text), name
     for name, text in (
-        ("setup guide", pointers["setup guide"]),
-        ("MCP hint", pointers["MCP hint"]),
-        ("member-onboarding.md", pointers["member-onboarding.md"]),
+        ("agent policy", EMPTY_PROJECT_ORIENTATION_POLICY),
+        ("lab-tracker skill", _read(_SKILL_PATH)),
     ):
-        assert _VIEWER_ORIENT_LABEL in text, name
+        assert "a viewer needs edit access first" in _collapsed_whitespace(text), name
     assert _ORIENT_ROUTE.search(_without_js_comments(_read(_ROUTING))), (
         f"routing.jsx no longer serves the member-onboarding page at {_ORIENT_PATH}"
     )
