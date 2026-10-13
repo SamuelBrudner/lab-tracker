@@ -56,6 +56,13 @@ from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 @dataclass
 class InitResult:
+    """What an init, update, or uninstall run changed, or would change.
+
+    Each path lands in one bucket. ``diffs`` holds, in a dry run, how every
+    planned file would change and, after applying, how every file that
+    already existed changed (a created file is the canonical text).
+    """
+
     created: list[Path] = field(default_factory=list)
     skipped: list[Path] = field(default_factory=list)
     overwritten: list[Path] = field(default_factory=list)
@@ -67,6 +74,8 @@ class InitResult:
     warnings: list[str] = field(default_factory=list)
     _preview_contents: dict[Path, str] = field(default_factory=dict, repr=False)
     _preview_original_contents: dict[Path, str] = field(default_factory=dict, repr=False)
+    # Files whose managed blocks are planned but not yet written, in order.
+    _planned_files: list[Path] = field(default_factory=list, repr=False)
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -180,6 +189,7 @@ def init_consumer_repo(
             "Managed code-facing convention blocks are available with "
             "`lab_tracker init --yes`."
         )
+    _commit_planned_files(result, dry_run=dry_run, unchanged=result.skipped)
     result.offers.append(
         "Bind a project id into lt_ids.json with `lt project bind` "
         "(--dry-run previews the write)."
@@ -339,6 +349,7 @@ def _install_setup_skill_at_path(
         result.overwritten.append(path)
         return
     path.write_text(content, encoding="utf-8", newline="\n")
+    _record_diff(path, existing, content, result)
     result.overwritten.append(path)
 
 
@@ -385,6 +396,8 @@ def _uninstall_setup_skill_at_path(
         if path.exists():
             _record_dry_run_change(path, path.read_text(encoding="utf-8"), "", result)
         return
+    if path.exists():
+        _record_diff(path, path.read_text(encoding="utf-8"), "", result)
     for item in (path, backup):
         if item.exists():
             item.unlink()
@@ -393,6 +406,8 @@ def _uninstall_setup_skill_at_path(
 
 
 _UPDATE_BACKUP_SUFFIX = ".bak-lt-update"
+# The line managed_code_conventions_block writes right after its END marker.
+_CONVENTIONS_VERSION_LINE_PREFIX = "<!-- lab-tracker-code-conventions"
 # The name the docs give this command, whichever installed script name ran it.
 _DOCUMENTED_PROG = "lab-tracker"
 
@@ -483,6 +498,7 @@ def update_consumer_repo(
                 else None
             ),
         )
+    _commit_planned_files(result, dry_run=dry_run, unchanged=result.up_to_date)
     if conventions_offer_needed:
         result.offers.append(
             "Managed code-facing convention blocks are available with "
@@ -563,6 +579,7 @@ def _update_scaffold_file(
         return
     backup.write_text(existing, encoding="utf-8")
     path.write_text(content, encoding="utf-8")
+    _record_diff(path, existing, content, result)
     result.overwritten.append(path)
 
 
@@ -1097,6 +1114,7 @@ def _write_scaffold_file(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     if existed:
+        _record_diff(path, existing, content, result)
         result.overwritten.append(path)
     else:
         result.created.append(path)
@@ -1128,8 +1146,18 @@ def _write_managed_block(
     dry_run: bool = False,
     document_transform: Callable[[str], str] | None = None,
 ) -> None:
-    if path.exists() or path in result._preview_contents:
+    """Plan ``block`` into ``path``; :func:`_commit_planned_files` writes it.
+
+    Each managed block of a file is planned against the text the previous one
+    left, so a run writes a file at most once and files it in one bucket.
+    """
+
+    planned = path in result._preview_contents
+    if planned or path.exists():
         existing = _planned_or_disk_text(path, result)
+        result._preview_original_contents.setdefault(
+            path, path.read_text(encoding="utf-8") if path.exists() else ""
+        )
         _backup_before_unpaired_marker_repair(
             path,
             existing,
@@ -1138,33 +1166,52 @@ def _write_managed_block(
             result=result,
             dry_run=dry_run,
         )
-        content = _upsert_managed_block(
+        content = _managed_upsert_at(
+            path,
             existing,
             block,
             begin_marker=begin_marker,
             end_marker=end_marker,
         )
-        if document_transform is not None:
-            content = document_transform(content)
-        if content == existing:
-            result.skipped.append(path)
-            return
-        if dry_run:
-            _record_dry_run_change(path, existing, content, result)
-            result.overwritten.append(path)
-            return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-        result.overwritten.append(path)
-        return
-    content = document_transform(block) if document_transform is not None else block
-    if dry_run:
-        _record_dry_run_change(path, "", content, result)
-        result.created.append(path)
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
-    result.created.append(path)
+    else:
+        result._preview_original_contents.setdefault(path, "")
+        content = block
+    if document_transform is not None:
+        content = document_transform(content)
+    result._preview_contents[path] = content
+    if path not in result._planned_files:
+        result._planned_files.append(path)
+
+
+def _commit_planned_files(
+    result: InitResult,
+    *,
+    dry_run: bool,
+    unchanged: list[Path],
+) -> None:
+    """Write each planned file once, then file it as created, overwritten, or unchanged.
+
+    ``unchanged`` is the bucket a file whose final text equals its original
+    lands in: ``skipped`` for init, ``up_to_date`` for update.
+    """
+
+    for path in result._planned_files:
+        content = result._preview_contents[path]
+        original = result._preview_original_contents[path]
+        # Nothing planned has been written yet, so the disk still shows
+        # whether the file existed before this run.
+        existed = path.exists()
+        if existed and content == original:
+            result.diffs.pop(path, None)
+            unchanged.append(path)
+            continue
+        if dry_run or existed:
+            _record_diff(path, original, content, result)
+        if not dry_run:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        (result.overwritten if existed else result.created).append(path)
+    result._planned_files.clear()
 
 
 def _normalize_cursor_rules_document(content: str) -> str:
@@ -1197,12 +1244,45 @@ def _upsert_managed_block(
     begin_marker: str = CLAUDE_BLOCK_BEGIN,
     end_marker: str = CLAUDE_BLOCK_END,
 ) -> str:
+    """Put ``block`` in place of the managed region, or after ``existing``.
+
+    Only the region from BEGIN through END (and the version line after END)
+    is Lab Tracker's: the text around it, blank lines included, is kept byte
+    for byte, so an up-to-date block leaves the file unchanged. A lone marker
+    is repaired by :func:`_managed_block_parts`; with no marker, the block is
+    appended after one blank line.
+    """
+
+    region = _managed_region(existing, begin_marker, end_marker)
+    if region is not None:
+        start, stop = region
+        rest = existing[stop:]
+        if rest.startswith("\n") and block.endswith("\n"):
+            # The newline after the old region ends the new one too.
+            return existing[:start] + block[:-1] + rest
+        return existing[:start] + block + rest
     prefix, suffix, removed = _managed_block_parts(existing, begin_marker, end_marker)
     if removed:
         return _join_surrounding_block(prefix, block, suffix)
     if existing.strip():
         return f"{existing.rstrip()}\n\n{block}"
     return block
+
+
+def _managed_upsert_at(
+    path: Path,
+    existing: str,
+    block: str,
+    *,
+    begin_marker: str,
+    end_marker: str,
+) -> str:
+    try:
+        return _upsert_managed_block(
+            existing, block, begin_marker=begin_marker, end_marker=end_marker
+        )
+    except ManagedBlockMarkerError as exc:
+        raise SystemExit(f"{path}: {exc}") from exc
 
 
 def _strip_managed_block(
@@ -1217,7 +1297,10 @@ def _strip_managed_block(
         result.skipped.append(path)
         return
     existing = _planned_or_disk_text(path, result)
-    prefix, suffix, removed = _managed_block_parts(existing, begin_marker, end_marker)
+    try:
+        prefix, suffix, removed = _managed_block_parts(existing, begin_marker, end_marker)
+    except ManagedBlockMarkerError as exc:
+        raise SystemExit(f"{path}: {exc}") from exc
     if not removed:
         result.skipped.append(path)
         return
@@ -1236,7 +1319,9 @@ def _strip_managed_block(
         _record_dry_run_change(path, existing, content, result)
         return
     path.write_text(content, encoding="utf-8")
-    result.overwritten.append(path)
+    _record_diff(path, existing, content, result)
+    if path not in result.overwritten:
+        result.overwritten.append(path)
 
 
 def _backup_before_unpaired_marker_repair(
@@ -1271,7 +1356,37 @@ def _backup_before_unpaired_marker_repair(
         f"saved at {backup}."
     )
     if not dry_run:
-        backup.write_text(existing, encoding="utf-8")
+        # The original, not text an earlier block of this run only planned.
+        original = result._preview_original_contents.get(path, existing)
+        backup.write_text(original, encoding="utf-8")
+
+
+class ManagedBlockMarkerError(ValueError):
+    """A file holds both Lab Tracker markers of a block, but END comes first."""
+
+
+def _managed_region(existing: str, begin_marker: str, end_marker: str) -> tuple[int, int] | None:
+    """The span of the first BEGIN...END region, or ``None`` when it is not paired.
+
+    The span runs from BEGIN to the end of END, or to the end of the
+    code-conventions version line when that is the next non-blank line. The
+    newline after it, and all text around it, stays outside.
+    """
+
+    start = existing.find(begin_marker)
+    if start == -1:
+        return None
+    end = existing.find(end_marker, start + len(begin_marker))
+    if end == -1:
+        return None
+    stop = end + len(end_marker)
+    after = existing[stop:]
+    following = after.lstrip()
+    if following.startswith(_CONVENTIONS_VERSION_LINE_PREFIX):
+        line_start = stop + len(after) - len(following)
+        line_end = existing.find("\n", line_start)
+        stop = len(existing) if line_end == -1 else line_end
+    return start, stop
 
 
 def _managed_block_parts(
@@ -1279,12 +1394,18 @@ def _managed_block_parts(
     begin_marker: str,
     end_marker: str,
 ) -> tuple[str, str, bool]:
+    region = _managed_region(existing, begin_marker, end_marker)
+    if region is not None:
+        start, stop = region
+        return existing[:start], existing[stop:], True
     has_begin = begin_marker in existing
     has_end = end_marker in existing
     if has_begin and has_end:
-        prefix, rest = existing.split(begin_marker, 1)
-        _old_block, suffix = rest.split(end_marker, 1)
-        return prefix, _drop_trailing_version_line(suffix), True
+        raise ManagedBlockMarkerError(
+            f"{end_marker} comes before {begin_marker}, so the managed block "
+            "cannot be found; remove or reorder the stray marker by hand, then "
+            "run the command again."
+        )
     if has_begin:
         prefix, _rest = existing.split(begin_marker, 1)
         return prefix, "", True
@@ -1310,7 +1431,7 @@ def _join_surrounding_text(prefix: str, suffix: str) -> str:
 
 def _drop_trailing_version_line(suffix: str) -> str:
     stripped = suffix.lstrip()
-    if stripped.startswith("<!-- lab-tracker-code-conventions"):
+    if stripped.startswith(_CONVENTIONS_VERSION_LINE_PREFIX):
         _version_line, separator, rest = stripped.partition("\n")
         return rest if separator else ""
     return suffix
@@ -1330,8 +1451,14 @@ def _record_dry_run_change(
     content: str,
     result: InitResult,
 ) -> None:
-    original = result._preview_original_contents.setdefault(path, existing)
     result._preview_contents[path] = content
+    _record_diff(path, existing, content, result)
+
+
+def _record_diff(path: Path, existing: str, content: str, result: InitResult) -> None:
+    """Keep how ``path`` changes from the text it had before this run."""
+
+    original = result._preview_original_contents.setdefault(path, existing)
     diff = _text_diff(path, original, content)
     if diff:
         result.diffs[path] = diff
@@ -1373,7 +1500,7 @@ def _extract_version_line(
         return ""
     _prefix, suffix = content.split(end_marker, 1)
     stripped = suffix.lstrip()
-    if not stripped.startswith("<!-- lab-tracker-code-conventions"):
+    if not stripped.startswith(_CONVENTIONS_VERSION_LINE_PREFIX):
         return ""
     return stripped.splitlines()[0]
 

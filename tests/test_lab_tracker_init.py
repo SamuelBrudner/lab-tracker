@@ -15,6 +15,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised by Python 3.10 CI
     import tomli as tomllib
 
 from lab_tracker.cli import (
+    ManagedBlockMarkerError,
     _doctor,
     _doctor_exit_code,
     _extract_managed_body,
@@ -32,12 +33,14 @@ from lab_tracker.decision_context_constants import (
     AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN,
     AGENTS_CODE_CONVENTIONS_BLOCK_END,
     CLAUDE_BLOCK_BEGIN,
+    CLAUDE_BLOCK_END,
     CODE_CONVENTIONS_BLOCK_BEGIN,
     CODE_CONVENTIONS_BLOCK_END,
     COMMIT_CAPTURE_RECOVERY_POLICY,
     code_conventions_version_line,
     code_facing_idioms,
     cursor_rules_mdc,
+    managed_agent_activation_block,
     managed_code_conventions_block,
 )
 from lab_tracker.demo_seed import DemoSeedResult
@@ -492,8 +495,9 @@ def test_update_keeps_cursor_rule_byte_stable_with_one_front_matter_header(
     assert initial == cursor_rules_mdc()
     assert cursor_rule.read_text(encoding="utf-8") == initial
     assert initial.count("description: Lab Tracker code-facing conventions") == 1
-    assert cursor_rule in first.skipped
-    assert cursor_rule in second.skipped
+    # Unchanged managed files are up to date for update, like scaffold files.
+    assert cursor_rule in first.up_to_date
+    assert cursor_rule in second.up_to_date
 
 
 def test_update_repairs_duplicate_cursor_front_matter_and_dry_run_previews_it(
@@ -1208,3 +1212,182 @@ def test_second_unpaired_repair_keeps_the_first_backup_of_the_original(tmp_path:
     backup = tmp_path / "CLAUDE.md.bak-lt-update"
     assert result.backups[claude] == backup
     assert backup.read_text(encoding="utf-8") == original
+
+
+# --- `lt update` converges on its own output (issue #292) ---------------------
+
+_MANAGED_FILES = ("CLAUDE.md", "AGENTS.md", "GEMINI.md", ".cursor/rules/lab-tracker.mdc")
+_BUCKETS = ("created", "skipped", "overwritten", "up_to_date")
+_OLD_VERSION_LINE = "<!-- lab-tracker-code-conventions version=0.0.1 sha256=000000000000 -->"
+
+
+def _buckets(result: object, path: Path) -> list[str]:
+    """Every bucket ``path`` appears in, once per appearance."""
+
+    payload = result.as_dict()  # type: ignore[attr-defined]
+    return [name for name in _BUCKETS for item in payload[name] if item == str(path)]
+
+
+def _stale_activation() -> str:
+    return managed_agent_activation_block().replace(
+        "## Lab Tracker Knowledge Graph Consultation", "## Old consultation heading"
+    )
+
+
+def _stale_conventions() -> str:
+    return (
+        managed_code_conventions_block()
+        .replace("# Lab Tracker Code-Facing Idioms", "# Old idioms heading")
+        .replace(code_conventions_version_line(), _OLD_VERSION_LINE)
+    )
+
+
+@pytest.mark.parametrize("dry_run", [True, False], ids=["dry-run", "apply"])
+def test_update_reports_current_managed_files_up_to_date_once(
+    tmp_path: Path, dry_run: bool
+) -> None:
+    init_consumer_repo(tmp_path, yes=True)
+    before = {name: (tmp_path / name).read_text(encoding="utf-8") for name in _MANAGED_FILES}
+
+    result = update_consumer_repo(tmp_path, dry_run=dry_run)
+
+    for name in _MANAGED_FILES:
+        assert _buckets(result, tmp_path / name) == ["up_to_date"], name
+        assert (tmp_path / name).read_text(encoding="utf-8") == before[name]
+    assert not result.diffs
+
+
+@pytest.mark.parametrize("after_gap", ["", "\n", "\n\n"], ids=["glued", "blank", "two-blank"])
+@pytest.mark.parametrize("between_gap", ["", "\n", "\n\n"], ids=["glued", "blank", "two-blank"])
+@pytest.mark.parametrize("before_gap", ["", "\n"], ids=["one-blank", "two-blank"])
+def test_update_replaces_only_the_managed_regions(
+    tmp_path: Path, before_gap: str, between_gap: str, after_gap: str
+) -> None:
+    def document(activation: str, conventions: str) -> str:
+        return (
+            f"# My project\n\nIntro.\n{before_gap}\n{activation}{between_gap}"
+            f"{conventions}{after_gap}## My notes\n\nKeep this.\n"
+        )
+
+    claude = tmp_path / "CLAUDE.md"
+    claude.write_text(document(_stale_activation(), _stale_conventions()), encoding="utf-8")
+
+    first = update_consumer_repo(tmp_path)
+    refreshed = claude.read_text(encoding="utf-8")
+    second = update_consumer_repo(tmp_path, dry_run=True)
+
+    # Both blocks are refreshed; every byte around them is the user's.
+    assert refreshed == document(
+        managed_agent_activation_block(), managed_code_conventions_block()
+    )
+    assert _buckets(first, claude) == ["overwritten"]
+    assert _buckets(second, claude) == ["up_to_date"]
+    assert claude not in second.diffs
+
+
+def test_update_writes_a_stale_file_once_and_reports_what_it_wrote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    init_consumer_repo(tmp_path, yes=True)
+    claude = tmp_path / "CLAUDE.md"
+    current = claude.read_text(encoding="utf-8")
+    claude.write_text(
+        current.replace(managed_agent_activation_block(), _stale_activation()).replace(
+            managed_code_conventions_block(), _stale_conventions()
+        ),
+        encoding="utf-8",
+    )
+    writes: list[Path] = []
+    write_text = Path.write_text
+
+    def counting_write_text(self: Path, *args: object, **kwargs: object) -> int:
+        writes.append(self)
+        return write_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "write_text", counting_write_text)
+    result = update_consumer_repo(tmp_path)
+    monkeypatch.undo()
+
+    assert writes.count(claude) == 1
+    assert _buckets(result, claude) == ["overwritten"]
+    assert claude.read_text(encoding="utf-8") == current
+    # The applied run shows what it wrote, both blocks in one diff.
+    assert "-## Old consultation heading" in result.diffs[claude]
+    assert "+## Lab Tracker Knowledge Graph Consultation" in result.diffs[claude]
+    assert f"-{_OLD_VERSION_LINE}" in result.diffs[claude]
+
+
+def test_init_lists_a_new_file_with_both_blocks_once_as_created(tmp_path: Path) -> None:
+    result = init_consumer_repo(tmp_path, yes=True, dry_run=True)
+
+    for name in ("CLAUDE.md", "AGENTS.md"):
+        assert _buckets(result, tmp_path / name) == ["created"], name
+
+
+def test_applied_update_reports_how_existing_files_changed(tmp_path: Path) -> None:
+    init_consumer_repo(tmp_path, yes=True)
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.write_text('{"hooks": {}}\n', encoding="utf-8")
+
+    result = update_consumer_repo(tmp_path)
+
+    assert settings in result.diffs and "lt prime" in result.diffs[settings]
+
+
+def test_applied_init_reports_no_diff_for_files_it_created(tmp_path: Path) -> None:
+    result = init_consumer_repo(tmp_path, yes=True)
+
+    assert result.created
+    assert not result.diffs
+
+
+def test_repair_backup_is_the_original_text_not_a_planned_one(tmp_path: Path) -> None:
+    claude = tmp_path / "CLAUDE.md"
+    original = (
+        f"# Mine\n\n{_stale_activation()}\n"
+        f"{CODE_CONVENTIONS_BLOCK_BEGIN}\nstale conventions\nuser tail\n"
+    )
+    claude.write_text(original, encoding="utf-8")
+
+    result = init_consumer_repo(tmp_path, yes=True)
+
+    # The activation refresh is only planned when the conventions repair
+    # backs the file up, so the backup is what was on disk.
+    backup = tmp_path / "CLAUDE.md.bak-lt-update"
+    assert result.backups[claude] == backup
+    assert backup.read_text(encoding="utf-8") == original
+
+
+def test_out_of_order_markers_stop_the_run_naming_the_file(tmp_path: Path) -> None:
+    claude = tmp_path / "CLAUDE.md"
+    original = f"# Mine\n{CLAUDE_BLOCK_END}\nuser text\n{CLAUDE_BLOCK_BEGIN}\nstale\n"
+    claude.write_text(original, encoding="utf-8")
+
+    with pytest.raises(ManagedBlockMarkerError, match="comes before"):
+        _upsert_managed_block(original, managed_agent_activation_block())
+    with pytest.raises(SystemExit, match="CLAUDE.md"):
+        update_consumer_repo(tmp_path)
+    with pytest.raises(SystemExit, match="CLAUDE.md"):
+        init_consumer_repo(tmp_path, uninstall=True)
+    assert claude.read_text(encoding="utf-8") == original
+    assert not (tmp_path / "CLAUDE.md.bak-lt-update").exists()
+
+
+@pytest.mark.parametrize(
+    ("existing", "expected"),
+    [
+        # A current block is left exactly as it is.
+        ("# A\n\n{block}\n## B\n", "# A\n\n{block}\n## B\n"),
+        # A region that ends the file without a newline gains the block's newline.
+        ("# A\n\n{stale_body}", "# A\n\n{block}"),
+        # Text on END's own line is moved to the next line, not lost.
+        ("{stale_body}trailing", "{block}trailing"),
+    ],
+    ids=["current", "end-of-file", "same-line-text"],
+)
+def test_upsert_splices_only_between_the_markers(existing: str, expected: str) -> None:
+    block = managed_agent_activation_block()
+    stale_body = _stale_activation().rstrip("\n")
+    values = {"block": block, "stale_body": stale_body}
+
+    assert _upsert_managed_block(existing.format(**values), block) == expected.format(**values)
