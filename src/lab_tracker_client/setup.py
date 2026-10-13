@@ -482,6 +482,14 @@ def _suggestions(status: JsonObject) -> list[str]:
             "`lt setup init` scaffolds the integration files here "
             "(`--dry-run` previews)."
         )
+    elif any(item.get("error") for item in repo["conventions"]):
+        from lab_tracker.cli import marker_order_suggestion
+
+        suggestions.append(
+            marker_order_suggestion(
+                [str(item.get("name")) for item in repo["conventions"] if item.get("error")]
+            )
+        )
     elif any(item.get("drifted") for item in repo["conventions"]):
         suggestions.append(
             "Managed blocks differ from the installed package; `lt update` "
@@ -1255,6 +1263,8 @@ def _repo_status(root: Path) -> JsonObject:
                 "name": item.get("name"),
                 "present": item.get("present"),
                 "drifted": item.get("drifted"),
+                # Markers out of order: `lt update` refuses the file.
+                **({"error": item["error"]} if "error" in item else {}),
             }
             for item in _doctor(root).get("targets", [])
             if isinstance(item, dict)

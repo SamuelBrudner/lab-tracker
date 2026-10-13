@@ -159,7 +159,10 @@ integration files — the `.claude/settings.json` prompt hook, `.mcp.json`,
 content differs is first preserved next to itself as `*.bak-lt-update`, and
 an existing `lt_ids.json` is never touched (a missing one gets an empty
 placeholder). `--dry-run` previews the changes; run
-`lt doctor` afterwards to confirm the repo is in sync. Hook entries that
+`lt doctor` afterwards to confirm the repo is in sync. If a managed block's
+END marker comes before its BEGIN, `lt update` changes nothing and names the
+file, as `lt doctor` does; reorder or remove the stray marker by hand, then
+run it again. Hook entries that
 `lt setup agent-hooks --shared` added are carried forward into the refreshed
 `.claude/settings.json` rather than dropped; the personal
 `.claude/settings.local.json` is never touched.

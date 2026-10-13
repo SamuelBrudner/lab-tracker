@@ -332,6 +332,33 @@ def test_doctor_all_sweeps_registry(home, monkeypatch, capsys) -> None:
     assert str(missing.resolve()) not in roots
 
 
+@pytest.mark.usefixtures("offline_server")
+def test_doctor_all_names_markers_lt_update_cannot_fix(home, capsys) -> None:
+    from lab_tracker.decision_context_constants import (
+        CODE_CONVENTIONS_BLOCK_BEGIN,
+        CODE_CONVENTIONS_BLOCK_END,
+    )
+
+    repo = home / "misordered-repo"
+    init_consumer_repo(repo, yes=True)
+    claude = repo / "CLAUDE.md"
+    claude.write_text(
+        f"# Mine\n{CODE_CONVENTIONS_BLOCK_END}\nx\n{CODE_CONVENTIONS_BLOCK_BEGIN}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit):
+        lt_cli.main(["doctor", "--all"])
+    payload = json.loads(capsys.readouterr().out)
+
+    [entry] = [item for item in payload["repos"] if Path(item["root"]).name == repo.name]
+    [error] = entry["errors"]
+    assert str(claude) in error and "comes before" in error
+    # `lt update` refuses this file, so the advice is the manual fix.
+    assert "by hand" in entry["suggestion"] and "CLAUDE.md" in entry["suggestion"]
+    assert "refreshes them" not in entry["suggestion"]
+
+
 def test_watch_run_composes_scan_and_sync(home, monkeypatch, capsys) -> None:
     repo = home / "run-repo"
     inbox = repo / "inbox"

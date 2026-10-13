@@ -2607,6 +2607,8 @@ def _cmd_doctor(args: argparse.Namespace) -> Any:
                 for target in targets
                 if isinstance(target, dict) and target.get("drifted")
             ]
+            if payload.get("errors"):
+                summary["errors"] = payload["errors"]
             if payload.get("suggestion"):
                 summary["suggestion"] = payload["suggestion"]
             summary["agent_hooks"] = payload["agent_hooks"]
