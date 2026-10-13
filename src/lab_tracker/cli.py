@@ -424,15 +424,27 @@ def _conventions_blocks(root: Path) -> list[_ManagedBlock]:
     ]
 
 
+def _read_managed_text(path: Path) -> str:
+    """``path``'s text, empty when there is no file; a run stops on one it cannot read."""
+
+    if not path.exists():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise _RefusedFile(path, f"cannot be read as UTF-8 text ({exc})") from exc
+
+
 def _disk_body(block: _ManagedBlock) -> str | None:
     """``block``'s body in its file on disk, or ``None`` when it is not paired there.
 
     Raises :class:`ManagedBlockMarkerError` when END comes before BEGIN.
     """
 
-    content = block.path.read_text(encoding="utf-8") if block.path.exists() else ""
     return _extract_managed_body(
-        content, begin_marker=block.begin_marker, end_marker=block.end_marker
+        _read_managed_text(block.path),
+        begin_marker=block.begin_marker,
+        end_marker=block.end_marker,
     )
 
 
@@ -1180,6 +1192,40 @@ def _plan_managed_blocks(
     """
 
     _plan_until_settled(blocks, _plan_managed_block, result=result, dry_run=dry_run)
+    _refuse_new_misorders(result)
+
+
+_MARKER_PAIRS: tuple[tuple[str, str], ...] = (
+    (CLAUDE_BLOCK_BEGIN, CLAUDE_BLOCK_END),
+    (CODE_CONVENTIONS_BLOCK_BEGIN, CODE_CONVENTIONS_BLOCK_END),
+    (AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN, AGENTS_CODE_CONVENTIONS_BLOCK_END),
+)
+
+
+def _refuse_new_misorders(result: InitResult) -> None:
+    """Stop when the plan leaves a block's END before its BEGIN where it was not.
+
+    Repairing one block can strand another's markers out of order, a block
+    the run leaves alone included (init without ``--yes`` plans no
+    conventions block), and `lt update` would then refuse the file.
+    """
+
+    for path in result._planned_files:
+        for begin_marker, end_marker in _MARKER_PAIRS:
+            if _misordered(
+                result._preview_contents[path], begin_marker, end_marker
+            ) and not _misordered(
+                result._preview_original_contents[path], begin_marker, end_marker
+            ):
+                raise _RefusedFile(path, str(_marker_order_error(begin_marker, end_marker)))
+
+
+def _misordered(text: str, begin_marker: str, end_marker: str) -> bool:
+    return (
+        begin_marker in text
+        and end_marker in text
+        and _managed_region(text, begin_marker, end_marker) is None
+    )
 
 
 def _plan_until_settled(
@@ -1265,9 +1311,7 @@ def _planned_text(path: Path, result: InitResult) -> tuple[str, list[Path]]:
         if other != path and result._planned_identities[other] == identity
     ]
     if path not in result._preview_original_contents:
-        result._preview_original_contents[path] = (
-            path.read_text(encoding="utf-8") if path.exists() else ""
-        )
+        result._preview_original_contents[path] = _read_managed_text(path)
     planned_as = path if path in result._preview_contents else next(iter(twins), None)
     if planned_as is None:
         return result._preview_original_contents[path], twins
@@ -1695,14 +1739,14 @@ def _doctor(target: str | Path = ".") -> dict[str, object]:
     ]
     targets: list[dict[str, object]] = []
     for name, path, begin_marker, end_marker in checks:
-        content = path.read_text(encoding="utf-8") if path.exists() else ""
         try:
+            content = _read_managed_text(path)
             found_body = _extract_managed_body(
                 content,
                 begin_marker=begin_marker,
                 end_marker=end_marker,
             )
-        except ManagedBlockMarkerError as exc:
+        except (ManagedBlockMarkerError, _RefusedFile) as exc:
             # Present but unreadable: drifted, and named, so `lt doctor --all`
             # still reports the other repos.
             targets.append(
@@ -1715,7 +1759,7 @@ def _doctor(target: str | Path = ".") -> dict[str, object]:
                     "version_in_sync": False,
                     "drifted": True,
                     "version_line": "",
-                    "error": f"{path}: {exc}",
+                    "error": _refusal_text(path, exc),
                 }
             )
             continue
@@ -1754,6 +1798,8 @@ def _doctor(target: str | Path = ".") -> dict[str, object]:
         for target in targets
         if "error" in target
     ] + _activation_marker_errors(root)
+    # A file both checks read (CLAUDE.md, AGENTS.md) is reported once.
+    errors = list({str(error["error"]): error for error in errors}.values())
     if not errors:
         # A repair or a linked file can make `lt update` refuse files whose
         # markers are each in order; its own planning finds those.
@@ -1779,9 +1825,15 @@ def _activation_marker_errors(root: Path) -> list[dict[str, object]]:
     for block in _activation_blocks(root):
         try:
             _disk_body(block)
-        except ManagedBlockMarkerError as exc:
-            errors.append({"name": block.path.name, "error": f"{block.path}: {exc}"})
+        except (ManagedBlockMarkerError, _RefusedFile) as exc:
+            errors.append({"name": block.path.name, "error": _refusal_text(block.path, exc)})
     return errors
+
+
+def _refusal_text(path: Path, exc: ManagedBlockMarkerError | _RefusedFile) -> str:
+    """The message `lt update` stops with for ``exc``, naming ``path``."""
+
+    return str(exc.code) if isinstance(exc, _RefusedFile) else f"{path}: {exc}"
 
 
 def _update_refusal(root: Path) -> list[dict[str, object]]:

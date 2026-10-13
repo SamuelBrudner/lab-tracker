@@ -1945,3 +1945,57 @@ def test_a_lone_end_repair_keeps_text_glued_after_the_version_comment(tmp_path: 
 
     content = claude.read_text(encoding="utf-8")
     assert content.startswith(managed_code_conventions_block() + "my note\n## More\n")
+
+
+def test_plain_init_refuses_a_repair_that_would_strand_conventions_markers(
+    tmp_path: Path,
+) -> None:
+    claude = tmp_path / "CLAUDE.md"
+    # Init without --yes plans no conventions block, but repairing the lone
+    # activation BEGIN would drop the END that closes it.
+    claude.write_text(
+        f"# Mine\n{CODE_CONVENTIONS_BLOCK_END}\nnote\n{CODE_CONVENTIONS_BLOCK_BEGIN}\nbody\n"
+        f"{CLAUDE_BLOCK_BEGIN}\nold activation\n{CODE_CONVENTIONS_BLOCK_END}\n",
+        encoding="utf-8",
+    )
+    before = _tree(tmp_path)
+
+    with pytest.raises(SystemExit, match="CLAUDE.md.*comes before"):
+        init_consumer_repo(tmp_path)
+
+    assert _tree(tmp_path) == before
+
+
+def test_plain_init_leaves_conventions_markers_it_does_not_manage_alone(
+    tmp_path: Path,
+) -> None:
+    claude = tmp_path / "CLAUDE.md"
+    misordered = f"# Mine\n{CODE_CONVENTIONS_BLOCK_END}\nx\n{CODE_CONVENTIONS_BLOCK_BEGIN}\n"
+    claude.write_text(misordered, encoding="utf-8")
+
+    init_consumer_repo(tmp_path)
+
+    assert claude.read_text(encoding="utf-8").startswith(misordered)
+    assert CLAUDE_BLOCK_BEGIN in claude.read_text(encoding="utf-8")
+    assert [error["name"] for error in _doctor(tmp_path)["errors"]] == ["CLAUDE.md"]
+
+
+@pytest.mark.usefixtures("offline_server")
+def test_a_file_that_is_not_utf8_is_named_not_a_traceback(tmp_path: Path) -> None:
+    from lab_tracker_client import setup as setup_helpers
+
+    init_consumer_repo(tmp_path, yes=True)
+    gemini = tmp_path / "GEMINI.md"
+    gemini.write_bytes(b"# caf\xe9\n")
+
+    payload = _doctor(tmp_path)
+    status = setup_helpers.setup_status(tmp_path)
+
+    with pytest.raises(SystemExit, match="GEMINI.md: cannot be read as UTF-8 text"):
+        update_consumer_repo(tmp_path, dry_run=True)
+    [error] = payload["errors"]
+    assert error["name"] == "GEMINI.md" and "UTF-8" in str(error["error"])
+    assert _doctor_exit_code(payload) == 1
+    # Setup status keeps its conventions report and names the refusal.
+    assert len(status["repo"]["conventions"]) == 3
+    assert status["repo"]["update_refusals"] == payload["errors"]
