@@ -2714,6 +2714,9 @@ def _payload_exit_code(payload: Any) -> int:
             return 1
         if not all(isinstance(target, dict) and not target.get("drifted") for target in targets):
             return 1
+        if payload.get("errors"):
+            # Files `lt update` refuses.
+            return 1
     if isinstance(payload, dict) and payload.get("command") == "hpc-submit":
         return int(payload.get("exit_code") or 0)
     if (
@@ -2751,7 +2754,10 @@ def _payload_exit_code(payload: Any) -> int:
         if not isinstance(repos, list):
             return 1
         if any(
-            repo.get("missing") or repo.get("drifted") or repo.get("error")
+            repo.get("missing")
+            or repo.get("drifted")
+            or repo.get("error")
+            or repo.get("errors")
             for repo in repos
         ):
             return 1

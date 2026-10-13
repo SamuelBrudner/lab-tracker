@@ -563,6 +563,7 @@ def test_doctor_content_only_drift(tmp_path) -> None:
     assert block  # silence unused warning paths
 
 
+@pytest.mark.usefixtures("offline_server")
 def test_markers_lt_update_refuses_get_the_manual_fix_everywhere(isolated_homes) -> None:
     repo = isolated_homes / "repo"
     init_consumer_repo(repo, yes=True)
@@ -578,9 +579,8 @@ def test_markers_lt_update_refuses_get_the_manual_fix_everywhere(isolated_homes)
     with pytest.raises(SystemExit, match="comes before"):
         update_consumer_repo(repo, dry_run=True)
     [error] = doctor["errors"]
-    assert str(claude) in error
-    entry = next(item for item in status["repo"]["conventions"] if item["name"] == "CLAUDE.md")
-    assert entry["error"] == error
+    assert error["name"] == "CLAUDE.md" and str(claude) in error["error"]
+    assert status["repo"]["update_refusals"] == doctor["errors"]
     # The SessionStart hook shows these suggestions to the agent: none may
     # say `lt update` fixes what it refuses.
     for suggestions in ([doctor["suggestion"]], status["suggestions"]):

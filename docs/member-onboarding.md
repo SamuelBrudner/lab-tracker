@@ -26,9 +26,10 @@ stages files already in it:
   it. In the default `files` mode that is every file its `--include` and
   `--exclude` globs match. The globs filter by path and name, not age, so
   watch a fresh or run-specific folder (or exclude older paths). A
-  `manifest`-mode watch ignores the globs and stages every
-  `lab-tracker-evidence.json` below its root, so give it a fresh root.
-  Preview with `lt watch scan --dry-run` before scheduling.
+  `manifest`-mode watch ignores the globs and stages every manifest below its
+  root that its filename `pattern` matches (`lab-tracker-evidence.json` by
+  default), so give it a fresh root. Preview with `lt watch scan --dry-run`
+  before scheduling.
 
 A folder that is not a git repository takes the same binding and watch steps
 without commit hooks; `lt import-folder` stages the files a synced folder holds

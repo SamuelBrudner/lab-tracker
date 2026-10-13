@@ -162,8 +162,9 @@ placeholder). `--dry-run` previews the changes; run
 `lt doctor` afterwards to confirm the repo is in sync. If a managed block's
 END marker comes before its BEGIN, `lt update` changes nothing and names the
 file, as `lt doctor` does; reorder or remove the stray marker by hand, then
-run it again. Hook entries that
-`lt setup agent-hooks --shared` added are carried forward into the refreshed
+run it again. It refuses the same way an instruction file that is a link to a
+scaffold file, such as an `AGENTS.md` pointing at `AGENTS.lt.md`. Hook entries
+that `lt setup agent-hooks --shared` added are carried forward into the refreshed
 `.claude/settings.json` rather than dropped; the personal
 `.claude/settings.local.json` is never touched.
 

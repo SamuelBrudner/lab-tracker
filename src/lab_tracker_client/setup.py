@@ -482,12 +482,12 @@ def _suggestions(status: JsonObject) -> list[str]:
             "`lt setup init` scaffolds the integration files here "
             "(`--dry-run` previews)."
         )
-    elif any(item.get("error") for item in repo["conventions"]):
-        from lab_tracker.cli import marker_order_suggestion
+    elif repo.get("update_refusals"):
+        from lab_tracker.cli import update_refusal_suggestion
 
         suggestions.append(
-            marker_order_suggestion(
-                [str(item.get("name")) for item in repo["conventions"] if item.get("error")]
+            update_refusal_suggestion(
+                list(dict.fromkeys(str(item.get("name")) for item in repo["update_refusals"]))
             )
         )
     elif any(item.get("drifted") for item in repo["conventions"]):
@@ -1257,18 +1257,20 @@ def _repo_status(root: Path) -> JsonObject:
                 project_id = str(payload.get("project_id") or "")
                 project_name = str(payload.get("project_name") or "")
     conventions = []
+    update_refusals = []
     with suppress(Exception):
+        doctor = _doctor(root)
         conventions = [
             {
                 "name": item.get("name"),
                 "present": item.get("present"),
                 "drifted": item.get("drifted"),
-                # Markers out of order: `lt update` refuses the file.
-                **({"error": item["error"]} if "error" in item else {}),
             }
-            for item in _doctor(root).get("targets", [])
+            for item in doctor.get("targets", [])
             if isinstance(item, dict)
         ]
+        # Files `lt update` refuses, with the reasons doctor found.
+        update_refusals = [item for item in doctor.get("errors", []) if isinstance(item, dict)]
     return {
         "scaffold": scaffold,
         "claude_activation_block_present": activation_present,
@@ -1278,6 +1280,7 @@ def _repo_status(root: Path) -> JsonObject:
             "project_name": project_name,
         },
         "conventions": conventions,
+        "update_refusals": update_refusals,
     }
 
 

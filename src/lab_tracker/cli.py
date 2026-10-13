@@ -115,22 +115,23 @@ def init_consumer_repo(
 ) -> InitResult:
     root = Path(target).expanduser().resolve()
     result = InitResult()
-    # Planning reads and can refuse (markers out of order); writing comes
-    # after it, so a refused run leaves every file as it was.
+    # Checking and planning only read, and either can refuse (markers out of
+    # order); writing comes after both, so a refused run changes nothing.
     if uninstall:
-        for block in _activation_blocks(root) + _conventions_blocks(root):
-            _plan_strip(block, result=result, dry_run=dry_run)
+        blocks = _activation_blocks(root) + _conventions_blocks(root)
+        _refuse_misordered_markers(blocks)
+        # Until settled, so leftover copies of a block go in the same run.
+        _plan_until_settled(blocks, _plan_strip, result=result, dry_run=dry_run)
         if install_skills:
             _uninstall_setup_skill(result=result, dry_run=dry_run)
         result.stripped.extend(
             _commit_planned_files(result, dry_run=dry_run, unchanged=result.skipped)
         )
         return result
-    _plan_managed_blocks(
-        _activation_blocks(root) + (_conventions_blocks(root) if yes else []),
-        result=result,
-        dry_run=dry_run,
-    )
+    blocks = _activation_blocks(root) + (_conventions_blocks(root) if yes else [])
+    _refuse_misordered_markers(blocks)
+    _refuse_managed_scaffold_files(root, blocks)
+    _plan_managed_blocks(blocks, result=result, dry_run=dry_run)
     if not dry_run:
         root.mkdir(parents=True, exist_ok=True)
     resolved_mcp_base_url = normalize_instance_base_url(
@@ -389,9 +390,6 @@ _CONVENTIONS_TARGETS: tuple[tuple[str, str, str], ...] = (
     ("AGENTS.md", AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN, AGENTS_CODE_CONVENTIONS_BLOCK_END),
     (_CURSOR_RULES, CODE_CONVENTIONS_BLOCK_BEGIN, CODE_CONVENTIONS_BLOCK_END),
 )
-# Each pass plans every block once. A pass that changes nothing ends planning;
-# a lone-marker repair costs a pass, as does putting back a block it dropped.
-_MAX_PLANNING_PASSES = 8
 
 
 @dataclass(frozen=True)
@@ -426,17 +424,81 @@ def _conventions_blocks(root: Path) -> list[_ManagedBlock]:
     ]
 
 
-def _has_managed_block(block: _ManagedBlock) -> bool:
-    """Whether ``block``'s file holds a paired region for it on disk."""
+def _disk_body(block: _ManagedBlock) -> str | None:
+    """``block``'s body in its file on disk, or ``None`` when it is not paired there.
+
+    Raises :class:`ManagedBlockMarkerError` when END comes before BEGIN.
+    """
 
     content = block.path.read_text(encoding="utf-8") if block.path.exists() else ""
-    try:
-        body = _extract_managed_body(
-            content, begin_marker=block.begin_marker, end_marker=block.end_marker
-        )
-    except ManagedBlockMarkerError as exc:
-        raise SystemExit(f"{block.path}: {exc}") from exc
-    return body is not None
+    return _extract_managed_body(
+        content, begin_marker=block.begin_marker, end_marker=block.end_marker
+    )
+
+
+_SCAFFOLD_PATHS: tuple[str, ...] = (
+    ".mcp.json",
+    ".cursor/mcp.json",
+    ".gemini/settings.json",
+    ".claude/settings.json",
+    "scripts/lt.py",
+    "AGENTS.lt.md",
+    "lt_ids.json",
+)
+
+
+def _refuse_managed_scaffold_files(root: Path, blocks: list[_ManagedBlock]) -> None:
+    """Stop when a managed file is a scaffold file too (an AGENTS.md linked to AGENTS.lt.md).
+
+    Refreshing the scaffold text drops the managed blocks, and putting them
+    back changes the scaffold file, so no run could leave both current.
+    """
+
+    scaffold = {_file_identity(root / Path(name)): root / Path(name) for name in _SCAFFOLD_PATHS}
+    for block in blocks:
+        twin = scaffold.get(_file_identity(block.path))
+        if twin is not None:
+            raise _RefusedFile(
+                block.path,
+                f"the same file as {twin}, which Lab Tracker keeps separately; make "
+                f"{block.path.name} a file of its own, then run the command again.",
+            )
+
+
+def _refuse_misordered_markers(blocks: list[_ManagedBlock]) -> None:
+    """Stop, naming the file, when a block's END comes before its BEGIN on disk.
+
+    Planning stops there too, unless repairing another block of the file
+    dropped the stray marker first. Checking the files as they are keeps a
+    run in step with `lt doctor`, which reports the same markers.
+    """
+
+    for block in blocks:
+        try:
+            _disk_body(block)
+        except ManagedBlockMarkerError as exc:
+            raise _RefusedFile(block.path, str(exc)) from exc
+
+
+def _plan_update(root: Path, *, yes: bool, result: InitResult, dry_run: bool) -> bool:
+    """Plan update's managed blocks; True when a conventions block awaits ``yes``.
+
+    Checking and planning only read, and either can refuse with
+    :class:`_RefusedFile`, so a refused run changes nothing.
+    """
+
+    blocks = _activation_blocks(root)
+    conventions = _conventions_blocks(root)
+    _refuse_misordered_markers(blocks + conventions)
+    offer_needed = False
+    for block in conventions:
+        if yes or _disk_body(block) is not None:
+            blocks.append(block)
+        else:
+            offer_needed = True
+    _refuse_managed_scaffold_files(root, blocks)
+    _plan_managed_blocks(blocks, result=result, dry_run=dry_run)
+    return offer_needed
 
 
 def update_consumer_repo(
@@ -460,16 +522,7 @@ def update_consumer_repo(
 
     root = Path(target).expanduser().resolve()
     result = InitResult()
-    blocks = _activation_blocks(root)
-    conventions_offer_needed = False
-    for block in _conventions_blocks(root):
-        if yes or _has_managed_block(block):
-            blocks.append(block)
-        else:
-            conventions_offer_needed = True
-    # Planning reads and can refuse (markers out of order); writing comes
-    # after it, so a refused run leaves every file as it was.
-    _plan_managed_blocks(blocks, result=result, dry_run=dry_run)
+    conventions_offer_needed = _plan_update(root, yes=yes, result=result, dry_run=dry_run)
     if not dry_run:
         root.mkdir(parents=True, exist_ok=True)
     resolved_mcp_base_url = normalize_instance_base_url(
@@ -1119,24 +1172,53 @@ def _write_scaffold_file(
 def _plan_managed_blocks(
     blocks: list[_ManagedBlock], *, result: InitResult, dry_run: bool
 ) -> None:
-    """Plan every block until a pass changes nothing.
+    """Plan every block into its file until a pass changes nothing.
 
     A lone-marker repair keeps only the text on one side of the marker, which
     can drop a block planned earlier in the same pass, so the next pass puts
     it back. Nothing is written; :func:`_commit_planned_files` does that.
     """
 
-    for _pass in range(_MAX_PLANNING_PASSES):
+    _plan_until_settled(blocks, _plan_managed_block, result=result, dry_run=dry_run)
+
+
+def _plan_until_settled(
+    blocks: list[_ManagedBlock],
+    plan: Callable[..., None],
+    *,
+    result: InitResult,
+    dry_run: bool,
+) -> None:
+    """Run ``plan`` over every block until a pass changes no planned text.
+
+    Every pass that changes text but the last uses up at least one marker the
+    files held, so those markers bound the passes; past that bound something
+    else keeps moving, and the run stops.
+    """
+
+    markers = {marker for block in blocks for marker in (block.begin_marker, block.end_marker)}
+    changing_passes = 0
+    while True:
         before = dict(result._preview_contents)
         for block in blocks:
-            _plan_managed_block(block, result=result, dry_run=dry_run)
+            plan(block, result=result, dry_run=dry_run)
         if result._preview_contents == before:
             return
-    raise SystemExit(  # pragma: no cover - repairs settle in a few passes
-        "The Lab Tracker markers in "
-        + ", ".join(str(path) for path in result._planned_files)
-        + " did not settle; check them by hand."
-    )
+        changing_passes += 1
+        held = sum(
+            text.count(marker)
+            for text in result._preview_original_contents.values()
+            for marker in markers
+        )
+        if changing_passes > held + 2:
+            moving = next(
+                path
+                for path in result._planned_files
+                if result._preview_contents[path] != before.get(path)
+            )
+            raise _RefusedFile(
+                moving, "its Lab Tracker markers did not settle; check them by hand."
+            )
 
 
 def _plan_managed_block(block: _ManagedBlock, *, result: InitResult, dry_run: bool) -> None:
@@ -1208,7 +1290,7 @@ def _file_identity(path: Path) -> tuple[object, ...]:
     except OSError as exc:
         if exc.errno == errno.ELOOP:
             # A symlink loop can be neither read nor written; say so first.
-            raise SystemExit(f"{path}: {exc.strerror}") from exc
+            raise _RefusedFile(path, os.strerror(errno.ELOOP)) from exc
         return ("path", str(path.resolve()))
     return ("inode", stat.st_dev, stat.st_ino)
 
@@ -1325,7 +1407,7 @@ def _managed_upsert_at(
             existing, block, begin_marker=begin_marker, end_marker=end_marker
         )
     except ManagedBlockMarkerError as exc:
-        raise SystemExit(f"{path}: {exc}") from exc
+        raise _RefusedFile(path, str(exc)) from exc
 
 
 def _plan_strip(block: _ManagedBlock, *, result: InitResult, dry_run: bool) -> None:
@@ -1343,7 +1425,7 @@ def _plan_strip(block: _ManagedBlock, *, result: InitResult, dry_run: bool) -> N
             existing, block.begin_marker, block.end_marker
         )
     except ManagedBlockMarkerError as exc:
-        raise SystemExit(f"{path}: {exc}") from exc
+        raise _RefusedFile(path, str(exc)) from exc
     if removed:
         _backup_before_unpaired_marker_repair(
             path,
@@ -1397,6 +1479,14 @@ class ManagedBlockMarkerError(ValueError):
     """A file holds both Lab Tracker markers of a block, but END comes first."""
 
 
+class _RefusedFile(SystemExit):
+    """A run stops before writing anything because of what one file is or holds."""
+
+    def __init__(self, path: Path, reason: str) -> None:
+        super().__init__(f"{path}: {reason}")
+        self.path = path
+
+
 def _marker_order_error(begin_marker: str, end_marker: str) -> ManagedBlockMarkerError:
     return ManagedBlockMarkerError(
         f"{end_marker} comes before {begin_marker}, so the managed block "
@@ -1405,13 +1495,13 @@ def _marker_order_error(begin_marker: str, end_marker: str) -> ManagedBlockMarke
     )
 
 
-def marker_order_suggestion(names: list[str]) -> str:
-    """What to do about files whose managed-block markers are out of order."""
+def update_refusal_suggestion(names: list[str]) -> str:
+    """What to do about files `lt update` refuses (``errors`` in `lt doctor`)."""
 
     return (
-        f"A Lab Tracker END marker comes before its BEGIN in {', '.join(names)}, "
-        "so `lt update` stops before writing anything; remove or reorder the "
-        "stray marker by hand, then run `lt update`."
+        f"`lt update` stops before writing anything because of {', '.join(names)}; "
+        "fix what `lt doctor` reports there by hand (a Lab Tracker marker out of "
+        "order, for example), then run `lt update`."
     )
 
 
@@ -1653,12 +1743,20 @@ def _doctor(target: str | Path = ".") -> dict[str, object]:
     agent_hooks = _agent_hooks_status(root)
     payload["agent_hooks"] = agent_hooks
     payload["suggestions"] = agent_capture_suggestions(agent_hooks)
-    errors = [str(target["error"]) for target in targets if "error" in target]
+    errors = [
+        {"name": target["name"], "error": target["error"]}
+        for target in targets
+        if "error" in target
+    ] + _activation_marker_errors(root)
+    if not errors:
+        # A repair or a linked file can make `lt update` refuse files whose
+        # markers are each in order; its own planning finds those.
+        errors = _update_refusal(root)
     if errors:
         # `lt update` refuses these files, so it cannot be the advice.
         payload["errors"] = errors
-        payload["suggestion"] = marker_order_suggestion(
-            [str(target["name"]) for target in targets if "error" in target]
+        payload["suggestion"] = update_refusal_suggestion(
+            list(dict.fromkeys(str(error["name"]) for error in errors))
         )
     elif any(target["drifted"] for target in targets):
         payload["suggestion"] = (
@@ -1666,6 +1764,30 @@ def _doctor(target: str | Path = ".") -> dict[str, object]:
             "`lt update` refreshes them (`--dry-run` previews the changes)."
         )
     return payload
+
+
+def _activation_marker_errors(root: Path) -> list[dict[str, object]]:
+    """The activation blocks whose END comes before BEGIN, which `lt update` refuses."""
+
+    errors: list[dict[str, object]] = []
+    for block in _activation_blocks(root):
+        try:
+            _disk_body(block)
+        except ManagedBlockMarkerError as exc:
+            errors.append({"name": block.path.name, "error": f"{block.path}: {exc}"})
+    return errors
+
+
+def _update_refusal(root: Path) -> list[dict[str, object]]:
+    """Why `lt update` would stop before writing, found by planning it without writing."""
+
+    try:
+        _plan_update(root, yes=False, result=InitResult(), dry_run=True)
+    except _RefusedFile as exc:
+        inside = exc.path.is_relative_to(root)
+        name = exc.path.relative_to(root).as_posix() if inside else str(exc.path)
+        return [{"name": name, "error": str(exc.code)}]
+    return []
 
 
 def _doctor_exit_code(payload: object) -> int:
@@ -1677,7 +1799,7 @@ def _doctor_exit_code(payload: object) -> int:
     all_targets_clean = all(
         isinstance(target, dict) and not target.get("drifted") for target in targets
     )
-    return 0 if all_targets_clean else 1
+    return 0 if all_targets_clean and not payload.get("errors") else 1
 
 
 def _mcp_json(base_url: str = DEFAULT_BASE_URL) -> str:

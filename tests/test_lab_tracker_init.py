@@ -1625,10 +1625,12 @@ def test_a_lone_end_repair_keeps_a_block_glued_after_the_version_comment(
     first = update_consumer_repo(tmp_path, yes=True)
     second = update_consumer_repo(tmp_path, yes=True)
 
-    content = claude.read_text(encoding="utf-8")
-    for marker in (CLAUDE_BLOCK_BEGIN, CLAUDE_BLOCK_END, CODE_CONVENTIONS_BLOCK_BEGIN):
-        assert content.count(marker) == 1, marker
-    assert "## My notes" in content
+    # The repair keeps what follows the comment's `-->`, so the activation
+    # block stays where it was, after the conventions block and before the
+    # notes; swallowing its BEGIN would move the blocks around.
+    assert claude.read_text(encoding="utf-8") == (
+        managed_code_conventions_block() + managed_agent_activation_block() + "\n## My notes\n"
+    )
     # One repair, so the backup keeps the original text the repair dropped.
     backup = tmp_path / "CLAUDE.md.bak-lt-update"
     assert first.backups == {claude: backup}
@@ -1711,3 +1713,185 @@ def test_a_version_comment_after_the_activation_block_is_left_alone(tmp_path: Pa
 
     assert _buckets(result, claude) == ["up_to_date"]
     assert claude.read_text(encoding="utf-8") == original
+
+
+_HIDDEN_BY_A_REPAIR = (
+    # The conventions markers are out of order, but repairing the lone
+    # activation BEGIN before them would drop both.
+    f"# Mine\n{CLAUDE_BLOCK_BEGIN}\nold activation\n"
+    f"{CODE_CONVENTIONS_BLOCK_END}\nnote\n{CODE_CONVENTIONS_BLOCK_BEGIN}\nbody\n"
+)
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        lambda root: init_consumer_repo(root, yes=True),
+        lambda root: update_consumer_repo(root, yes=True),
+        lambda root: update_consumer_repo(root, yes=True, install_skills=True),
+        lambda root: init_consumer_repo(root, uninstall=True),
+    ],
+    ids=["init-yes", "update-yes", "update-skills", "uninstall"],
+)
+def test_markers_out_of_order_on_disk_stop_every_run_a_repair_could_hide_them_from(
+    tmp_path: Path, run: object
+) -> None:
+    (tmp_path / "CLAUDE.md").write_text(_HIDDEN_BY_A_REPAIR, encoding="utf-8")
+    skills_home = Path(os.environ["LAB_TRACKER_SKILLS_HOME"])
+    before = _tree(tmp_path)
+
+    with pytest.raises(SystemExit, match="CLAUDE.md.*comes before"):
+        run(tmp_path)  # type: ignore[operator]
+
+    # In step with `lt doctor`, which reports this file: nothing is written.
+    assert _tree(tmp_path) == before
+    assert not skills_home.exists() or not any(skills_home.iterdir())
+    assert any(error["name"] == "CLAUDE.md" for error in _doctor(tmp_path)["errors"])
+
+
+@pytest.mark.usefixtures("offline_server")
+def test_doctor_reports_activation_markers_lt_update_refuses(tmp_path: Path) -> None:
+    init_consumer_repo(tmp_path, yes=True)
+    gemini = tmp_path / "GEMINI.md"
+    gemini.write_text(f"# Mine\n{CLAUDE_BLOCK_END}\nx\n{CLAUDE_BLOCK_BEGIN}\n", encoding="utf-8")
+
+    payload = _doctor(tmp_path)
+
+    with pytest.raises(SystemExit, match="GEMINI.md"):
+        update_consumer_repo(tmp_path, dry_run=True)
+    [error] = payload["errors"]
+    assert error["name"] == "GEMINI.md" and str(gemini) in error["error"]
+    assert "by hand" in payload["suggestion"] and "GEMINI.md" in payload["suggestion"]
+    # The conventions blocks are in sync; the refusal alone fails the check.
+    assert not any(target["drifted"] for target in payload["targets"])
+    assert _doctor_exit_code(payload) == 1
+    with pytest.raises(SystemExit) as lt_doctor:
+        lt_main(["doctor", "--target", str(tmp_path)])
+    assert lt_doctor.value.code == 1
+
+
+@pytest.mark.parametrize("link", ["symlink", "hard-link", "dangling", "reverse-symlink"])
+def test_a_managed_file_that_is_a_scaffold_file_stops_the_run(tmp_path: Path, link: str) -> None:
+    agents = tmp_path / "AGENTS.md"
+    sidecar = tmp_path / "AGENTS.lt.md"
+    if link == "dangling":
+        _symlink(agents, sidecar)  # before init writes the sidecar
+    else:
+        init_consumer_repo(tmp_path)
+        if link == "reverse-symlink":
+            sidecar.unlink()
+            _symlink(sidecar, agents)
+        elif link == "symlink":
+            agents.unlink()
+            _symlink(agents, sidecar)
+        else:
+            agents.unlink()
+            os.link(sidecar, agents)
+    before = _tree(tmp_path)
+
+    # Refreshing AGENTS.lt.md would drop the activation block that adding it
+    # back puts in AGENTS.lt.md, so no run could leave both current.
+    for run in (
+        init_consumer_repo,
+        lambda root: init_consumer_repo(root, force=True, yes=True),
+        update_consumer_repo,
+    ):
+        with pytest.raises(SystemExit, match="AGENTS.md: the same file as .*AGENTS.lt.md"):
+            run(tmp_path)
+
+    assert _tree(tmp_path) == before
+    [error] = _doctor(tmp_path)["errors"]
+    assert error["name"] == "AGENTS.md"
+
+
+def test_the_scaffold_paths_checked_are_the_ones_init_writes(tmp_path: Path) -> None:
+    from lab_tracker.cli import _SCAFFOLD_PATHS
+
+    result = init_consumer_repo(tmp_path)
+
+    created = {path.relative_to(tmp_path).as_posix() for path in result.created}
+    assert created - set(_MANAGED_FILES) == set(_SCAFFOLD_PATHS)
+
+
+def test_alternating_stray_end_markers_settle_in_one_run(tmp_path: Path) -> None:
+    # Each lone-END repair keeps only what follows the END, dropping the block
+    # the other repair just placed, so every pair of strays costs a pass.
+    claude = tmp_path / "CLAUDE.md"
+    claude.write_text(
+        "# Mine\n\n"
+        + "".join(
+            f"{CLAUDE_BLOCK_END}\nnote {i}\n{CODE_CONVENTIONS_BLOCK_END}\nmore {i}\n"
+            for i in range(12)
+        ),
+        encoding="utf-8",
+    )
+
+    first = update_consumer_repo(tmp_path, yes=True)
+    second = update_consumer_repo(tmp_path, yes=True, dry_run=True)
+
+    content = claude.read_text(encoding="utf-8")
+    assert content.count(CLAUDE_BLOCK_BEGIN) == content.count(CLAUDE_BLOCK_END) == 1
+    assert content.count(CODE_CONVENTIONS_BLOCK_BEGIN) == 1
+    assert claude in first.backups
+    assert _buckets(second, claude) == ["up_to_date"]
+
+
+def test_planning_that_never_settles_stops_before_writing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import itertools
+
+    import lab_tracker.cli as cli
+
+    claude = tmp_path / "CLAUDE.md"
+    claude.write_text("# Mine\n", encoding="utf-8")
+    plan = cli._plan_managed_block
+    ticks = itertools.count()
+
+    def restless(block: object, *, result: object, dry_run: bool) -> None:
+        plan(block, result=result, dry_run=dry_run)  # type: ignore[arg-type]
+        result._preview_contents[claude] += f"<!-- {next(ticks)} -->"  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(cli, "_plan_managed_block", restless)
+    before = _tree(tmp_path)
+
+    with pytest.raises(SystemExit, match="CLAUDE.md: its Lab Tracker markers did not settle"):
+        update_consumer_repo(tmp_path)
+
+    assert _tree(tmp_path) == before
+
+
+def test_doctor_reports_what_only_planning_lt_update_finds(tmp_path: Path) -> None:
+    init_consumer_repo(tmp_path, yes=True)
+    claude = tmp_path / "CLAUDE.md"
+    # Each pair is in order on disk, but repairing the lone activation BEGIN
+    # drops the END that closes the conventions block.
+    claude.write_text(
+        f"# Mine\n{CODE_CONVENTIONS_BLOCK_END}\nnote\n{CODE_CONVENTIONS_BLOCK_BEGIN}\nbody\n"
+        f"{CLAUDE_BLOCK_BEGIN}\nold activation\n{CODE_CONVENTIONS_BLOCK_END}\n",
+        encoding="utf-8",
+    )
+
+    payload = _doctor(tmp_path)
+
+    with pytest.raises(SystemExit) as refused:
+        update_consumer_repo(tmp_path, dry_run=True)
+    [error] = payload["errors"]
+    assert error == {"name": "CLAUDE.md", "error": str(refused.value.code)}
+    assert "by hand" in payload["suggestion"] and "refreshes them" not in payload["suggestion"]
+    assert _doctor_exit_code(payload) == 1
+
+
+def test_uninstall_removes_every_copy_of_a_block_in_one_run(tmp_path: Path) -> None:
+    claude = tmp_path / "CLAUDE.md"
+    block = managed_agent_activation_block()
+    claude.write_text(f"# Mine\n\n{block}\nmiddle\n\n{block}\n## Notes\n", encoding="utf-8")
+
+    first = init_consumer_repo(tmp_path, uninstall=True)
+    second = init_consumer_repo(tmp_path, uninstall=True)
+
+    content = claude.read_text(encoding="utf-8")
+    assert CLAUDE_BLOCK_BEGIN not in content and CLAUDE_BLOCK_END not in content
+    assert "middle" in content and "## Notes" in content
+    assert _buckets(first, claude) == ["overwritten"]
+    assert _buckets(second, claude) == ["skipped"]
