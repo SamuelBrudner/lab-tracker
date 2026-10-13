@@ -122,6 +122,7 @@
 {"issue_id":"lab-tracker-2rlw.4","label":"deep-review"}
 {"issue_id":"lab-tracker-2rlw.4","label":"operations"}
 {"issue_id":"lab-tracker-2rlw.4","label":"testing"}
+{"issue_id":"lab-tracker-3oeh","label":"graph-drafting"}
 {"issue_id":"lab-tracker-4le","label":"mvp"}
 {"issue_id":"lab-tracker-4le.1","label":"mvp"}
 {"issue_id":"lab-tracker-4le.1.1","label":"mvp"}
@@ -309,6 +310,7 @@
 {"issue_id":"lab-tracker-81s6.9","label":"docs"}
 {"issue_id":"lab-tracker-81s6.9","label":"provenance"}
 {"issue_id":"lab-tracker-81s6.9","label":"repo-watch"}
+{"issue_id":"lab-tracker-8nz4","label":"graph-drafting"}
 {"issue_id":"lab-tracker-8pk","label":"architecture"}
 {"issue_id":"lab-tracker-8pk","label":"build-vs-buy"}
 {"issue_id":"lab-tracker-8pk","label":"storage"}
@@ -604,6 +606,7 @@
 {"issue_id":"lab-tracker-yrg.4","label":"integration"}
 {"issue_id":"lab-tracker-yrg.4","label":"skill"}
 {"issue_id":"lab-tracker-yrg.4","label":"tooling"}
+{"issue_id":"lab-tracker-zg10","label":"graph-drafting"}
 {"issue_id":"lab-tracker-zvik","label":"authentication"}
 {"issue_id":"lab-tracker-zvik","label":"mcp"}
 {"issue_id":"lab-tracker-zvik","label":"security"}
