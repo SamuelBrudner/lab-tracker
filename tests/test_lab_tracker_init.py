@@ -1391,3 +1391,164 @@ def test_upsert_splices_only_between_the_markers(existing: str, expected: str) -
     values = {"block": block, "stale_body": stale_body}
 
     assert _upsert_managed_block(existing.format(**values), block) == expected.format(**values)
+
+
+# --- Review follow-ups: one file behind two paths, glued text, marker order ----
+
+
+def _symlink(link: Path, target: Path) -> None:
+    link.symlink_to(target.name)
+
+
+def _write_count(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    writes: list[Path] = []
+    write_text = Path.write_text
+
+    def counting_write_text(self: Path, *args: object, **kwargs: object) -> int:
+        writes.append(self.resolve())
+        return write_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "write_text", counting_write_text)
+    return writes
+
+
+def test_a_claude_md_symlinked_to_agents_md_keeps_every_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text("# Team notes\n", encoding="utf-8")
+    _symlink(tmp_path / "CLAUDE.md", agents)
+    writes = _write_count(monkeypatch)
+
+    first = init_consumer_repo(tmp_path, yes=True)
+    monkeypatch.undo()
+    second = update_consumer_repo(tmp_path, dry_run=True)
+
+    content = agents.read_text(encoding="utf-8")
+    assert content.startswith("# Team notes\n")
+    assert content.count(CLAUDE_BLOCK_BEGIN) == 1
+    assert content.count(CODE_CONVENTIONS_BLOCK_BEGIN) == 1
+    assert content.count(AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN) == 1
+    assert writes.count(agents.resolve()) == 1
+    for name in ("CLAUDE.md", "AGENTS.md"):
+        assert _buckets(first, tmp_path / name) == ["overwritten"], name
+        assert _buckets(second, tmp_path / name) == ["up_to_date"], name
+    assert (tmp_path / "CLAUDE.md").is_symlink()
+
+
+def test_a_gemini_md_symlinked_to_agents_md_keeps_the_agents_conventions(
+    tmp_path: Path,
+) -> None:
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text("# Team notes\n", encoding="utf-8")
+    _symlink(tmp_path / "GEMINI.md", agents)
+
+    init_consumer_repo(tmp_path, yes=True)
+
+    content = agents.read_text(encoding="utf-8")
+    assert content.count(CLAUDE_BLOCK_BEGIN) == 1
+    assert content.count(AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN) == 1
+
+
+def test_stale_blocks_behind_a_symlink_are_all_refreshed(tmp_path: Path) -> None:
+    agents = tmp_path / "AGENTS.md"
+    stale_agents_conventions = (
+        managed_code_conventions_block(
+            begin_marker=AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN,
+            end_marker=AGENTS_CODE_CONVENTIONS_BLOCK_END,
+        )
+        .replace("# Lab Tracker Code-Facing Idioms", "# Old idioms heading")
+        .replace(code_conventions_version_line(), _OLD_VERSION_LINE)
+    )
+    agents.write_text(
+        f"# Team notes\n\n{managed_agent_activation_block()}\n"
+        f"{_stale_conventions()}\n{stale_agents_conventions}",
+        encoding="utf-8",
+    )
+    _symlink(tmp_path / "CLAUDE.md", agents)
+
+    update_consumer_repo(tmp_path)
+
+    content = agents.read_text(encoding="utf-8")
+    assert "# Old idioms heading" not in content
+    assert _OLD_VERSION_LINE not in content
+    assert content.count(CODE_CONVENTIONS_BLOCK_BEGIN) == 1
+    assert content.count(AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN) == 1
+    assert _doctor_exit_code(_doctor(tmp_path)) == 0
+
+
+def test_text_glued_after_the_version_comment_stays_the_users(tmp_path: Path) -> None:
+    claude = tmp_path / "CLAUDE.md"
+    glued = (
+        "# My project\n\nUser intro.\n\n"
+        + managed_code_conventions_block().rstrip("\n")
+        + managed_agent_activation_block()
+        + "\n## My notes\n"
+    )
+    claude.write_text(glued, encoding="utf-8")
+
+    first = update_consumer_repo(tmp_path)
+    after_first = claude.read_text(encoding="utf-8")
+    second = update_consumer_repo(tmp_path)
+
+    # The activation block that followed the comment is moved to its own line,
+    # never swallowed into the conventions region.
+    assert after_first.count(CLAUDE_BLOCK_BEGIN) == 1
+    assert after_first.count(CLAUDE_BLOCK_END) == 1
+    assert "User intro." in after_first
+    assert not first.backups
+    assert claude.read_text(encoding="utf-8") == after_first
+    assert _buckets(second, claude) == ["up_to_date"]
+
+
+@pytest.mark.parametrize("dry_run", [True, False], ids=["dry-run", "apply"])
+def test_out_of_order_conventions_markers_stop_update_before_any_write(
+    tmp_path: Path, dry_run: bool
+) -> None:
+    init_consumer_repo(tmp_path, yes=True)
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.write_text('{"hooks": {}}\n', encoding="utf-8")
+    agents = tmp_path / "AGENTS.md"
+    broken = (
+        f"# Mine\n{AGENTS_CODE_CONVENTIONS_BLOCK_END}\nuser text\n"
+        f"{AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN}\nstale\n"
+    )
+    agents.write_text(broken, encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="AGENTS.md"):
+        update_consumer_repo(tmp_path, dry_run=dry_run)
+
+    # Checked before the first write: the customised scaffold file is untouched.
+    assert settings.read_text(encoding="utf-8") == '{"hooks": {}}\n'
+    assert not settings.with_name(settings.name + ".bak-lt-update").exists()
+    assert agents.read_text(encoding="utf-8") == broken
+
+
+def test_doctor_reports_out_of_order_markers_instead_of_crashing(tmp_path: Path) -> None:
+    init_consumer_repo(tmp_path, yes=True)
+    claude = tmp_path / "CLAUDE.md"
+    claude.write_text(
+        f"# Mine\n{CODE_CONVENTIONS_BLOCK_END}\nx\n{CODE_CONVENTIONS_BLOCK_BEGIN}\n",
+        encoding="utf-8",
+    )
+
+    payload = _doctor(tmp_path)
+
+    target = next(item for item in payload["targets"] if item["name"] == "CLAUDE.md")
+    assert target["drifted"] is True
+    assert str(claude) in target["error"] and "comes before" in target["error"]
+    assert _doctor_exit_code(payload) == 1
+
+
+def test_applied_uninstall_and_forced_init_report_what_they_changed(tmp_path: Path) -> None:
+    init_consumer_repo(tmp_path, yes=True)
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.write_text('{"hooks": {}}\n', encoding="utf-8")
+
+    forced = init_consumer_repo(tmp_path, force=True)
+    stripped = init_consumer_repo(tmp_path, uninstall=True)
+
+    assert "lt prime" in forced.diffs[settings]
+    claude = tmp_path / "CLAUDE.md"
+    assert f"-{CLAUDE_BLOCK_BEGIN}" in stripped.diffs[claude]
+    assert _buckets(stripped, claude).count("overwritten") == 1

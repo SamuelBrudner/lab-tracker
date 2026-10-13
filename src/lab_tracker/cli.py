@@ -59,9 +59,12 @@ from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 class InitResult:
     """What an init, update, or uninstall run changed, or would change.
 
-    Each path lands in one bucket. ``diffs`` holds, in a dry run, how every
-    planned file would change and, after applying, how every file that
-    already existed changed (a created file is the canonical text).
+    In init and update each path lands in one bucket. Uninstall lists a file
+    it strips under ``stripped`` (and ``overwritten`` once applied), and also
+    under ``skipped`` when one of that file's managed blocks is absent.
+    ``diffs`` holds, in a dry run, how every planned file would change and,
+    after applying, how every file that already existed changed (a created
+    file is the canonical text).
     """
 
     created: list[Path] = field(default_factory=list)
@@ -75,8 +78,13 @@ class InitResult:
     warnings: list[str] = field(default_factory=list)
     _preview_contents: dict[Path, str] = field(default_factory=dict, repr=False)
     _preview_original_contents: dict[Path, str] = field(default_factory=dict, repr=False)
-    # Files whose managed blocks are planned but not yet written, in order.
+    # Files whose managed blocks are planned but not yet written, in order,
+    # with the identity that tells two paths to one file (a symlinked
+    # CLAUDE.md -> AGENTS.md) apart from two files.
     _planned_files: list[Path] = field(default_factory=list, repr=False)
+    _planned_identities: dict[Path, tuple[object, ...]] = field(
+        default_factory=dict, repr=False
+    )
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -107,6 +115,10 @@ def init_consumer_repo(
     if not dry_run:
         root.mkdir(parents=True, exist_ok=True)
     result = InitResult()
+    _check_marker_order(
+        _activation_marker_pairs(root)
+        + (_conventions_marker_pairs(root) if uninstall or yes else [])
+    )
     if uninstall:
         if install_skills:
             _uninstall_setup_skill(result=result, dry_run=dry_run)
@@ -444,6 +456,7 @@ def update_consumer_repo(
     """
 
     root = Path(target).expanduser().resolve()
+    _check_marker_order(_activation_marker_pairs(root) + _conventions_marker_pairs(root))
     if not dry_run:
         root.mkdir(parents=True, exist_ok=True)
     result = InitResult()
@@ -1151,11 +1164,22 @@ def _write_managed_block(
 
     Each managed block of a file is planned against the text the previous one
     left, so a run writes a file at most once and files it in one bucket.
+    Paths to one file (a CLAUDE.md symlinked to AGENTS.md) share one plan.
     """
 
-    planned = path in result._preview_contents
-    if planned or path.exists():
-        existing = _planned_or_disk_text(path, result)
+    identity = _file_identity(path)
+    twins = [
+        other
+        for other in result._planned_files
+        if other != path and result._planned_identities[other] == identity
+    ]
+    planned_as = path if path in result._preview_contents else next(iter(twins), None)
+    if planned_as is not None or path.exists():
+        existing = (
+            result._preview_contents[planned_as]
+            if planned_as is not None
+            else path.read_text(encoding="utf-8")
+        )
         result._preview_original_contents.setdefault(
             path, path.read_text(encoding="utf-8") if path.exists() else ""
         )
@@ -1179,9 +1203,21 @@ def _write_managed_block(
         content = block
     if document_transform is not None:
         content = document_transform(content)
-    result._preview_contents[path] = content
+    for same_file in (path, *twins):
+        result._preview_contents[same_file] = content
     if path not in result._planned_files:
         result._planned_files.append(path)
+        result._planned_identities[path] = identity
+
+
+def _file_identity(path: Path) -> tuple[object, ...]:
+    """What makes two paths one file: its inode when it exists, else its resolved path."""
+
+    try:
+        stat = path.stat()
+    except OSError:
+        return ("path", str(path.resolve()))
+    return ("inode", stat.st_dev, stat.st_ino)
 
 
 def _commit_planned_files(
@@ -1193,26 +1229,31 @@ def _commit_planned_files(
     """Write each planned file once, then file it as created, overwritten, or unchanged.
 
     ``unchanged`` is the bucket a file whose final text equals its original
-    lands in: ``skipped`` for init, ``up_to_date`` for update.
+    lands in: ``skipped`` for init, ``up_to_date`` for update. Each path is
+    reported, but a file reached by two paths is written once.
     """
 
+    # Before any write, so a path to a file another path creates still
+    # counts as new.
+    existed = {path: path.exists() for path in result._planned_files}
+    written: set[tuple[object, ...]] = set()
     for path in result._planned_files:
         content = result._preview_contents[path]
         original = result._preview_original_contents[path]
-        # Nothing planned has been written yet, so the disk still shows
-        # whether the file existed before this run.
-        existed = path.exists()
-        if existed and content == original:
+        if existed[path] and content == original:
             result.diffs.pop(path, None)
             unchanged.append(path)
             continue
-        if dry_run or existed:
+        if dry_run or existed[path]:
             _record_diff(path, original, content, result)
-        if not dry_run:
+        identity = result._planned_identities[path]
+        if not dry_run and identity not in written:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
-        (result.overwritten if existed else result.created).append(path)
+            written.add(identity)
+        (result.overwritten if existed[path] else result.created).append(path)
     result._planned_files.clear()
+    result._planned_identities.clear()
 
 
 def _normalize_cursor_rules_document(content: str) -> str:
@@ -1366,12 +1407,48 @@ class ManagedBlockMarkerError(ValueError):
     """A file holds both Lab Tracker markers of a block, but END comes first."""
 
 
+def _marker_order_error(begin_marker: str, end_marker: str) -> ManagedBlockMarkerError:
+    return ManagedBlockMarkerError(
+        f"{end_marker} comes before {begin_marker}, so the managed block "
+        "cannot be found; remove or reorder the stray marker by hand, then "
+        "run the command again."
+    )
+
+
+def _check_marker_order(pairs: list[tuple[Path, str, str]]) -> None:
+    """Stop before the first write when a file to be touched has END before BEGIN."""
+
+    for path, begin_marker, end_marker in pairs:
+        if not path.is_file():
+            continue
+        try:
+            _managed_block_parts(path.read_text(encoding="utf-8"), begin_marker, end_marker)
+        except ManagedBlockMarkerError as exc:
+            raise SystemExit(f"{path}: {exc}") from exc
+
+
+def _activation_marker_pairs(root: Path) -> list[tuple[Path, str, str]]:
+    return [
+        (root / target, CLAUDE_BLOCK_BEGIN, CLAUDE_BLOCK_END)
+        for target in _ACTIVATION_BLOCK_TARGETS
+    ]
+
+
+def _conventions_marker_pairs(root: Path) -> list[tuple[Path, str, str]]:
+    return [
+        (root / Path(relative), begin_marker, end_marker)
+        for relative, begin_marker, end_marker in _CONVENTIONS_TARGETS
+    ]
+
+
 def _managed_region(existing: str, begin_marker: str, end_marker: str) -> tuple[int, int] | None:
     """The span of the first BEGIN...END region, or ``None`` when it is not paired.
 
-    The span runs from BEGIN to the end of END, or to the end of the
-    code-conventions version line when that is the next non-blank line. The
-    newline after it, and all text around it, stays outside.
+    The span runs from BEGIN to the end of END or, when the code-conventions
+    version comment is the next non-blank text, to the end of its line. If
+    other text follows the comment on that line, the span stops at the
+    comment's ``-->`` so that text stays outside, as do the newline after the
+    span and everything around it.
     """
 
     start = existing.find(begin_marker)
@@ -1386,7 +1463,12 @@ def _managed_region(existing: str, begin_marker: str, end_marker: str) -> tuple[
     if following.startswith(_CONVENTIONS_VERSION_LINE_PREFIX):
         line_start = stop + len(after) - len(following)
         line_end = existing.find("\n", line_start)
-        stop = len(existing) if line_end == -1 else line_end
+        line_end = len(existing) if line_end == -1 else line_end
+        comment_end = existing.find("-->", line_start, line_end)
+        if comment_end != -1 and existing[comment_end + 3 : line_end].strip():
+            stop = comment_end + 3
+        else:
+            stop = line_end
     return start, stop
 
 
@@ -1402,11 +1484,7 @@ def _managed_block_parts(
     has_begin = begin_marker in existing
     has_end = end_marker in existing
     if has_begin and has_end:
-        raise ManagedBlockMarkerError(
-            f"{end_marker} comes before {begin_marker}, so the managed block "
-            "cannot be found; remove or reorder the stray marker by hand, then "
-            "run the command again."
-        )
+        raise _marker_order_error(begin_marker, end_marker)
     if has_begin:
         prefix, _rest = existing.split(begin_marker, 1)
         return prefix, "", True
@@ -1485,11 +1563,14 @@ def _extract_managed_body(
     begin_marker: str,
     end_marker: str,
 ) -> str | None:
-    if begin_marker not in content or end_marker not in content:
+    region = _managed_region(content, begin_marker, end_marker)
+    if region is None:
+        if begin_marker in content and end_marker in content:
+            raise _marker_order_error(begin_marker, end_marker)
         return None
-    _prefix, rest = content.split(begin_marker, 1)
-    body, _suffix = rest.split(end_marker, 1)
-    return body.strip() + "\n"
+    body_start = region[0] + len(begin_marker)
+    body_end = content.find(end_marker, body_start)
+    return content[body_start:body_end].strip() + "\n"
 
 
 def _extract_version_line(
@@ -1535,11 +1616,29 @@ def _doctor(target: str | Path = ".") -> dict[str, object]:
     targets: list[dict[str, object]] = []
     for name, path, begin_marker, end_marker in checks:
         content = path.read_text(encoding="utf-8") if path.exists() else ""
-        found_body = _extract_managed_body(
-            content,
-            begin_marker=begin_marker,
-            end_marker=end_marker,
-        )
+        try:
+            found_body = _extract_managed_body(
+                content,
+                begin_marker=begin_marker,
+                end_marker=end_marker,
+            )
+        except ManagedBlockMarkerError as exc:
+            # Present but unreadable: drifted, and named, so `lt doctor --all`
+            # still reports the other repos.
+            targets.append(
+                {
+                    "name": name,
+                    "path": str(path),
+                    "present": True,
+                    "in_sync": False,
+                    "body_in_sync": False,
+                    "version_in_sync": False,
+                    "drifted": True,
+                    "version_line": "",
+                    "error": f"{path}: {exc}",
+                }
+            )
+            continue
         found_version = _extract_version_line(content, end_marker=end_marker)
         present = found_body is not None
         body_in_sync = present and found_body == body
