@@ -355,9 +355,9 @@ function GraphDraftDetailCard({
               : `${(changeSet.operations || []).length} proposals`}{" "}
             for your graph. Keep what&apos;s right, then commit — nothing changes until you do.
           </p> : null}
+          {reviewView === "triage" && changeSet.summary ? <p>{changeSet.summary}</p> : null}
           <details className="context-details triage-source-details" open={reviewView !== "triage"}>
           <summary>Full account, audio, and source captures</summary>
-          {reviewView === "triage" && changeSet.summary ? <p>{changeSet.summary}</p> : null}
           <AudioReviewConsole
             speechStatus={dictation.speechStatus}
             speechSupported={dictation.speechSupported}

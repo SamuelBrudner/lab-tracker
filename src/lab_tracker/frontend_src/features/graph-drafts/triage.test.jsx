@@ -36,6 +36,7 @@ describe("default review triage", () => {
     mount(draft, [{ match: "/graph-drafts/draft-1/triage-decision", method: "POST", response: (request) => { body = JSON.parse(request.init.body); return apiResponse(accepted); } }]);
     expect(await screen.findByRole("region", { name: "Review triage" })).toBeInTheDocument();
     expect(screen.getByText("2 decisions need your input")).toBeInTheDocument();
+    expect(screen.getByText("Account of the day")).toBeVisible();
     expect(screen.queryByRole("button", { name: "Accept all" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Correct" }));
     fireEvent.change(screen.getByLabelText("Text"), { target: { value: "The corrected comparison" } });
