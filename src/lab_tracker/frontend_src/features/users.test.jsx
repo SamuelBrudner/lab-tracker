@@ -74,9 +74,9 @@ describe("UsersPage invitations", () => {
 
     await waitFor(() => expect(setFlash).toHaveBeenCalledWith("Invitation link created."));
     expect(
-      screen.getByDisplayValue("https://lab.example.org/app/#invite=signed-token")
+      await screen.findByDisplayValue("https://lab.example.org/app/#invite=signed-token")
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Revoke invite" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Revoke invite" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Email invite" })).toHaveAttribute(
       "href",
       "mailto:member%40example.org?subject=Lab%20Tracker%20invitation"
