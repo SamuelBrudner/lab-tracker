@@ -332,8 +332,8 @@ function GraphDraftDetailCard({
 
       {changeSet ? (
         <div className="daily-review-report">
-          {changeSet.summary && reviewView === "proposals" ? (
-            <div className="review-summary">
+          {changeSet.summary ? (
+            <section className="review-summary" aria-label="Draft context">
               {String(changeSet.summary)
                 .split(/\n{2,}/)
                 .map((para) => para.trim())
@@ -341,7 +341,7 @@ function GraphDraftDetailCard({
                 .map((para, index) => (
                   <p key={index}>{para}</p>
                 ))}
-            </div>
+            </section>
           ) : null}
           {reviewView !== "triage" ? <DraftQualityLine projectId={changeSet.project_id} token={token} changeSet={changeSet} /> : null}
           {reviewView !== "triage" ? <p className="review-lead subtle">
@@ -355,7 +355,6 @@ function GraphDraftDetailCard({
               : `${(changeSet.operations || []).length} proposals`}{" "}
             for your graph. Keep what&apos;s right, then commit — nothing changes until you do.
           </p> : null}
-          {reviewView === "triage" && changeSet.summary ? <p>{changeSet.summary}</p> : null}
           <details className="context-details triage-source-details" open={reviewView !== "triage"}>
           <summary>Full account, audio, and source captures</summary>
           <AudioReviewConsole

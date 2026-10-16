@@ -1221,7 +1221,7 @@ def test_analysis_note_draft_stores_operations_and_context(
     payload = response.json()["data"]
     assert payload["status"] == "ready"
     assert payload["draft_mode"] == "graph_context"
-    assert payload["prompt_version"] == "analysis-graph-draft-v4"
+    assert payload["prompt_version"] == "analysis-graph-draft-v5"
     assert payload["source_note_id"] == note_id
     assert payload["source_content_type"] == "text/markdown"
     assert payload["context_packet"]["project"]["id"] == project_id
@@ -2499,7 +2499,7 @@ def test_edit_accept_and_commit_resolves_refs_into_canonical_records(
     assert question_payload["change_set_id"] == change_set_id
     assert question_payload["origin_provider"] == "openai"
     assert question_payload["origin_model"] == "fake-gpt"
-    assert question_payload["origin_prompt_version"] == "multimodal-graph-draft-v4"
+    assert question_payload["origin_prompt_version"] == "multimodal-graph-draft-v5"
 
     notes = client.get(
         f"/notes?project_id={project_id}&target_entity_type=question&target_entity_id={question_id}",
@@ -2786,7 +2786,7 @@ def test_revise_graph_draft_regenerates_operations_from_feedback(
     assert len(body["operations"]) == 1
     assert all(op["status"] == "proposed" for op in body["operations"])
     assert body["summary"].startswith("Revised per reviewer")
-    assert body["prompt_version"] == "multimodal-graph-draft-v4"
+    assert body["prompt_version"] == "multimodal-graph-draft-v5"
     assert body["operations"][0]["source_refs"][0]["source_note_ids"] == [note_id]
     assert (
         body["operations"][0]["source_refs"][0]["source_note_ids_resolution"]
@@ -4536,7 +4536,7 @@ def test_commit_record_dead_end_creates_ai_suggested_exploration_node(
     assert node_payload["origin"] == "ai_suggested"
     assert node_payload["change_set_id"] == committed["change_set_id"]
     assert node_payload["origin_model"] == "fake-gpt"
-    assert node_payload["origin_prompt_version"] == "multimodal-graph-draft-v4"
+    assert node_payload["origin_prompt_version"] == "multimodal-graph-draft-v5"
     assert node_payload["target"] == {"entity_type": "question", "entity_id": question_id}
     listed = client.get(
         f"/exploration-nodes?project_id={project_id}", headers=admin_auth_headers

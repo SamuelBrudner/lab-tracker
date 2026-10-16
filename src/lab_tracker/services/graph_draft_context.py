@@ -19,6 +19,7 @@ from lab_tracker.claim_effective_status import (
     load_claim_interpretations,
 )
 from lab_tracker.errors import NotFoundError, ValidationError
+from lab_tracker.graph_draft_triage import TRIAGE_CLARIFICATIONS_KEY, clarification_id
 from lab_tracker.models import (
     REVIEW_NOTE_KEY,
     REVIEWED_AT_KEY,
@@ -169,6 +170,13 @@ PENDING_PROPOSALS_CHAR_BUDGET = 8_000
 RECENT_REJECTIONS_ITEM_LIMIT = 15
 RECENT_REJECTIONS_WINDOW_DAYS = 14
 REVIEW_MEMORY_NOTE_MAX_CHARS = 200
+RECENT_DRAFT_CONTEXT_ITEM_LIMIT = 5
+RECENT_DRAFT_CONTEXT_CHAR_BUDGET = 16_000
+RECENT_DRAFT_CONTEXT_WINDOW_DAYS = 14
+_DRAFT_SUMMARY_MAX_CHARS = 2_000
+_DRAFT_CONTEXT_FIELD_LIMIT = 5
+_DRAFT_CONTEXT_FIELD_MAX_CHARS = 500
+_DRAFT_ANSWER_MAX_CHARS = 1_000
 REVIEW_MEMORY_NOT_SCOPED_WARNING = "review memory not reviewer-scoped"
 _MISSING_TARGET_LABEL = "(missing)"
 _CREATE_LABEL_FIELDS = ("text", "title", "statement", "raw_content")
@@ -461,7 +469,7 @@ class GraphContextBuilder:
         now: datetime,
         change_sets: list[GraphChangeSet] | None = None,
     ) -> dict[str, Any]:
-        """Reviewer-scoped pending proposals and recent rejections, capped.
+        """Reviewer-scoped proposals, rejections, and prior draft context, capped.
 
         Without a user-backed reviewer (or a records port) the block is empty
         and flagged ``reviewer_scoped=False`` rather than matched on a legacy
@@ -476,7 +484,7 @@ class GraphContextBuilder:
         if change_sets is None:
             change_sets = self._review_memory_change_sets(project_ids, reviewer_user_id)
         change_sets = sorted(
-            change_sets,
+            (item for item in change_sets if item.project_id in project_ids),
             key=lambda item: (-as_utc(item.created_at).timestamp(), str(item.change_set_id)),
         )
         pending, truncated = self._pending_proposals(change_sets, reviewer_user_id)
@@ -488,6 +496,9 @@ class GraphContextBuilder:
             "pending_proposals_truncated": truncated,
             "recent_rejections": self._recent_rejections(
                 change_sets, reviewer_user_id, cutoff=cutoff
+            ),
+            "recent_draft_context": _recent_draft_context(
+                change_sets, reviewer_user_id, now=now
             ),
         }
 
@@ -790,6 +801,9 @@ class GraphContextBuilder:
             ],
             "context_owner": _compact_owner(owner),
             "external_context_policy": external_context_policy.value,
+            "review_memory": self.build_review_memory(
+                project_ids={note.project_id}, context_owner=owner, now=utc_now()
+            ),
         }
         context_packet["context_summary"] = _graph_context_summary(context_packet)
         return context_packet
@@ -1138,6 +1152,7 @@ def _graph_batch_context_summary(packet: dict[str, Any]) -> dict[str, Any]:
         review_memory = _empty_review_memory()
     pending_proposal_count = len(review_memory.get("pending_proposals") or [])
     recent_rejection_count = len(review_memory.get("recent_rejections") or [])
+    recent_draft_context_count = len(review_memory.get("recent_draft_context") or [])
     reviewer_scoped = bool(review_memory.get("reviewer_scoped"))
     if not reviewer_scoped:
         warnings.append(REVIEW_MEMORY_NOT_SCOPED_WARNING)
@@ -1171,11 +1186,13 @@ def _graph_batch_context_summary(packet: dict[str, Any]) -> dict[str, Any]:
             "known_aliases": sum(len(p.get("known_aliases") or []) for p in projects),
             "pending_proposals": pending_proposal_count,
             "recent_rejections": recent_rejection_count,
+            "recent_draft_context": recent_draft_context_count,
         },
         "review_memory": {
             "reviewer_scoped": reviewer_scoped,
             "pending_proposals": pending_proposal_count,
             "recent_rejections": recent_rejection_count,
+            "recent_draft_context": recent_draft_context_count,
             "pending_proposals_truncated": bool(
                 review_memory.get("pending_proposals_truncated")
             ),
@@ -1239,7 +1256,73 @@ def _empty_review_memory() -> dict[str, Any]:
         "pending_proposals": [],
         "pending_proposals_truncated": False,
         "recent_rejections": [],
+        "recent_draft_context": [],
     }
+
+
+def _recent_draft_context(
+    change_sets: list[GraphChangeSet], reviewer_user_id: UUID, *, now: datetime
+) -> list[dict[str, Any]]:
+    """Prior openings and human answers, never promoted to canonical evidence."""
+
+    cutoff = now - timedelta(days=RECENT_DRAFT_CONTEXT_WINDOW_DAYS)
+    items: list[dict[str, Any]] = []
+    serialized_chars = 2  # JSON array brackets.
+    for change_set in sorted(
+        change_sets,
+        key=lambda item: (-as_utc(item.updated_at).timestamp(), str(item.change_set_id)),
+    ):
+        if (
+            change_set.status not in REVIEW_MEMORY_REJECTION_STATUSES
+            or not _reviewed_by_user(change_set, reviewer_user_id)
+            or as_utc(change_set.updated_at) < cutoff
+        ):
+            continue
+        summary = change_set.summary.strip()[:_DRAFT_SUMMARY_MAX_CHARS]
+        uncertain = change_set.uncertain_fields[:_DRAFT_CONTEXT_FIELD_LIMIT]
+        questions = list(dict.fromkeys(change_set.clarification_requests))[
+            :_DRAFT_CONTEXT_FIELD_LIMIT
+        ]
+        if not (summary or uncertain or questions):
+            continue
+        answers = change_set.review_metadata.get(TRIAGE_CLARIFICATIONS_KEY, {})
+        if not isinstance(answers, dict):
+            answers = {}
+        clarifications = []
+        for question in questions:
+            saved = answers.get(clarification_id(question), {})
+            if not isinstance(saved, dict):
+                saved = {}
+            status = saved.get("status")
+            answered = status == "answered"
+            clarifications.append({
+                "question": question[:_DRAFT_CONTEXT_FIELD_MAX_CHARS],
+                "status": status if status in {"answered", "deferred"} else "unanswered",
+                "answer": str(saved.get("answer") or "")[:_DRAFT_ANSWER_MAX_CHARS]
+                if answered else None,
+                "reviewed_at": str(saved.get("reviewed_at") or "")[:100] if answered else None,
+                "reviewed_by": str(saved.get("reviewed_by") or "")[:100] if answered else None,
+            })
+        source_ids = change_set.source_note_ids or [change_set.source_note_id]
+        item = {
+            "change_set_id": str(change_set.change_set_id),
+            "project_id": str(change_set.project_id),
+            "change_set_status": change_set.status.value,
+            "updated_at": as_utc(change_set.updated_at).isoformat(),
+            "source_note_ids": [str(note_id) for note_id in source_ids[:25]],
+            "source_note_ids_truncated": len(source_ids) > 25,
+            "summary": summary,
+            "uncertain_fields": [field[:_DRAFT_CONTEXT_FIELD_MAX_CHARS] for field in uncertain],
+            "clarifications": clarifications,
+        }
+        item_chars = len(json.dumps(item, sort_keys=True)) + _JSON_LIST_ITEM_OVERHEAD
+        if serialized_chars + item_chars > RECENT_DRAFT_CONTEXT_CHAR_BUDGET:
+            break
+        items.append(item)
+        serialized_chars += item_chars
+        if len(items) >= RECENT_DRAFT_CONTEXT_ITEM_LIMIT:
+            break
+    return items
 
 
 def _reviewed_by_user(change_set: GraphChangeSet, reviewer_user_id: UUID) -> bool:

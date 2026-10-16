@@ -285,7 +285,9 @@ describe("GraphDraftDetailCard narrative review", () => {
     const narrative = screen.getByRole("region", { name: "Narrative review" });
     expect(narrative).toHaveTextContent("The draft proposes to add a new question");
     expect(narrative).toHaveTextContent("It also proposes to add a research note");
-    expect(narrative).toHaveTextContent("One new question was drafted from today's captures.");
+    expect(screen.getByRole("region", { name: "Draft context" })).toHaveTextContent(
+      "One new question was drafted from today's captures."
+    );
     expect(
       screen.getByRole("button", { name: /Proposed edit 1: Proposed new question/ })
     ).toHaveTextContent("[1]");
@@ -2039,4 +2041,3 @@ describe("GraphDraftDetailCard commit hand-off", () => {
     expect(navigate).toHaveBeenCalledWith("/app/batches/55555555-5555-4555-8555-555555555555");
   });
 });
-

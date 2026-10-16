@@ -13,6 +13,7 @@ from test_graph_drafts import (
 )
 
 from lab_tracker.app_parts.middleware import system_auth_context
+from lab_tracker.auth import AuthContext, Role
 from lab_tracker.errors import AuthError
 from lab_tracker.graph_draft_triage import review_triage
 from lab_tracker.models import (
@@ -23,6 +24,7 @@ from lab_tracker.models import (
     GraphChangeSet,
     GraphDraftSemanticType,
 )
+from lab_tracker.services.graph_draft_batch_policy import BatchReviewer
 
 
 def _operation(sequence=0, **kwargs):
@@ -239,6 +241,39 @@ def test_clarification_answer_is_audited_without_accepting_an_operation(client, 
     annotation = next(iter(current["review_metadata"]["review_triage_clarifications"].values()))
     assert annotation["reviewed_by"] and annotation["reviewed_at"]
     assert annotation["answer"] == "Use the planned control cohort."
+
+
+def test_saved_clarification_reaches_future_batch_and_note_context(client, admin_auth_headers):
+    draft = _create_review(client, admin_auth_headers)
+    question = draft["clarification_requests"][0]
+    response = client.post(
+        f"/graph-drafts/{draft['change_set_id']}/triage-clarification",
+        json={"question": question, "decision": "answered", "answer": "The afternoon session."},
+        headers=admin_auth_headers,
+    )
+    assert response.status_code == 200
+    saved = response.json()["data"]
+    reviewer_id = UUID(saved["created_by_user_id"])
+    with _autonomy_request_api(client) as api:
+        note = api.get_note(UUID(draft["source_note_id"]))
+        batch = api.build_batch_graph_context(
+            [note], context_owner=BatchReviewer(str(reviewer_id), reviewer_id)
+        )
+        note_context = api.build_graph_context_for_note(
+            note.note_id, actor=AuthContext(user_id=reviewer_id, role=Role.ADMIN)
+        )
+    for packet in [batch, note_context]:
+        history = packet["review_memory"]["recent_draft_context"]
+        assert history[0]["change_set_id"] == draft["change_set_id"]
+        assert history[0]["summary"] == draft["summary"]
+        clarification = history[0]["clarifications"][0]
+        assert clarification["question"] == question
+        assert clarification["answer"] == "The afternoon session."
+        assert clarification["reviewed_by"] == str(reviewer_id)
+    assert batch["context_summary"]["counts"]["recent_draft_context"] == 1
+    # Saving an answer leaves both the original provider input and graph edits intact.
+    assert saved["context_packet"] == draft["context_packet"]
+    assert all(op["status"] == "proposed" for op in saved["operations"])
 
 
 def test_partial_commit_carries_unfinished_decisions_and_resolves_committed_refs(
