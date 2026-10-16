@@ -1765,11 +1765,18 @@ def test_read_only_viewer_lpat_reaches_decision_context_through_mcp_tool(
     assert payload["data"]["scope"]["project"]["project_id"] == (
         scoped_project_member.visible_project_id
     )
-    assert len(requests) == 1
-    assert requests[0].method == "POST"
-    assert requests[0].url.path == "/assistant/decision-context"
-    assert requests[0].headers["authorization"].startswith("Bearer lpat_")
-    assert requests[0].headers["x-labtracker-surface"] == "mcp"
+    # The packet came back empty, so the tool confirmed with one graph-overview
+    # read, under the same read-only token and surface, before suggesting Orient.
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("POST", "/assistant/decision-context"),
+        ("GET", f"/projects/{scoped_project_member.visible_project_id}/graph/overview"),
+    ]
+    for request in requests:
+        assert request.headers["authorization"].startswith("Bearer lpat_")
+        assert request.headers["x-labtracker-surface"] == "mcp"
+    assert payload["next_action"]["action"] == "suggest_orientation_checkpoint"
+    # This caller is a viewer, so the hint must not promise them the button.
+    assert "View project orientation" in payload["next_action"]["reason"]
     assert json.loads(requests[0].content) == {
         "task_kind": "summary",
         "query": "MCP scoped context",

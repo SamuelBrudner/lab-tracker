@@ -40,8 +40,12 @@ from lab_tracker.capture_setup_catalog import (
 from lab_tracker.cli import _skills_homes, init_consumer_repo, update_consumer_repo
 from lab_tracker.cli import main as lab_tracker_main
 from lab_tracker.config import Settings
-from lab_tracker.decision_context_constants import AGENT_CONSULTATION_POLICY
+from lab_tracker.decision_context_constants import (
+    AGENT_CONSULTATION_POLICY,
+    EMPTY_PROJECT_ORIENTATION_POLICY,
+)
 from lab_tracker.mcp_tools import READ_TOOLS, WRITE_TOOLS
+from lab_tracker.mcp_tools.hints import orientation_checkpoint_hint
 from lab_tracker.services.graph_draft_capture_setup import (
     DETECTION_THRESHOLDS,
     resolve_capture_setup,
@@ -1353,3 +1357,48 @@ def test_capture_setup_doc_gap_table_matches_the_catalog_and_thresholds() -> Non
         for gap, guide in CAPTURE_SETUP_GUIDES.items()
     }
     assert rows == expected
+
+
+_ORIENT_LABEL = "Orient me to this project"
+_VIEWER_ORIENT_LABEL = "View project orientation"
+_ORIENT_PATH = "/app/projects/<project-id>/onboarding"
+_WORKSPACE_HOME = _FRONTEND_SRC / "features" / "workspace" / "WorkspaceHome.jsx"
+_ROUTING = _FRONTEND_SRC / "shared" / "routing.jsx"
+_ORIENT_ROUTE = re.compile(
+    r'routeParts\[1\] === "projects"[^{}]*routeParts\[3\] === "onboarding"[^{}]*\)\s*\{\s*'
+    r'return \{ kind: "member-onboarding"'
+)
+
+
+def test_orient_checkpoint_pointers_name_a_real_button_and_route() -> None:
+    # The setup guide, the MCP empty-project hint, and the onboarding doc all
+    # send people to one web-app step, so a renamed button or moved route
+    # must fail here rather than leave three stale pointers.
+    pointers = {
+        "setup guide": setup_guide_markdown(),
+        "MCP hint": orientation_checkpoint_hint("<project-id>")["reason"],
+        "member-onboarding.md": _read(_DOCS / "member-onboarding.md"),
+    }
+    stale = [
+        name
+        for name, text in pointers.items()
+        if _ORIENT_LABEL not in text or _ORIENT_PATH not in text
+    ]
+    assert not stale, f"these point at the Orient checkpoint without its label or path: {stale}"
+    workspace = _read(_WORKSPACE_HOME)
+    assert _component_shows(_ORIENT_LABEL, workspace)
+    # A viewer's workspace shows another label and leads to a read-only page.
+    # Each text that names the button names that label too, and each text
+    # that tells agents when to suggest the step says a viewer needs edit
+    # access first, rather than offer a button the person lacks.
+    assert _component_shows(_VIEWER_ORIENT_LABEL, workspace)
+    for name, text in (*pointers.items(), ("agent-setup.md", _read(_AGENT_SETUP_DOC))):
+        assert _VIEWER_ORIENT_LABEL in _collapsed_whitespace(text), name
+    for name, text in (
+        ("agent policy", EMPTY_PROJECT_ORIENTATION_POLICY),
+        ("lab-tracker skill", _read(_SKILL_PATH)),
+    ):
+        assert "a viewer needs edit access first" in _collapsed_whitespace(text), name
+    assert _ORIENT_ROUTE.search(_without_js_comments(_read(_ROUTING))), (
+        f"routing.jsx no longer serves the member-onboarding page at {_ORIENT_PATH}"
+    )

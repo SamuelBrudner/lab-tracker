@@ -31,8 +31,10 @@ older `lt git snapshot` hook is deprecated for one release). It writes
 `lt_ids.json`, and it refuses a `--project` that conflicts with an existing
 config rather than overriding it. Run
 `lt repo init --project <project-uuid> [--default-question <question-uuid>]`
-first when you want a default question or a custom outbox;
-`lt repo install-hook` is an alias of the same installer. The declared
+first when you want a default question or a custom outbox.
+`lt repo install-hook` is an older entry point to the same installer that
+writes at once, with no `--dry-run` preview, `--yes` gate, or `--project`, so
+prefer `lt hooks install`. The declared
 question and dataset ids are attached to the synced note as targets; each
 event records `question_id_source` and the note carries
 `declared_target_source` as `explicit` (`--question`) or `config_default`

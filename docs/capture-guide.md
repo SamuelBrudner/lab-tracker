@@ -73,7 +73,7 @@ The same guidance appears in `lt setup status` and in each repository checked by
 
 | You want to... | Use | Guide |
 | --- | --- | --- |
-| Capture results or instrument exports as they appear in a folder | `lt watch add <folder> --include <glob>`, then `lt setup schedule --yes` | [Watch-folder capture](watch-folder-capture.md) |
+| Capture results or instrument exports that land in a folder (the first scan also stages matching files already there) | `lt watch add <folder> --include <glob>`, preview with `lt watch scan --dry-run`, then `lt setup schedule --yes` | [Watch-folder capture](watch-folder-capture.md) |
 | Keep acquisition time, instrument, and counts from FCS, OME-TIFF, and NWB files | Nothing extra: `lt watch` reads bounded file headers | [Decoded labels and file headers](decoded-labels-and-file-headers.md) |
 | Attach a folder's files to a session | Put the session's `LT-<code>` in the folder or file name, or run `lt session use <code>` | [Watch-folder capture](watch-folder-capture.md) |
 | Capture files from a machine you cannot install software on | Ask your operator for a registered-store scan | [Server capture channels](server-capture-channels.md) |
