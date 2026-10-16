@@ -1,5 +1,24 @@
 @import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap");
 
+.review-triage { display: grid; gap: var(--sp-5); }
+.triage-lead h3, .triage-decision h3 { margin: 0; }
+.triage-decision { padding: var(--sp-5); border: 1px solid var(--line); border-radius: var(--radius-md); }
+.triage-lanes { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.triage-lanes button[aria-pressed="true"] { background: var(--ink); color: var(--card); }
+.triage-lanes button, .triage-actions button { min-height: 44px; }
+.triage-changes { display: grid; gap: var(--sp-4); margin-block: var(--sp-5); }
+.triage-changes p { overflow-wrap: anywhere; }
+.triage-source-details { margin-block: var(--sp-3); }
+.review-queue-prompt { font-weight: 500; }
+.triage-participation { overflow-x: auto; }
+@media (max-width: 600px) {
+  .triage-lanes button { flex: 1 1 100%; }
+  .triage-actions { flex-wrap: wrap; }
+  .triage-actions button { flex: 1 1 40%; }
+  .triage-decision .item-head { flex-wrap: wrap; }
+  .triage-decision select { max-width: 100%; }
+}
+
 /* =============================================================================
    Design tokens — three tiers.
 

@@ -62,6 +62,8 @@ DELEGATE_OWNERS = {
     "query_batch_graph_drafts": "records",
     "update_graph_change_operation": "review",
     "bulk_accept_graph_change_operations": "review",
+    "decide_graph_draft_group": "review",
+    "decide_graph_draft_clarification": "review",
     "submit_graph_change_set": "review",
     "review_graph_change_set": "review",
     "revise_graph_change_set": "review",
@@ -490,7 +492,8 @@ def exercise(owner):
 def test_graph_draft_owner_sizes_and_constructor_breadth_stay_bounded() -> None:
     # A one-hop facade grows by a fixed few lines per delegate; the sixth
     # owner (delegation) raised the bound from 450.
-    assert len(Path(inspect.getfile(GraphDraftService)).read_text().splitlines()) <= 480
+    # Two typed triage command delegates add a fixed 40 lines to the facade.
+    assert len(Path(inspect.getfile(GraphDraftService)).read_text().splitlines()) <= 520
     for owner_type in OWNER_TYPES.values():
         path = Path(inspect.getfile(owner_type))
         assert len(path.read_text().splitlines()) <= 900

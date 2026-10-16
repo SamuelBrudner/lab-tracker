@@ -22,8 +22,10 @@ from lab_tracker.schemas import (
     Envelope,
     GraphChangeSetSummary,
     GraphDraftAnalysisCreateRequest,
+    GraphDraftClarificationDecisionRequest,
     GraphDraftCommitRequest,
     GraphDraftCreateRequest,
+    GraphDraftGroupDecisionRequest,
     GraphDraftOperationUpdate,
     GraphDraftReviewRequest,
     GraphDraftSubmitRequest,
@@ -157,18 +159,19 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
         )
 
     @router.get("/graph-drafts/{change_set_id:uuid}", response_model=Envelope[GraphChangeSet])
-    def get_graph_draft(change_set_id: UUID, request: Request):
+    def get_graph_draft(change_set_id: UUID, request: Request, record_view: bool = True):
         actor = actor_from_request(request)
         change_set = api_from_request(request, api).get_graph_change_set_for_read(
             change_set_id,
             actor=actor,
         )
-        record_usage_view(
-            request,
-            resource_type=UsageEventResourceType.GRAPH_CHANGE_SET,
-            resource_id=change_set.change_set_id,
-            project_id=change_set.project_id,
-        )
+        if record_view:
+            record_usage_view(
+                request,
+                resource_type=UsageEventResourceType.GRAPH_CHANGE_SET,
+                resource_id=change_set.change_set_id,
+                project_id=change_set.project_id,
+            )
         return Envelope(data=_attach_graph_usernames(request, change_set))
 
     @router.patch(
@@ -202,6 +205,52 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
         ensure_project_read(request, change_set.project_id)
         change_set = api_from_request(request, api).bulk_accept_graph_change_operations(
             change_set_id,
+            actor=actor,
+        )
+        return Envelope(data=_attach_graph_usernames(request, change_set))
+
+    @router.post(
+        "/graph-drafts/{change_set_id:uuid}/triage-decision",
+        response_model=Envelope[GraphChangeSet],
+    )
+    def decide_graph_draft_group(
+        change_set_id: UUID,
+        request: Request,
+        payload: GraphDraftGroupDecisionRequest,
+    ):
+        actor = actor_from_request(request)
+        request_api = api_from_request(request, api)
+        change_set = request_api.get_graph_change_set_for_read(change_set_id, actor=actor)
+        change_set = request_api.decide_graph_draft_group(
+            change_set_id,
+            operation_ids=payload.operation_ids,
+            expected_revision=payload.expected_revision,
+            decision=payload.decision,
+            reject_reason=payload.reject_reason,
+            edits={
+                operation_id: provided_fields(edit) for operation_id, edit in payload.edits.items()
+            },
+            actor=actor,
+        )
+        return Envelope(data=_attach_graph_usernames(request, change_set))
+
+    @router.post(
+        "/graph-drafts/{change_set_id:uuid}/triage-clarification",
+        response_model=Envelope[GraphChangeSet],
+    )
+    def decide_graph_draft_clarification(
+        change_set_id: UUID,
+        request: Request,
+        payload: GraphDraftClarificationDecisionRequest,
+    ):
+        actor = actor_from_request(request)
+        request_api = api_from_request(request, api)
+        request_api.get_graph_change_set_for_read(change_set_id, actor=actor)
+        change_set = request_api.decide_graph_draft_clarification(
+            change_set_id,
+            question=payload.question,
+            decision=payload.decision,
+            answer=payload.answer,
             actor=actor,
         )
         return Envelope(data=_attach_graph_usernames(request, change_set))
@@ -334,9 +383,7 @@ def _read_revision_inputs(
 
     return RevisionInputs(
         audio=read(audio),
-        attachments=[
-            upload for item in attachments or [] if (upload := read(item)) is not None
-        ],
+        attachments=[upload for item in attachments or [] if (upload := read(item)) is not None],
     )
 
 
@@ -389,6 +436,7 @@ def _graph_change_set_summary(change_set: GraphChangeSet) -> GraphChangeSetSumma
         error_metadata=dict(change_set.error_metadata),
         operation_count=change_set.operation_count,
         deferred_count=change_set.deferred_count,
+        triage_summary=change_set.triage_summary,
         created_at=change_set.created_at,
         created_by=change_set.created_by,
         created_by_user_id=change_set.created_by_user_id,

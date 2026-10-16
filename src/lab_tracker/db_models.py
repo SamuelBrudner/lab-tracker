@@ -634,6 +634,7 @@ class GraphChangeSetModel(Base):
     draft_mode: Mapped[str] = mapped_column(String(30), nullable=False, default="graph_context")
     purpose: Mapped[str] = mapped_column(String(48), nullable=False, default="general")
     context_packet: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    review_metadata: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     summary: Mapped[str] = mapped_column(Text, default="")
     uncertain_fields: Mapped[list[str]] = mapped_column(JSON, default=list)
     clarification_requests: Mapped[list[str]] = mapped_column(JSON, default=list)

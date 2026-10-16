@@ -336,6 +336,10 @@ test("a delayed graph response cannot replace or mutate the current route", asyn
   releaseB.resolve();
   expect((await draftBResponse).status()).toBe(200);
   await expect(page.getByText("Draft B summary.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Review triage" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Keep this decision", exact: true })).toBeEnabled();
+  // Exercise the individual editor after confirming the new default triage.
+  await page.getByRole("button", { name: "Proposals", exact: true }).click();
   await expect(
     page.locator(".review-proposal-text", {
       hasText: "Question proposed by draft B",

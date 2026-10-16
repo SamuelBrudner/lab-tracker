@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter
@@ -20,6 +22,7 @@ from lab_tracker.models import (
     GraphDraftBatchSettings,
     ProjectMembershipRole,
     UsageEventResourceType,
+    utc_now,
 )
 from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
@@ -67,6 +70,20 @@ _PERSONAL_ACTION_STATUSES = frozenset(
 def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
     router = APIRouter()
 
+    @router.get(
+        "/projects/{project_id:uuid}/review-engagement", response_model=Envelope[dict[str, Any]]
+    )
+    def get_review_engagement(project_id: UUID, request: Request, since: datetime | None = None):
+        ensure_project_owner(request, project_id)
+        if since is not None and (since.tzinfo is None or since.utcoffset() is None):
+            raise ValidationError("since must include a timezone offset.")
+        report = api_from_request(request, api).review_engagement(
+            project_id,
+            since or (utc_now() - timedelta(days=30)),
+        )
+        report["opening_counts_available"] = request.app.state.settings.is_usage_events_enabled()
+        return Envelope(data=report)
+
     @router.get("/batches", response_model=ListEnvelope[GraphBatchSummary])
     def list_batches(
         request: Request,
@@ -81,8 +98,7 @@ def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
         validate_pagination(limit, offset)
         if sum((mine, needs_commit, unassigned_oversight)) > 1:
             raise ValidationError(
-                "mine, needs_commit, and unassigned_oversight are separate "
-                "Daily Review views."
+                "mine, needs_commit, and unassigned_oversight are separate Daily Review views."
             )
         if needs_commit and status not in {None, GraphChangeSetStatus.SUBMITTED}:
             raise ValidationError("needs_commit only applies to submitted Daily Reviews.")
@@ -91,9 +107,7 @@ def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
             GraphChangeSetStatus.READY,
             GraphChangeSetStatus.CHANGES_REQUESTED,
         }:
-            raise ValidationError(
-                "unassigned_oversight only applies to actionable Daily Reviews."
-            )
+            raise ValidationError("unassigned_oversight only applies to actionable Daily Reviews.")
         if project_id is not None and unassigned_oversight:
             ensure_project_owner(request, project_id)
         elif project_id is not None:
@@ -158,9 +172,7 @@ def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
         actor = actor_from_request(request)
         personal_user_id = _personal_settings_user_id(request, actor)
         if personal_user_id is None and user_id is not None:
-            raise ValidationError(
-                "Auth-disabled Daily Review uses one legacy settings bucket."
-            )
+            raise ValidationError("Auth-disabled Daily Review uses one legacy settings bucket.")
         settings_user_id = user_id if user_id is not None else personal_user_id
         settings = api_from_request(request, api).get_graph_draft_batch_settings(
             project_id,
@@ -355,8 +367,7 @@ def _owner_project_scope(
     return frozenset(
         candidate
         for candidate in candidates
-        if request_api.project_membership_role(candidate, actor)
-        == ProjectMembershipRole.OWNER
+        if request_api.project_membership_role(candidate, actor) == ProjectMembershipRole.OWNER
     )
 
 

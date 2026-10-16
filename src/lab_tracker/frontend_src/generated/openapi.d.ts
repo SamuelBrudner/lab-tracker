@@ -965,6 +965,7 @@ export interface components {
       "review_assignee"?: (string | null);
       "review_assignee_user_id"?: (string | null);
       "review_assignee_username"?: (string | null);
+      "review_metadata"?: Record<string, unknown>;
       "review_note"?: (string | null);
       "reviewed_at"?: (string | null);
       "reviewed_by"?: (string | null);
@@ -980,6 +981,8 @@ export interface components {
       "submitted_by"?: (string | null);
       "submitted_by_username"?: (string | null);
       "summary"?: string;
+      "triage": Record<string, unknown>;
+      "triage_summary": (Record<string, number> | null);
       "uncertain_fields"?: Array<string>;
       "updated_at"?: string;
     };

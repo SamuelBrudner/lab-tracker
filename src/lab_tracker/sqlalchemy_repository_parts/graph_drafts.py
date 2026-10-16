@@ -223,6 +223,7 @@ def change_set_to_model(change_set: GraphChangeSet) -> GraphChangeSetModel:
         draft_mode=change_set.draft_mode.value,
         purpose=change_set.purpose.value,
         context_packet=dict(change_set.context_packet),
+        review_metadata=dict(change_set.review_metadata),
         summary=change_set.summary,
         uncertain_fields=list(change_set.uncertain_fields),
         clarification_requests=list(change_set.clarification_requests),
@@ -265,6 +266,7 @@ def apply_change_set_to_model(row: GraphChangeSetModel, change_set: GraphChangeS
     row.draft_mode = change_set.draft_mode.value
     row.purpose = change_set.purpose.value
     row.context_packet = dict(change_set.context_packet)
+    row.review_metadata = dict(change_set.review_metadata)
     row.summary = change_set.summary
     row.uncertain_fields = list(change_set.uncertain_fields)
     row.clarification_requests = list(change_set.clarification_requests)
@@ -339,6 +341,7 @@ def change_set_from_model(
         draft_mode=GraphDraftMode(row.draft_mode or GraphDraftMode.GRAPH_CONTEXT.value),
         purpose=GraphDraftPurpose(row.purpose or GraphDraftPurpose.GENERAL.value),
         context_packet=_dict(row.context_packet),
+        review_metadata=_dict(row.review_metadata),
         summary=row.summary or "",
         uncertain_fields=list(row.uncertain_fields or []),
         clarification_requests=list(row.clarification_requests or []),
@@ -382,6 +385,11 @@ def change_set_from_model(
 class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
     def __init__(self, session: OrmSession) -> None:
         self._session = session
+
+    def review_engagement(self, project_id: UUID, since: datetime) -> dict[str, Any]:
+        from lab_tracker.review_engagement import review_engagement
+
+        return review_engagement(self._session, project_id, since)
 
     def _operations_for(self, change_set_ids: list[str]) -> dict[str, list[GraphChangeOperation]]:
         if not change_set_ids:
@@ -778,6 +786,7 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
             .where(GraphChangeSetModel.generation_lease_expires_at > finished_at)
             .values(
                 context_packet=dict(change_set.context_packet),
+                review_metadata=dict(change_set.review_metadata),
                 summary=change_set.summary,
                 uncertain_fields=list(change_set.uncertain_fields),
                 clarification_requests=list(change_set.clarification_requests),

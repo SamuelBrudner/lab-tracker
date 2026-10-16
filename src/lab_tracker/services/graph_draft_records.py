@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 
 from lab_tracker.auth import AuthContext
 from lab_tracker.errors import NotFoundError, OpaqueTargetNotFoundError
+from lab_tracker.graph_draft_triage import TRIAGE_SUMMARY_KEY, review_triage
 from lab_tracker.member_onboarding import COMPLETED_AT_KEY, FIRST_CAPTURE_NOTE_ID_KEY
 from lab_tracker.models import (
     GraphChangeSet,
@@ -29,6 +30,10 @@ def _refresh_operation_counts(change_set: GraphChangeSet) -> None:
     """Derive the list-view tallies from the loaded operations before a save."""
     change_set.operation_count = len(change_set.operations)
     change_set.deferred_count = deferred_operation_count(change_set.operations)
+    change_set.review_metadata = {
+        **change_set.review_metadata,
+        TRIAGE_SUMMARY_KEY: review_triage(change_set)["summary"],
+    }
 
 
 class GraphDraftReadAuthorization(Protocol):

@@ -864,6 +864,7 @@ class GraphChangeSet(_DomainModel):
     draft_mode: GraphDraftMode = GraphDraftMode.GRAPH_CONTEXT
     purpose: GraphDraftPurpose = GraphDraftPurpose.GENERAL
     context_packet: dict[str, Any] = Field(default_factory=dict)
+    review_metadata: dict[str, Any] = Field(default_factory=dict)
     summary: str = ""
     uncertain_fields: list[str] = Field(default_factory=list)
     clarification_requests: list[str] = Field(default_factory=list)
@@ -900,6 +901,25 @@ class GraphChangeSet(_DomainModel):
     @property
     def source_note_count(self) -> int:
         return len(self.source_note_ids or [self.source_note_id])
+
+    @computed_field(return_type=dict[str, Any])
+    @property
+    def triage(self) -> dict[str, Any]:
+        from lab_tracker.graph_draft_triage import review_triage
+
+        return review_triage(self)
+
+    @computed_field(return_type=dict[str, int] | None)
+    @property
+    def triage_summary(self) -> dict[str, int] | None:
+        from lab_tracker.graph_draft_triage import TRIAGE_SUMMARY_KEY, review_triage
+
+        if self.operations:
+            return review_triage(self)["summary"]
+        # List queries deliberately do not hydrate operations. An old draft
+        # without a cached summary is unknown, never an empty review.
+        cached = self.review_metadata.get(TRIAGE_SUMMARY_KEY)
+        return cached if isinstance(cached, dict) else None
 
     @computed_field
     @property

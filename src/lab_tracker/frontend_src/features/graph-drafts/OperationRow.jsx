@@ -14,6 +14,7 @@ import {
   statusClass,
 } from "./format.js";
 import { ReasonChips } from "./ReasonChips.jsx";
+import { DictateText } from "./DictateText.jsx";
 import { SourceArtifactEvidence } from "./SourceArtifactEvidence.jsx";
 
 // Presentational per-proposal editor: proposal body, evidence, typed and raw
@@ -45,6 +46,7 @@ function OperationRow({
   onRequestReason,
   onChooseReason,
   onCancelReason,
+  showDecisionActions = true,
 }) {
   const parsed = parsedPayloadFromText(payloadText) || operation.payload || {};
   const proposed =
@@ -174,6 +176,14 @@ function OperationRow({
                 </label>
               );
             })}
+            {showDecisionActions === false && ("text" in parsed || "raw_content" in parsed || "statement" in parsed) ? (
+              <DictateText disabled={!canEditDraft || pending} onText={(text) =>
+                onPatchOperationPayload(operation, (payload) => ({
+                  ...payload,
+                  ["statement" in payload ? "statement" : "text" in payload ? "text" : "raw_content"]: text,
+                }))
+              } />
+            ) : null}
             <details className="context-details advanced-json">
               <summary>Payload JSON (advanced)</summary>
               <label>
@@ -212,7 +222,7 @@ function OperationRow({
           </div>
         </details>
       </div>
-      <aside className="review-proposal-actions">
+      {showDecisionActions ? <aside className="review-proposal-actions">
         <span className={statusClass(operation.status)}>{operation.status}</span>
         {operation.acceptance_mode === "auto_accepted" ? (
           <span
@@ -259,7 +269,7 @@ function OperationRow({
             onCancel={onCancelReason}
           />
         ) : null}
-      </aside>
+      </aside> : null}
     </div>
   );
 }

@@ -1,5 +1,9 @@
 # Make the daily review run on its own
 
+Daily reviews open in a decision-first [triage flow](review-triage.md), with grouped
+confirmations, answerable clarifications, saved deferrals, and a catch-up view across
+pending reviews. Project owners can inspect participation on Daily review.
+
 Lab Tracker's **daily review** gathers your staged captures (notes, photos, voice
 memos — including notes tagged as meetings) and proposes how they fit your graph,
 in one review queue you accept or reject. It can run **on demand** (the **Run

@@ -2545,10 +2545,14 @@ def test_batch_draft_packet_is_reviewer_scoped_to_the_run_assignee(
         == "Do pooled notes support a merged observation?"
     )
     assert memory["recent_rejections"] == []
+    assert [item["change_set_id"] for item in memory["recent_draft_context"]] == [
+        first_run["change_set_id"]
+    ]
     assert summary["review_memory"] == {
         "reviewer_scoped": True,
         "pending_proposals": 1,
         "recent_rejections": 0,
+        "recent_draft_context": 1,
         "pending_proposals_truncated": False,
     }
     assert summary["counts"]["pending_proposals"] == 1
@@ -2557,6 +2561,9 @@ def test_batch_draft_packet_is_reviewer_scoped_to_the_run_assignee(
     other_memory, _ = review_memory(later_second["change_set_id"])
     assert other_memory["reviewer_user_id"] == second_user_id
     assert [item["change_set_id"] for item in other_memory["pending_proposals"]] == [
+        second_run["change_set_id"]
+    ]
+    assert [item["change_set_id"] for item in other_memory["recent_draft_context"]] == [
         second_run["change_set_id"]
     ]
     # The model saw the same reviewer-scoped memory the packet persisted.
