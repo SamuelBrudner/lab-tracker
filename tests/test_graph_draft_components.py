@@ -17,6 +17,7 @@ from lab_tracker.capture_setup_catalog import (
     capture_setup_items_schema,
 )
 from lab_tracker.errors import NotFoundError, ValidationError
+from lab_tracker.graph_draft_triage import TRIAGE_CLARIFICATIONS_KEY, clarification_id
 from lab_tracker.graph_drafting import (
     _GRAPH_DRAFT_ENTITY_TYPES,
     ANALYSIS_PROMPT_VERSION,
@@ -65,6 +66,8 @@ from lab_tracker.services.graph_draft_context import (
     CUE_TERM_LIMIT,
     PENDING_PROPOSALS_CHAR_BUDGET,
     PENDING_PROPOSALS_ITEM_LIMIT,
+    RECENT_DRAFT_CONTEXT_CHAR_BUDGET,
+    RECENT_DRAFT_CONTEXT_ITEM_LIMIT,
     RECENT_REJECTIONS_ITEM_LIMIT,
     REVIEW_MEMORY_NOT_SCOPED_WARNING,
     REVIEW_MEMORY_NOTE_MAX_CHARS,
@@ -266,9 +269,9 @@ def test_graph_patch_response_schema_requires_non_empty_source_note_ids() -> Non
 
 
 def test_graph_draft_prompt_versions_and_source_ref_contract_are_updated() -> None:
-    assert PROMPT_VERSION == "multimodal-graph-draft-v4"
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v10"
-    assert ANALYSIS_PROMPT_VERSION == "analysis-graph-draft-v4"
+    assert PROMPT_VERSION == "multimodal-graph-draft-v5"
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v11"
+    assert ANALYSIS_PROMPT_VERSION == "analysis-graph-draft-v5"
     for instructions in (_instructions(), _batch_instructions(), _analysis_instructions()):
         assert "source_note_ids" in instructions
         assert "never invent" in instructions.lower()
@@ -1179,7 +1182,21 @@ def test_batch_instructions_are_narrative_first_with_terse_capture_guardrail() -
     assert "observed_at_source" in instructions
     assert "still raise clarification_requests" in instructions
     # The summary contract changed (now a narrative), so the version bumps.
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v10"
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v11"
+
+
+@pytest.mark.parametrize(
+    "instructions", [_instructions, _batch_instructions, _analysis_instructions]
+)
+def test_draft_instructions_open_with_actionable_uncertainty_context(instructions) -> None:
+    prose = instructions()
+    assert "Begin the summary with one or two short prose paragraphs" in prose
+    assert "missing or conflicting context" in prose
+    assert "concrete question or a practical workflow recommendation" in prose
+    assert "Do not invent uncertainty" in prose
+    assert "review_memory.recent_draft_context" in prose
+    assert "instead of asking the same answered question again" in prose
+    assert "does not automatically apply to a new capture" in prose
 
 
 def test_semantic_types_match_domain_enum() -> None:
@@ -1272,9 +1289,9 @@ def test_instructions_explain_negative_knowledge_labels() -> None:
     assert "exploration_node entities" in instructions
     assert "never use these labels to delete or hide information" in prose.lower()
     assert "exploration_node" in _analysis_instructions()
-    # Prompt text changed without a version bump (binding decision for this wave).
-    assert PROMPT_VERSION == "multimodal-graph-draft-v4"
-    assert ANALYSIS_PROMPT_VERSION == "analysis-graph-draft-v4"
+    # Both prompt versions identify the opening-context contract.
+    assert PROMPT_VERSION == "multimodal-graph-draft-v5"
+    assert ANALYSIS_PROMPT_VERSION == "analysis-graph-draft-v5"
 
 
 def test_batch_instructions_carry_review_memory_guidance() -> None:
@@ -1291,7 +1308,7 @@ def test_batch_instructions_carry_review_memory_guidance() -> None:
     assert pending_sentence in instructions
     assert "review_memory.recent_rejections" in instructions
     assert rejection_sentence in instructions
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v10"
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v11"
 
     batch_context = {
         "batch_notes": [{"note_id": "source-1", "raw_content": "Observed result"}],
@@ -1654,10 +1671,10 @@ def test_prompt_instructions_and_response_schema_include_resolve_prediction() ->
     assert contract["entity_type"] == "claim"
     assert contract["controlled_values"] == {"status": ["supported", "rejected"]}
     assert contract["when_rejected_required_fields"] == ["terminal_reason"]
-    # Batch v10 adds metadata/target guidance; the other prompts retain their identities.
-    assert PROMPT_VERSION == "multimodal-graph-draft-v4"
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v10"
-    assert ANALYSIS_PROMPT_VERSION == "analysis-graph-draft-v4"
+    # All draft prompts now include the opening-context contract.
+    assert PROMPT_VERSION == "multimodal-graph-draft-v5"
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v11"
+    assert ANALYSIS_PROMPT_VERSION == "analysis-graph-draft-v5"
 
 
 def _resolve_prediction(payload: dict[str, Any], **overrides: Any) -> GraphChangeOperation:
@@ -1992,6 +2009,7 @@ def test_batch_packet_review_memory_lists_reviewer_pending_proposals() -> None:
         "reviewer_scoped": True,
         "pending_proposals": 3,
         "recent_rejections": 0,
+        "recent_draft_context": 0,
         "pending_proposals_truncated": False,
     }
     assert REVIEW_MEMORY_NOT_SCOPED_WARNING not in summary["warnings"]
@@ -2117,6 +2135,96 @@ def test_batch_packet_review_memory_recent_rejections_are_reviewer_and_window_sc
     }
 
 
+def test_recent_draft_context_preserves_openings_and_attributed_answers_with_scope() -> None:
+    project_id, reviewer = uuid4(), uuid4()
+    now = utc_now()
+    prior = _review_change_set(
+        project_id, status=GraphChangeSetStatus.COMMITTED, review_assignee_user_id=reviewer
+    )
+    prior.summary = "I could not place capture A. Record a session target next time.\n\nThe day..."
+    prior.uncertain_fields = ["Capture A has no session target"]
+    question = "Which session does capture A belong to?"
+    prior.clarification_requests = [question, "What does the label B mean?"]
+    prior.updated_at = now - timedelta(hours=1)
+    prior.review_metadata = {
+        TRIAGE_CLARIFICATIONS_KEY: {
+            clarification_id(question): {
+                "status": "answered", "answer": "The afternoon session",
+                "reviewed_by": str(reviewer), "reviewed_at": now.isoformat(),
+            },
+        },
+    }
+    omitted = []
+    for project, assignee, status, age in [
+        (project_id, uuid4(), GraphChangeSetStatus.READY, 0),
+        (uuid4(), reviewer, GraphChangeSetStatus.READY, 0),
+        (project_id, reviewer, GraphChangeSetStatus.FAILED, 0),
+        (project_id, reviewer, GraphChangeSetStatus.READY, 15),
+    ]:
+        draft = _review_change_set(project, status=status, review_assignee_user_id=assignee)
+        draft.summary = "Outside this run's history"
+        draft.updated_at = now - timedelta(days=age)
+        omitted.append(draft)
+    builder = _review_memory_builder([])
+    memory = builder.build_review_memory(
+        project_ids={project_id}, context_owner=BatchReviewer(str(reviewer), reviewer),
+        now=now, change_sets=[prior, *omitted],
+    )
+    history = memory["recent_draft_context"]
+    assert len(history) == 1
+    assert history[0]["summary"] == prior.summary
+    assert history[0]["uncertain_fields"] == prior.uncertain_fields
+    assert history[0]["source_note_ids"] == [str(prior.source_note_id)]
+    assert history[0]["clarifications"][0] == {
+        "question": question, "status": "answered", "answer": "The afternoon session",
+        "reviewed_by": str(reviewer), "reviewed_at": now.isoformat(),
+    }
+    assert history[0]["clarifications"][1]["status"] == "unanswered"
+    assert history[0]["clarifications"][1]["answer"] is None
+    # Assembly must leave the stored generation input and source material untouched.
+    assert prior.context_packet == {}
+    assert prior.clarification_requests == [question, "What does the label B mean?"]
+
+
+def test_recent_draft_context_bounds_history_text_and_total_json() -> None:
+    project_id, reviewer = uuid4(), uuid4()
+    now = utc_now()
+    drafts = []
+    for index in range(RECENT_DRAFT_CONTEXT_ITEM_LIMIT + 2):
+        draft = _review_change_set(
+            project_id, status=GraphChangeSetStatus.READY, review_assignee_user_id=reviewer
+        )
+        draft.summary = f"Draft {index}: " + "s" * 4_000
+        draft.updated_at = now - timedelta(minutes=index)
+        drafts.append(draft)
+    builder = _review_memory_builder([])
+    owner = BatchReviewer(str(reviewer), reviewer)
+    history = builder.build_review_memory(
+        project_ids={project_id}, context_owner=owner, now=now, change_sets=drafts
+    )["recent_draft_context"]
+    assert len(history) == RECENT_DRAFT_CONTEXT_ITEM_LIMIT
+    assert history[0]["change_set_id"] == str(drafts[0].change_set_id)
+    assert len(history[0]["summary"]) == 2_000
+
+    question = "Which session? " + "q" * 1_000
+    for draft in drafts:
+        draft.uncertain_fields = ["u" * 1_000] * 10
+        draft.clarification_requests = [question + str(i) for i in range(10)]
+        draft.review_metadata = {TRIAGE_CLARIFICATIONS_KEY: {
+            clarification_id(q): {"status": "answered", "answer": "a" * 4_000}
+            for q in draft.clarification_requests
+        }}
+    history = builder.build_review_memory(
+        project_ids={project_id}, context_owner=owner, now=now, change_sets=drafts
+    )["recent_draft_context"]
+    assert 0 < len(history) < RECENT_DRAFT_CONTEXT_ITEM_LIMIT
+    assert len(json.dumps(history, sort_keys=True)) <= RECENT_DRAFT_CONTEXT_CHAR_BUDGET
+    assert len(history[0]["uncertain_fields"]) == 5
+    assert len(history[0]["clarifications"]) == 5
+    assert len(history[0]["clarifications"][0]["question"]) == 500
+    assert len(history[0]["clarifications"][0]["answer"]) == 1_000
+
+
 def test_review_memory_reuses_change_sets_the_builder_already_loaded() -> None:
     project_id, reviewer = uuid4(), uuid4()
     older = _review_change_set(
@@ -2167,6 +2275,7 @@ def test_batch_packet_review_memory_without_reviewer_is_empty_and_flagged() -> N
         "pending_proposals": [],
         "pending_proposals_truncated": False,
         "recent_rejections": [],
+        "recent_draft_context": [],
     }
 
     assert (

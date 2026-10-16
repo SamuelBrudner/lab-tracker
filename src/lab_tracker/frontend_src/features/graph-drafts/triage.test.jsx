@@ -26,6 +26,25 @@ function mount(draft, routes = [], props = {}) {
 }
 
 describe("default review triage", () => {
+  it("opens every review view with the drafter's context before the decisions", async () => {
+    const draft = fixture();
+    const opening = "I could not place capture A because its session was missing.";
+    const recommendation = "Which session was it? Record a session target next time.";
+    draft.summary = `${opening}\n\n${recommendation}\n\nAccount of the day`;
+    mount(draft);
+    const context = await screen.findByRole("region", { name: "Draft context" });
+    const triage = screen.getByRole("region", { name: "Review triage" });
+    expect(context).toBeVisible();
+    expect(context.querySelectorAll("p")).toHaveLength(3);
+    expect(context).toHaveTextContent(recommendation);
+    expect(context.compareDocumentPosition(triage) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    for (const view of ["Proposals", "Narrative", "Triage"]) {
+      fireEvent.click(screen.getByRole("button", { name: view, exact: true }));
+      expect(screen.getByRole("region", { name: "Draft context" })).toBeVisible();
+      expect(screen.getAllByText(opening)).toHaveLength(1);
+    }
+  });
+
   it("presents a meaningful decision and atomically keeps only its related edits", async () => {
     const draft = fixture();
     let body;

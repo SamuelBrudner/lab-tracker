@@ -4,6 +4,21 @@ Daily reviews open in **Triage**. The screen asks one meaningful question at a
 time, showing the proposed change and its source evidence. **Proposals** and
 **Narrative** remain available for a full inspection.
 
+Each newly generated draft starts with a short prose explanation of what the
+drafter could not resolve: the captures involved, missing or conflicting context,
+and the placements or interpretations left open. It pairs these gaps with specific
+questions or practical recommendations about what to record next time. When the
+context is sufficient, the opening says so briefly. This opening and the account
+of the work appear above the controls in every review view.
+
+Future batch and graph-context drafting runs receive recent draft openings,
+unresolved fields, and clarification questions with saved human answers, dates,
+and attribution. This history is scoped to the same reviewer and current projects,
+includes at most five drafts updated in the last 14 days, and has bounded text and
+an overall 16,000-character JSON budget. Prior prose remains draft context; it does
+not establish a finding or confirm that a suggested workflow change happened.
+Answers about past captures apply only where relevant to the new evidence.
+
 ## Where attention goes
 
 **Needs your judgment** contains new scientific meaning, consequential changes
@@ -41,6 +56,7 @@ remains available when dictation is unavailable.
 Clarifications have **Your answer**, **Save answer**, and **Later** actions. Answers
 are dated and attributed in `review_metadata`; answering does not accept a graph
 edit or rewrite the source capture. Browser dictation is also available for answers.
+Saved answers are included in the recent draft context used by later drafting runs.
 The provider's `context_packet` remains the generation input; human review state
 and cached queue counts are stored separately.
 

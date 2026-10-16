@@ -9,23 +9,6 @@ import {
 } from "./format.js";
 import { ReasonChips } from "./ReasonChips.jsx";
 
-function SummaryParagraphs({ summary }) {
-  if (!summary) {
-    return null;
-  }
-  return (
-    <div className="review-narrative-summary">
-      {String(summary)
-        .split(/\n{2,}/)
-        .map((paragraph) => paragraph.trim())
-        .filter(Boolean)
-        .map((paragraph, index) => (
-          <p key={index}>{paragraph}</p>
-        ))}
-    </div>
-  );
-}
-
 function ProposalCitation({
   operation,
   index,
@@ -214,7 +197,6 @@ function NarrativeReview({
         graph edit. Hover, focus, or click a citation to inspect it, make a decision, or leave
         a note.
       </p>
-      <SummaryParagraphs summary={changeSet.summary} />
       <div className="review-narrative-prose">
         {operations.length === 0 ? (
           <p>No graph edits were proposed in this draft.</p>
