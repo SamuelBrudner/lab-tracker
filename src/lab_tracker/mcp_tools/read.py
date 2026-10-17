@@ -901,8 +901,9 @@ def lab_tracker_next_questions(
     Call this when the user asks what research thread to advance or when a
     fresh session needs an obvious entry action. The ranking favors direct
     goal-question links, active questions, and questions with hypotheses.
-    A question counts as answered only when a supported claim answers it. When
-    any goal, question, or claim list is too large to load in full,
+    A question counts as answered only when a claim whose effective_status is
+    supported answers it; a contested, superseded or invalidated claim does
+    not. When any goal, question, or claim list is too large to load in full,
     ``meta.inputs_truncated`` is true and ``meta.truncated_inputs`` names the
     cut lists and why (``row_cap`` or ``list_changed_while_paging``), so the
     ranking may be incomplete.

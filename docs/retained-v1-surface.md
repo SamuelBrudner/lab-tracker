@@ -497,13 +497,16 @@ research record:
   See [ara-exploration-graph-design.md](ara-exploration-graph-design.md).
 - A per-project publication-readiness report
   (`GET /projects/{project_id}/publication-readiness`) that scans the retained
-  graph for gaps before write-up — supported claims missing dataset/analysis
-  evidence or falsification criteria, supported claims that are contested,
-  superseded, or invalidated by later claims or committed pivots (blocking),
-  answered questions without committed dataset evidence, broken
-  external-artifact references, and testing predictions older than 30 days
-  whose question already has committed data (`stale_predictions`, advisory
-  only — it never changes `seal_level`).
+  graph for gaps before write-up — supported claims missing falsification
+  criteria or a directly cited committed dataset or analysis (staged or
+  archived evidence, and an analysis's own inputs, do not count), supported
+  claims that are contested, superseded, or invalidated by later claims or
+  committed pivots, answered questions without committed dataset evidence,
+  links to records missing from the project, broken external-artifact
+  references, and testing predictions older than 30 days whose question
+  already has committed data. Any gap except those stale predictions
+  (`stale_predictions`, advisory only) sets `seal_level` to `blocked`; a
+  project with none seals `ara_l1`.
 - A per-project draft-quality ledger
   (`GET /projects/{project_id}/draft-quality?since=<ISO 8601 with offset>`,
   MCP read tool `lab_tracker_draft_quality`) computed only from stored

@@ -281,9 +281,9 @@ star: Lab Tracker already stores that object, so its role becomes the "Live
 Research Manager" that compiles a project's history into a layered artifact
 (`/logic /src /trace /evidence`) with cross-layer forensic bindings and a
 structural `ara_l1` readiness seal. A per-project **publication-readiness report**
-scans the graph for gaps before write-up — supported claims lacking evidence or
-falsification criteria, answered questions without committed data, broken external
-references. In keeping with pointer-not-reimplementation, Lab Tracker owns the
+scans the graph for gaps before write-up — supported claims lacking committed
+evidence or falsification criteria, answered questions without committed data,
+broken external references. In keeping with pointer-not-reimplementation, Lab Tracker owns the
 semantic edges, lessons, agency tags, and the compile itself, but does _not_
 reimplement ARA's code kernel, compiler, or full seal certificate. The
 session-end retrospective harvester shipped on 2026-09-28 as an opt-in coding-agent

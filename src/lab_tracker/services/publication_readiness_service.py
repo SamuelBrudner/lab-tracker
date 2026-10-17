@@ -11,6 +11,7 @@ from lab_tracker.auth import AuthContext
 from lab_tracker.claim_effective_status import ClaimInterpretation, interpret_claims
 from lab_tracker.models import (
     Analysis,
+    AnalysisStatus,
     Claim,
     ClaimEffectiveStatus,
     ClaimStatus,
@@ -111,7 +112,7 @@ class PublicationReadinessService(BaseService):
             analyses=analyses,
         )
         committed_question_ids = _committed_dataset_question_ids(datasets)
-        unsupported_claims = _unsupported_claims(claims)
+        unsupported_claims = _unsupported_claims(claims, datasets=datasets, analyses=analyses)
         contested_claims = _contested_claims(claims, interpretations)
         stale_predictions = _stale_predictions(
             claims,
@@ -180,7 +181,16 @@ class PublicationReadinessService(BaseService):
 
 def _unsupported_claims(
     claims: list[Claim],
+    *,
+    datasets: list[Dataset],
+    analyses: list[Analysis],
 ) -> list[PublicationReadinessUnsupportedClaim]:
+    committed_dataset_ids = {
+        dataset.dataset_id for dataset in datasets if dataset.status == DatasetStatus.COMMITTED
+    }
+    committed_analysis_ids = {
+        analysis.analysis_id for analysis in analyses if analysis.status == AnalysisStatus.COMMITTED
+    }
     unsupported: list[PublicationReadinessUnsupportedClaim] = []
     for claim in claims:
         if claim.status != ClaimStatus.SUPPORTED:
@@ -192,6 +202,20 @@ def _unsupported_claims(
                     statement=claim.statement,
                     status=claim.status,
                     reason="Supported claim has no dataset or analysis evidence.",
+                )
+            )
+        elif not (
+            committed_dataset_ids.intersection(claim.supported_by_dataset_ids)
+            or committed_analysis_ids.intersection(claim.supported_by_analysis_ids)
+        ):
+            # Only directly cited evidence counts, and staged or archived
+            # evidence is not part of the sealed record.
+            unsupported.append(
+                PublicationReadinessUnsupportedClaim(
+                    claim_id=claim.claim_id,
+                    statement=claim.statement,
+                    status=claim.status,
+                    reason="Supported claim cites no committed dataset or analysis.",
                 )
             )
         if not claim.falsification_criteria:

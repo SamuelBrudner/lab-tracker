@@ -8,8 +8,9 @@ JsonObject = dict[str, Any]
 
 OPEN_GOAL_STATUSES = ("planned", "in_progress")
 OPEN_QUESTION_STATUSES = ("active", "staged")
-# Only a supported claim settles a question; proposed/testing claims are still
-# open work and a rejected claim means the question needs a new attempt.
+# Only a claim whose read-time effective_status is supported settles a question;
+# proposed/testing claims are still open work, and a rejected, contested,
+# superseded or invalidated claim leaves the question open.
 ANSWERING_CLAIM_STATUSES = ("supported",)
 
 RESEARCH_PROMPT_TRIGGERS = (
@@ -219,7 +220,13 @@ def _empty_payload(reason: str, truncation: JsonObject) -> JsonObject:
 def _answered_question_ids(claims: list[JsonObject]) -> set[str]:
     answered: set[str] = set()
     for claim in claims:
-        if str(claim.get("status") or "") not in ANSWERING_CLAIM_STATUSES:
+        effective_status = claim.get("effective_status")
+        if effective_status is None:
+            raise ValueError(
+                f"Claim {claim.get('claim_id')!r} has no effective_status; next-question "
+                "ranking needs claim reads (ClaimRead) from a server that derives it."
+            )
+        if str(effective_status) not in ANSWERING_CLAIM_STATUSES:
             continue
         for value in claim.get("answers_question_ids") or []:
             answered.add(str(value))
