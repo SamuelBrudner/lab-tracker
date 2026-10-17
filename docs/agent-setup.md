@@ -278,6 +278,13 @@ input, both keep their JSON output. Because detection reads stdin rather
 than a flag, repos scaffolded earlier need only a client upgrade, not
 `lt update`.
 
+The prompt hook primes only a bound project: `LAB_TRACKER_PROJECT_ID`, else
+the checkout's `lt_ids.json` (`lt project bind`). A connection profile's
+default project and a watch config do not count. In an unbound checkout it
+stays silent, so a freshly initialised repository gets no prime until it is
+bound; the `SessionStart` brief suggests `lt project bind`. The context it
+adds labels the goal and question text as untrusted data, not instructions.
+
 ### Choose your client
 
 Registration is per client, and each client reads a different file.

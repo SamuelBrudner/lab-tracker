@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import lab_tracker_client.agent_session as agent_session
 import lab_tracker_client.auth as auth_helpers
 import lab_tracker_client.autotrack_setup as autotrack_setup
 import lab_tracker_client.cli_agent as agent_cli
@@ -31,6 +32,7 @@ from lab_tracker import repository_conventions as repo_context
 from lab_tracker.assistant_next_questions import is_research_facing_prompt
 from lab_tracker_client import outbox as _outbox
 from lab_tracker_client._version import __version__
+from lab_tracker_client.capture_project import resolve_capture_project
 from lab_tracker_client.cli_hpc_epilog import add_hpc_epilog_parser
 from lab_tracker_client.cli_pipeline import add_pipeline_parsers
 from lab_tracker_client.cli_run import add_run_parsers
@@ -236,7 +238,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Read the prompt from stdin and emit nothing unless it is research-facing. "
             "A Claude Code UserPromptSubmit payload's `prompt` is classified and the "
-            "prime comes back as hookSpecificOutput.additionalContext."
+            "prime comes back as hookSpecificOutput.additionalContext, for the bound "
+            "project only (--project, LAB_TRACKER_PROJECT_ID, or the checkout's "
+            "lt_ids.json); an unbound checkout gets nothing."
         ),
     )
     prime_parser.add_argument(
@@ -2344,9 +2348,16 @@ def _cmd_prime(client: LabTracker, args: argparse.Namespace) -> Any:
             prompt = stdin
     if args.if_research_facing and not is_research_facing_prompt(prompt or ""):
         return None
-    result = client.next_questions(project_id=args.project, limit=args.limit)
     if hook is None:
-        return result
+        return client.next_questions(project_id=args.project, limit=args.limit)
+    # A hook primes only a bound project; unscoped, it would put every visible
+    # project's goals and questions into the agent's context.
+    bound = resolve_capture_project(
+        agent_session.hook_base_dir(hook.fields) / "lt_ids.json", project_id=args.project
+    )
+    if bound is None or not bound.bound:
+        return None
+    result = client.next_questions(project_id=bound.project_id, limit=args.limit)
     return hook_context.context_output(hook, hook_context.prime_context(result))
 
 
