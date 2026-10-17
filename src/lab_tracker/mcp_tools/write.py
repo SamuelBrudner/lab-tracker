@@ -662,12 +662,13 @@ def lab_tracker_record_evidence_bundle(
     later review. A non-blank idempotency_key is required whenever dry_run=false; an
     identical replay reuses the first result and conflicting key reuse is rejected.
 
-    Component inputs remain flat MCP objects. Supply dataset_id, analysis_id, claim_id,
-    viz_id/visualization_id, or note_id to reuse an existing component; otherwise supply
-    that component's create fields. With dry_run=false the graph records are committed
-    through one atomic bundle endpoint. A requested local visualization upload is a
-    client-side follow-up after that commit; an attachment failure is reported explicitly
-    and does not roll the graph records back.
+    Component inputs remain flat MCP objects. To reuse an existing component, put its
+    id inside that component's object, e.g. dataset={"dataset_id": "<uuid>"}, not beside
+    it as a top-level argument (likewise analysis_id, claim_id, viz_id/visualization_id,
+    note_id). Otherwise supply that component's create fields. With dry_run=false the
+    graph records are committed through one atomic bundle endpoint. A requested local
+    visualization upload is a client-side follow-up after that commit; an attachment
+    failure is reported explicitly and does not roll the graph records back.
 
     A stage_evidence-scoped token may only preview (dry_run=true); committing needs an
     all-scope writable token. origin applies to every component the bundle creates.
@@ -707,11 +708,12 @@ def _hosted_record_evidence_bundle(
     later review. A non-blank idempotency_key is required whenever dry_run=false; an
     identical replay reuses the first result and conflicting key reuse is rejected.
 
-    Component inputs remain flat MCP objects. Supply dataset_id, analysis_id, claim_id,
-    viz_id/visualization_id, or note_id to reuse an existing component; otherwise supply
-    that component's create fields. This hosted server never reads local files, so
-    visualization upload_file/upload_file_path are refused; record the visualization's
-    file_path locator instead.
+    Component inputs remain flat MCP objects. To reuse an existing component, put its
+    id inside that component's object, e.g. dataset={"dataset_id": "<uuid>"}, not beside
+    it as a top-level argument (likewise analysis_id, claim_id, viz_id/visualization_id,
+    note_id). Otherwise supply that component's create fields. This hosted server never
+    reads local files, so visualization upload_file/upload_file_path are refused; record
+    the visualization's file_path locator instead.
 
     A stage_evidence-scoped token may only preview (dry_run=true); committing needs an
     all-scope writable token. origin applies to every component the bundle creates.

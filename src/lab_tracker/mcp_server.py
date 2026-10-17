@@ -9,14 +9,16 @@ import os
 import re
 import secrets
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 from urllib.parse import urlparse
 
 import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import ContentBlock
 from starlette.responses import Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -269,7 +271,10 @@ def _with_update_notice(fn: Callable[..., Any], notice: str | None) -> Callable[
 
 
 class LabTrackerFastMCP(FastMCP):
-    """FastMCP server that keeps blocking tool calls off the event loop."""
+    """FastMCP server that keeps blocking tool calls off the event loop.
+
+    It also rejects arguments a tool does not declare; see ``call_tool``.
+    """
 
     def __init__(
         self,
@@ -283,6 +288,23 @@ class LabTrackerFastMCP(FastMCP):
     def add_tool(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
         tool = _with_update_notice(fn, self._client_update_notice)
         super().add_tool(_offload_blocking_tool(tool), *args, **kwargs)
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any]
+    ) -> Sequence[ContentBlock] | dict[str, Any]:
+        """Reject arguments the tool does not declare instead of dropping them.
+
+        FastMCP's argument models ignore unknown keys, so a misspelled or
+        misplaced argument would otherwise be discarded and the tool would run
+        without it. An unknown tool name is left to FastMCP's own error.
+        """
+
+        tool = self._tool_manager.get_tool(name)
+        if tool is not None:
+            unknown = sorted(set(arguments) - set(tool.parameters["properties"]))
+            if unknown:
+                raise ToolError(f"Unknown argument(s) for {name}: {', '.join(unknown)}")
+        return await super().call_tool(name, arguments)
 
 
 def probe_client_update_notice(api_settings: MCPSettings) -> str | None:

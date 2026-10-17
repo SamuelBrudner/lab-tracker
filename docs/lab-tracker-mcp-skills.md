@@ -199,6 +199,10 @@ registered `READ_TOOLS` and `WRITE_TOOLS` tuples. Do not duplicate the list in
 this document; run `python scripts/generate_lab_tracker_skill_reference.py` after
 changing MCP tool registration.
 
+Every MCP tool rejects an argument its input schema does not declare, with an
+error naming it (`Unknown argument(s) for <tool>: <names>`); such arguments used
+to be silently dropped.
+
 Decision-context tooling for assistant clients is specified in
 [`docs/mcp-decision-context-tooling.md`](mcp-decision-context-tooling.md). That
 tooling lets assistants request bounded graph context before choosing plots,
@@ -297,8 +301,10 @@ file exists.
 `lab_tracker_record_evidence_bundle` is the composite MCP authoring helper for
 one result. `dry_run` defaults to `true` and returns a reviewable plan with
 proposed creates, reused records, warnings, and idempotency behavior. Component
-objects use the existing flat MCP shape; an entity ID selects an existing record,
-while create fields request a new one. With `dry_run=false`, a non-blank
+objects use the existing flat MCP shape; an entity ID inside the component
+object, for example `dataset={"dataset_id": "<uuid>"}`, selects an existing
+record, while create fields request a new one. A top-level `dataset_id` is
+rejected, not dropped. With `dry_run=false`, a non-blank
 `idempotency_key` is required and the graph records are committed through one
 strict atomic bundle endpoint. An identical principal-scoped replay returns the
 same stable IDs; reusing the key with conflicting fields returns `409` rather
