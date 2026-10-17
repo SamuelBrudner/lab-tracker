@@ -375,6 +375,230 @@ def test_publication_readiness_flags_superseded_or_invalidated_supported_claims(
     )
 
 
+_NO_COMMITTED_EVIDENCE = "Supported claim cites no committed dataset or analysis."
+
+
+def _create_staged_dataset(
+    client: TestClient,
+    headers: dict[str, str],
+    project_id: str,
+    question_id: str,
+) -> str:
+    response = client.post(
+        "/datasets",
+        json={
+            "project_id": project_id,
+            "primary_question_id": question_id,
+            "status": "staged",
+        },
+        headers=headers,
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["data"]["dataset_id"]
+
+
+def _create_analysis(
+    client: TestClient,
+    headers: dict[str, str],
+    project_id: str,
+    dataset_ids: list[str],
+    *,
+    status: str,
+) -> str:
+    response = client.post(
+        "/analyses",
+        json={
+            "project_id": project_id,
+            "dataset_ids": dataset_ids,
+            "method_hash": "method-1",
+            "code_version": "git:abc123",
+            "status": status,
+        },
+        headers=headers,
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["data"]["analysis_id"]
+
+
+def _archive(client: TestClient, headers: dict[str, str], path: str) -> None:
+    response = client.patch(
+        path,
+        json={"status": "archived", "terminal_reason": "Withdrawn after QC review."},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+
+
+def _supported_claim_citing(
+    client: TestClient,
+    headers: dict[str, str],
+    project_id: str,
+    statement: str,
+    *,
+    dataset_ids: list[str] | None = None,
+    analysis_ids: list[str] | None = None,
+) -> str:
+    response = client.post(
+        "/claims",
+        json={
+            "project_id": project_id,
+            "statement": statement,
+            "confidence": 80,
+            "status": "supported",
+            "falsification_criteria": "A repeat dataset shows no effect.",
+            "supported_by_dataset_ids": dataset_ids or [],
+            "supported_by_analysis_ids": analysis_ids or [],
+        },
+        headers=headers,
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["data"]["claim_id"]
+
+
+def _assert_blocked_only_by_uncommitted_evidence(report: dict, claim_ids: list[str]) -> None:
+    assert sorted((item["claim_id"], item["reason"]) for item in report["unsupported_claims"]) == (
+        sorted((claim_id, _NO_COMMITTED_EVIDENCE) for claim_id in claim_ids)
+    )
+    assert report["seal_level"] == "blocked"
+    assert report["contested_claims"] == []
+    assert report["ungrounded_questions"] == []
+    assert report["orphaned_entities"] == []
+    assert report["broken_external_refs"] == []
+
+
+def test_supported_claim_citing_only_staged_evidence_blocks_the_seal(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Staged evidence")
+    question_id = _create_question(client, admin_auth_headers, project_id)
+    dataset_id = _create_staged_dataset(client, admin_auth_headers, project_id, question_id)
+    analysis_id = _create_analysis(
+        client, admin_auth_headers, project_id, [dataset_id], status="staged"
+    )
+    dataset_claim = _supported_claim_citing(
+        client,
+        admin_auth_headers,
+        project_id,
+        "Staged dataset shows the effect",
+        dataset_ids=[dataset_id],
+    )
+    analysis_claim = _supported_claim_citing(
+        client,
+        admin_auth_headers,
+        project_id,
+        "Staged analysis shows the effect",
+        analysis_ids=[analysis_id],
+    )
+
+    report = _readiness(client, admin_auth_headers, project_id)
+
+    _assert_blocked_only_by_uncommitted_evidence(report, [dataset_claim, analysis_claim])
+
+
+def test_supported_claim_citing_only_archived_evidence_blocks_the_seal(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Archived evidence")
+    question_id = _create_question(client, admin_auth_headers, project_id)
+    dataset_id = _create_committed_dataset(client, admin_auth_headers, project_id, question_id)
+    analysis_id = _create_analysis(
+        client, admin_auth_headers, project_id, [dataset_id], status="committed"
+    )
+    dataset_claim = _supported_claim_citing(
+        client,
+        admin_auth_headers,
+        project_id,
+        "Archived dataset shows the effect",
+        dataset_ids=[dataset_id],
+    )
+    analysis_claim = _supported_claim_citing(
+        client,
+        admin_auth_headers,
+        project_id,
+        "Archived analysis shows the effect",
+        analysis_ids=[analysis_id],
+    )
+    # Archiving the evidence later leaves each claim's stored status at supported.
+    _archive(client, admin_auth_headers, f"/analyses/{analysis_id}")
+    _archive(client, admin_auth_headers, f"/datasets/{dataset_id}")
+
+    report = _readiness(client, admin_auth_headers, project_id)
+
+    _assert_blocked_only_by_uncommitted_evidence(report, [dataset_claim, analysis_claim])
+
+
+def test_supported_claim_citing_a_staged_analysis_of_committed_data_blocks_the_seal(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Staged analysis of sealed data")
+    question_id = _create_question(client, admin_auth_headers, project_id)
+    dataset_id = _create_committed_dataset(client, admin_auth_headers, project_id, question_id)
+    analysis_id = _create_analysis(
+        client, admin_auth_headers, project_id, [dataset_id], status="staged"
+    )
+    # Only direct citations count: the analysis's committed input is not cited by the claim.
+    claim_id = _supported_claim_citing(
+        client,
+        admin_auth_headers,
+        project_id,
+        "Staged analysis of committed data shows the effect",
+        analysis_ids=[analysis_id],
+    )
+
+    report = _readiness(client, admin_auth_headers, project_id)
+
+    _assert_blocked_only_by_uncommitted_evidence(report, [claim_id])
+
+
+def test_supported_claim_with_any_committed_evidence_is_not_flagged(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Mixed evidence")
+    question_id = _create_question(client, admin_auth_headers, project_id)
+    committed_dataset_id = _create_committed_dataset(
+        client, admin_auth_headers, project_id, question_id
+    )
+    staged_dataset_id = _create_staged_dataset(client, admin_auth_headers, project_id, question_id)
+    committed_analysis_id = _create_analysis(
+        client, admin_auth_headers, project_id, [committed_dataset_id], status="committed"
+    )
+    staged_analysis_id = _create_analysis(
+        client, admin_auth_headers, project_id, [committed_dataset_id], status="staged"
+    )
+    _supported_claim_citing(
+        client,
+        admin_auth_headers,
+        project_id,
+        "Committed and staged datasets show the effect",
+        dataset_ids=[committed_dataset_id, staged_dataset_id],
+    )
+    _supported_claim_citing(
+        client,
+        admin_auth_headers,
+        project_id,
+        "Committed analysis and staged dataset show the effect",
+        dataset_ids=[staged_dataset_id],
+        analysis_ids=[committed_analysis_id],
+    )
+    _supported_claim_citing(
+        client,
+        admin_auth_headers,
+        project_id,
+        "Committed dataset and staged analysis show the effect",
+        dataset_ids=[committed_dataset_id],
+        analysis_ids=[staged_analysis_id],
+    )
+
+    report = _readiness(client, admin_auth_headers, project_id)
+
+    assert report["unsupported_claims"] == []
+    assert report["seal_level"] == "ara_l1"
+
+
 def _rewind_created_at(client: TestClient, claim_id: str, *, days: int) -> None:
     with client.app.state.db_session_factory() as session:
         session.execute(

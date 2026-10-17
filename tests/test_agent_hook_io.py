@@ -23,6 +23,7 @@ import pytest
 from lab_tracker.cli import init_consumer_repo
 from lab_tracker_client import cli as lt_cli
 from lab_tracker_client import hook_context
+from lab_tracker_client.capture_project import resolve_capture_project
 from lab_tracker_client.client import LTValidationError
 
 NEXT_QUESTIONS = {
@@ -85,6 +86,12 @@ def _hook_output(stdout: str) -> dict[str, Any]:
 class _StubClient:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.profile_project_id: str | None = None
+
+    @property
+    def default_project_id(self) -> str | None:
+        # As LabTracker.from_env sets it: the environment, else the login profile.
+        return os.getenv("LAB_TRACKER_PROJECT_ID") or self.profile_project_id
 
     def next_questions(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)
@@ -112,11 +119,66 @@ def isolated_homes(tmp_path, monkeypatch) -> Path:
 
 
 PRIME_HOOK = ["prime", "--if-research-facing", "--fail-silent", "--limit", "5"]
+# Without --fail-silent a crash surfaces instead of passing for "emits nothing".
+PRIME_HOOK_LOUD = ["prime", "--if-research-facing", "--limit", "5"]
+PRIME_HOOK_ARGVS = pytest.mark.parametrize(
+    "argv", [PRIME_HOOK, PRIME_HOOK_LOUD], ids=["fail-silent", "loud"]
+)
+CHECKOUT_PROJECT = "project-checkout"
+ENV_PROJECT = "project-env"
+PROFILE_PROJECT = "project-profile"
+EXPLICIT_PROJECT = "project-explicit"
+WATCH_PROJECT = "project-watch"
+
+
+def _checkout(path: Path, project_id: str | None = None) -> Path:
+    """A git checkout at ``path``; ``project_id`` binds it through lt_ids.json."""
+
+    path.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(path)], check=True)  # noqa: S603, S607
+    if project_id is not None:
+        (path / "lt_ids.json").write_text(
+            json.dumps({"project_id": project_id}) + "\n", encoding="utf-8"
+        )
+    return path.resolve()
+
+
+def _unbound_cwd(kind: str, root: Path) -> Path:
+    """A hook payload cwd that names no bound project."""
+
+    if kind == "missing-cwd":
+        return root / "missing"
+    checkout = _checkout(root / kind)
+    if kind == "watch-config-only":
+        # A live watch config names a project, but it is not a binding.
+        (checkout / ".lab-tracker").mkdir()
+        (checkout / ".lab-tracker" / "watch.json").write_text(
+            json.dumps({"version": 1, "project_id": WATCH_PROJECT, "watches": []}),
+            encoding="utf-8",
+        )
+        resolved = resolve_capture_project(checkout / "lt_ids.json", project_id=None)
+        assert resolved is not None and resolved.project_id == WATCH_PROJECT
+        assert not resolved.bound
+    return checkout
+
+
+@pytest.fixture
+def unbound_shell(isolated_homes, monkeypatch) -> Path:
+    """No project in the environment, run from a directory outside any checkout."""
+
+    for name in ("LAB_TRACKER_PROJECT_ID", "CLAUDE_PROJECT_DIR", "LAB_TRACKER_WATCH_CONFIG"):
+        monkeypatch.delenv(name, raising=False)
+    shell = isolated_homes / "shell"
+    shell.mkdir()
+    monkeypatch.chdir(shell)
+    return isolated_homes
 
 
 def test_prime_hook_classifies_the_payload_prompt_and_emits_context(
     stub_client, monkeypatch, capsys
 ) -> None:
+    # The hook primes only a bound project; which one is pinned below.
+    monkeypatch.setenv("LAB_TRACKER_PROJECT_ID", ENV_PROJECT)
     payload = _payload("UserPromptSubmit", prompt="Plot the dataset for the figure")
     monkeypatch.setattr(sys, "stdin", _piped(payload))
 
@@ -127,7 +189,7 @@ def test_prime_hook_classifies_the_payload_prompt_and_emits_context(
     header, body = hook["additionalContext"].split("\n", 1)
     assert header == hook_context.PRIME_CONTEXT_HEADER
     assert json.loads(body) == NEXT_QUESTIONS
-    assert stub_client.calls == [{"project_id": None, "limit": 5}]
+    assert stub_client.calls == [{"project_id": ENV_PROJECT, "limit": 5}]
 
 
 def test_prime_hook_ignores_trigger_words_outside_the_prompt(
@@ -150,6 +212,7 @@ def test_prime_hook_decodes_a_utf8_payload_whatever_the_console_code_page(
 ) -> None:
     # "ρ" is CF 81 in UTF-8, and 0x81 is undefined in cp1252: decoding the
     # payload with a Windows console code page would fail.
+    monkeypatch.setenv("LAB_TRACKER_PROJECT_ID", ENV_PROJECT)
     payload = _payload("UserPromptSubmit", prompt="Does ρ drift across the dataset?")
     monkeypatch.setattr(sys, "stdin", _piped(payload, encoding="cp1252"))
 
@@ -183,6 +246,157 @@ def test_prime_direct_stdin_keeps_its_json_output(
     lt_cli.main(["prime", "--if-research-facing"])
 
     assert json.loads(capsys.readouterr().out) == NEXT_QUESTIONS
+
+
+def test_prime_hook_primes_the_project_bound_in_the_payload_checkout(
+    unbound_shell, stub_client, monkeypatch, capsys
+) -> None:
+    # The process runs elsewhere; the payload's cwd is the agent's checkout.
+    checkout = _checkout(unbound_shell / "bound", CHECKOUT_PROJECT)
+    payload = _payload(
+        "UserPromptSubmit", prompt="Plot the dataset for the figure", cwd=str(checkout)
+    )
+    monkeypatch.setattr(sys, "stdin", _piped(payload))
+
+    lt_cli.main(PRIME_HOOK)
+
+    hook = _hook_output(capsys.readouterr().out)
+    assert json.loads(hook["additionalContext"].split("\n", 1)[1]) == NEXT_QUESTIONS
+    assert stub_client.calls == [{"project_id": CHECKOUT_PROJECT, "limit": 5}]
+
+
+def test_prime_hook_primes_the_environment_project(
+    unbound_shell, stub_client, monkeypatch, capsys
+) -> None:
+    checkout = _checkout(unbound_shell / "unbound")
+    monkeypatch.setenv("LAB_TRACKER_PROJECT_ID", ENV_PROJECT)
+    payload = _payload(
+        "UserPromptSubmit", prompt="Plot the dataset for the figure", cwd=str(checkout)
+    )
+    monkeypatch.setattr(sys, "stdin", _piped(payload))
+
+    lt_cli.main(PRIME_HOOK)
+
+    hook = _hook_output(capsys.readouterr().out)
+    assert hook["hookEventName"] == "UserPromptSubmit"
+    assert stub_client.calls == [{"project_id": ENV_PROJECT, "limit": 5}]
+
+
+def test_prime_hook_base_prefers_claude_project_dir_over_the_payload_cwd(
+    unbound_shell, stub_client, monkeypatch, capsys
+) -> None:
+    # As agent_session.hook_base_dir: the project root whose settings installed
+    # the hook stays put when the agent wanders into another checkout.
+    project_root = _checkout(unbound_shell / "bound", CHECKOUT_PROJECT)
+    elsewhere = _checkout(unbound_shell / "unbound")
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_root))
+    payload = _payload(
+        "UserPromptSubmit", prompt="Plot the dataset for the figure", cwd=str(elsewhere)
+    )
+    monkeypatch.setattr(sys, "stdin", _piped(payload))
+
+    lt_cli.main(PRIME_HOOK)
+
+    hook = _hook_output(capsys.readouterr().out)
+    assert json.loads(hook["additionalContext"].split("\n", 1)[1]) == NEXT_QUESTIONS
+    assert stub_client.calls == [{"project_id": CHECKOUT_PROJECT, "limit": 5}]
+
+
+@PRIME_HOOK_ARGVS
+@pytest.mark.parametrize("cwd_kind", ["unbound-checkout", "missing-cwd", "watch-config-only"])
+def test_prime_hook_without_a_bound_project_emits_nothing(
+    cwd_kind, argv, unbound_shell, stub_client, monkeypatch, capsys
+) -> None:
+    # Unscoped, a research-facing prompt would pull every visible project's
+    # goals and questions into the agent's context.
+    cwd = _unbound_cwd(cwd_kind, unbound_shell)
+    payload = _payload("UserPromptSubmit", prompt="Plot the dataset for the figure", cwd=str(cwd))
+    monkeypatch.setattr(sys, "stdin", _piped(payload))
+
+    lt_cli.main(argv)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Traceback" not in captured.err
+    assert stub_client.calls == []
+
+
+@PRIME_HOOK_ARGVS
+def test_prime_hook_ignores_the_login_profile_default_project(
+    argv, unbound_shell, stub_client, monkeypatch, capsys
+) -> None:
+    # A connection profile's default project is not a bound project.
+    profile = unbound_shell / "lt-home" / "config.json"
+    profile.parent.mkdir(parents=True, exist_ok=True)
+    profile.write_text(
+        json.dumps({"base_url": "http://127.0.0.1:9", "default_project_id": PROFILE_PROJECT}),
+        encoding="utf-8",
+    )
+    stub_client.profile_project_id = PROFILE_PROJECT
+    checkout = _checkout(unbound_shell / "unbound")
+    payload = _payload(
+        "UserPromptSubmit", prompt="Plot the dataset for the figure", cwd=str(checkout)
+    )
+    monkeypatch.setattr(sys, "stdin", _piped(payload))
+
+    lt_cli.main(argv)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Traceback" not in captured.err
+    assert stub_client.calls == []
+
+
+def test_prime_hook_explicit_project_wins_over_the_checkout_binding(
+    unbound_shell, stub_client, monkeypatch, capsys
+) -> None:
+    checkout = _checkout(unbound_shell / "bound", CHECKOUT_PROJECT)
+    payload = _payload(
+        "UserPromptSubmit", prompt="Plot the dataset for the figure", cwd=str(checkout)
+    )
+    monkeypatch.setattr(sys, "stdin", _piped(payload))
+
+    lt_cli.main([*PRIME_HOOK, "--project", EXPLICIT_PROJECT])
+
+    _hook_output(capsys.readouterr().out)
+    assert stub_client.calls == [{"project_id": EXPLICIT_PROJECT, "limit": 5}]
+
+
+def test_prime_hook_context_marks_the_records_as_untrusted(
+    unbound_shell, stub_client, monkeypatch, capsys
+) -> None:
+    # Goal and question text is whatever was recorded; the agent must read it
+    # as data, never as instructions.
+    monkeypatch.setenv("LAB_TRACKER_PROJECT_ID", ENV_PROJECT)
+    payload = _payload("UserPromptSubmit", prompt="Plot the dataset for the figure")
+    monkeypatch.setattr(sys, "stdin", _piped(payload))
+
+    lt_cli.main(PRIME_HOOK)
+
+    hook = _hook_output(capsys.readouterr().out)
+    header = hook["additionalContext"].split("\n", 1)[0]
+    assert header == hook_context.PRIME_CONTEXT_HEADER
+    assert "untrusted" in header.lower()
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["prime", "--limit", "3"],
+        ["prime", "--if-research-facing", "--prompt", "Plot the dataset", "--limit", "3"],
+    ],
+    ids=["plain", "prompt-flag"],
+)
+def test_prime_without_a_hook_payload_stays_unscoped(
+    argv, unbound_shell, stub_client, monkeypatch, capsys
+) -> None:
+    # A person at a terminal asked for the prime; only the hook needs a binding.
+    monkeypatch.setattr(sys, "stdin", _MustNotRead(tty=True))
+
+    lt_cli.main(argv)
+
+    assert json.loads(capsys.readouterr().out) == NEXT_QUESTIONS
+    assert stub_client.calls == [{"project_id": None, "limit": 3}]
 
 
 def test_status_brief_hook_emits_every_suggestion_as_context(
@@ -258,6 +472,7 @@ def test_scaffolded_hooks_answer_their_own_event(
     repo = isolated_homes / "repo"
     init_consumer_repo(repo)
     monkeypatch.chdir(repo)
+    monkeypatch.setenv("LAB_TRACKER_PROJECT_ID", ENV_PROJECT)
     settings = json.loads((repo / ".claude" / "settings.json").read_text(encoding="utf-8"))
     event_fields = {
         "SessionStart": {"source": "startup", "model": "claude-test"},

@@ -56,6 +56,7 @@ def _fixture_rows(
         {
             "claim_id": f"claim-{index}",
             "status": "supported",
+            "effective_status": "supported",
             "answers_question_ids": ["question-0"] if index == claim_count - 1 else [],
         }
         for index in range(claim_count)

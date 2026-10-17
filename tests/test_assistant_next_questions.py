@@ -34,6 +34,7 @@ def test_unsupported_claims_do_not_answer_a_question(claim_status: str) -> None:
         {
             "claim_id": "claim-1",
             "status": claim_status,
+            "effective_status": claim_status,
             "answers_question_ids": ["question-1"],
         }
     ]
@@ -48,6 +49,7 @@ def test_supported_claim_answers_a_question() -> None:
         {
             "claim_id": "claim-1",
             "status": "supported",
+            "effective_status": "supported",
             "answers_question_ids": ["question-1"],
         }
     ]
@@ -56,6 +58,44 @@ def test_supported_claim_answers_a_question() -> None:
 
     assert payload["data"] == []
     assert "unanswered" in payload["meta"]["empty_reason"]
+
+
+@pytest.mark.parametrize("effective_status", ["contested", "superseded", "invalidated"])
+def test_supported_claim_overturned_at_read_time_does_not_answer_a_question(
+    effective_status: str,
+) -> None:
+    claims = [
+        {
+            "claim_id": "claim-1",
+            "status": "supported",
+            "effective_status": effective_status,
+            "answers_question_ids": ["question-1"],
+        }
+    ]
+
+    payload = build_next_questions_payload([_goal()], [_question()], claims)
+
+    assert [item["question"]["question_id"] for item in payload["data"]] == ["question-1"]
+
+
+@pytest.mark.parametrize(
+    "answers_question_ids", [["question-1"], []], ids=["answers", "no-answers"]
+)
+@pytest.mark.parametrize("claim_status", ["supported", "proposed"])
+def test_claim_without_effective_status_is_rejected(
+    claim_status: str,
+    answers_question_ids: list[str],
+) -> None:
+    claims = [
+        {
+            "claim_id": "claim-1",
+            "status": claim_status,
+            "answers_question_ids": answers_question_ids,
+        }
+    ]
+
+    with pytest.raises(ValueError, match="effective_status"):
+        build_next_questions_payload([_goal()], [_question()], claims)
 
 
 def test_truncation_is_reported_only_when_the_caller_tracks_it() -> None:
