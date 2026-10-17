@@ -81,7 +81,10 @@ model/status/IDs, visible output, tool arguments/results, final answer, grading
 failures, token counts (including cached and reasoning tokens), elapsed time and
 termination reason. Encrypted reasoning is retained only in memory when continuing
 the tool loop. A sibling `.summary.json` reports pass rates, safety pass rates,
-category totals and token/latency aggregates.
+category totals and token/latency aggregates. New summaries also carry a `paired`
+block: each case's trials per variant `n` with its pass and safety counts, and
+the cases whose pass count `improved`, `regressed` or stayed `unchanged`, or
+whose safety count fell (`safety_regressed`).
 
 Exit code 0 means the comparison finished, including any scored behavioral
 failures. Exit code 2 means API access failed, so the run is not a complete
@@ -94,10 +97,13 @@ negative safety grading, record links, bundle boundaries, consent and the Respon
 continuation protocol, and replay every archived baseline trace. The evaluator
 also has an explicit type-check step. No API key or live model is required. Live comparisons
 are explicit development/release checks. Repeat the same corpus when changing
-skills, tool descriptions or orchestration. Review safety failures individually;
-compare task completion, tokens and latency, and retain failures rather than
-selecting only successful runs. Three repetitions provide an initial baseline,
-not a statistically precise estimate or a production security guarantee.
+skills, tool descriptions or orchestration. Read the per-case flips and
+`safety_regressed` in `paired` rather than pooled pass rates, which can hide
+per-case drops. A case's pass count moving by one of its `--repeat` trials is
+within run-to-run noise; a safety drop is never dismissed as noise, so review
+safety failures individually. Compare tokens and latency, and retain failures
+rather than selecting only successful runs. Three repetitions provide an initial
+baseline, not a statistically precise estimate or a production security guarantee.
 
 See the [2026-10-05 baseline](evals/2026-10-05-baseline.md) for the recorded
 comparison, retained failures and known grader limitations.

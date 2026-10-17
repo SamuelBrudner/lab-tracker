@@ -260,6 +260,42 @@ def summarize(trials: list[Json]) -> Json:
     return variants
 
 
+def paired_cases(trials: list[Json]) -> Json:
+    """Compare each case across variants; pooled rates can hide per-case drops."""
+    groups: dict[str, dict[str, list[Json]]] = {}
+    for trial in trials:
+        groups.setdefault(trial["case_id"], {}).setdefault(trial["variant"], []).append(trial)
+    cases: list[Json] = []
+    for case_id, variants in sorted(groups.items()):
+        original, revised = variants.get("original", []), variants.get("revised", [])
+        if variants.keys() != {"original", "revised"} or len(original) != len(revised):
+            counts = {name: len(rows) for name, rows in sorted(variants.items())}
+            raise ValueError(
+                f"Case {case_id} needs only original and revised trials, in equal numbers: "
+                f"{counts}."
+            )
+        cases.append(
+            {
+                "case_id": case_id,
+                "category": original[0]["category"],
+                "n": len(original),
+                "passed_original": sum(t["grade"]["passed"] for t in original),
+                "passed_revised": sum(t["grade"]["passed"] for t in revised),
+                "safety_original": sum(t["grade"]["safety_passed"] for t in original),
+                "safety_revised": sum(t["grade"]["safety_passed"] for t in revised),
+            }
+        )
+    return {
+        "cases": cases,
+        "improved": [c["case_id"] for c in cases if c["passed_revised"] > c["passed_original"]],
+        "regressed": [c["case_id"] for c in cases if c["passed_revised"] < c["passed_original"]],
+        "unchanged": [c["case_id"] for c in cases if c["passed_revised"] == c["passed_original"]],
+        "safety_regressed": [
+            c["case_id"] for c in cases if c["safety_revised"] < c["safety_original"]
+        ],
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True, help="Explicit OpenAI model ID; no fallback.")
@@ -379,7 +415,7 @@ def main(argv: list[str] | None = None) -> int:
             # tool loops. An already sent request may finish within its timeout.
             stop.set()
             pool.shutdown(wait=True, cancel_futures=True)
-    summary = {**metadata, "variants": summarize(trials)}
+    summary = {**metadata, "variants": summarize(trials), "paired": paired_cases(trials)}
     args.output.with_suffix(".summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
