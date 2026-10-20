@@ -1743,7 +1743,9 @@ def _is_transport_failure(exc: BaseException) -> bool:
         if isinstance(current, (httpx.ConnectError, httpx.TimeoutException)):
             return True
         current = current.__cause__ or current.__context__
-    if isinstance(exc, LTAPIError):
+    # Only an error the transport wrapped describes the connection; an API refusal
+    # whose advice names `lt setup connect` is not an outage.
+    if isinstance(exc, LTAPIError) and getattr(exc, "connection_diagnostic", None) is not None:
         text = str(exc).lower()
         return "connect" in text or "timeout" in text or "timed out" in text
     return False

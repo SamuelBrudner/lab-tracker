@@ -702,10 +702,9 @@ def _mcp_json_launch(root: Path) -> JsonObject | None:
         return None
     if not isinstance(entry, dict):
         return None
-    raw_env = entry.get("env")
+    raw_env = entry.get("env") if isinstance(entry.get("env"), dict) else {}
     env = {
-        str(key): expand_claude_variables(str(value), os.environ)
-        for key, value in (raw_env.items() if isinstance(raw_env, dict) else ())
+        str(key): expand_claude_variables(str(value), os.environ) for key, value in raw_env.items()
     }
     command = expand_claude_variables(str(entry.get("command") or ""), os.environ)
     merged = {**os.environ, **env}
@@ -713,34 +712,44 @@ def _mcp_json_launch(root: Path) -> JsonObject | None:
     base_url = merged[key] if key else None
     return {
         "command": command,
-        "command_found": _command_found(command) if command else None,
+        "command_found": _command_found(command, root) if command else None,
         "env": env,
         "base_url": base_url,
         "base_url_key": key,
-        "base_url_from_mcp_json": bool(key) and env.get(key) == base_url,
+        "base_url_from_mcp_json": key is not None
+        and key in raw_env
+        and not _passes_environment_through(str(raw_env[key]), key),
         "base_url_unreachable": unreachable_from_cloud(base_url) if base_url else None,
     }
 
 
-def _command_found(command: str) -> bool:
+def _passes_environment_through(raw_value: str, name: str) -> bool:
+    """Whether an entry value is ``${name}`` (or ``${name:-default}``) and the session sets it."""
+
+    reference = re.fullmatch(rf"\$\{{{re.escape(name)}(?::-[^}}]*)?\}}", raw_value.strip())
+    return reference is not None and bool(os.environ.get(name))
+
+
+def _command_found(command: str, root: Path) -> bool:
     """Whether the session's ``PATH`` starts ``command``, not the one ``uv run`` gives ``lt``.
 
-    ``uv run`` and an activated virtualenv put the project's environment first on
-    ``PATH``; Claude Code starts ``.mcp.json`` servers without it.
+    ``uv run`` and an activated project virtualenv put the checkout's environment
+    first on ``PATH``; Claude Code starts ``.mcp.json`` servers without it.
     """
 
-    path = Path(command)
-    if path.is_absolute():
-        return path.is_file()
-    return shutil.which(command, path=_session_path()) is not None
+    if Path(command).is_absolute():
+        return os.path.isfile(command)
+    return shutil.which(command, path=_session_path(root)) is not None
 
 
-def _session_path() -> str:
-    entries = os.environ.get("PATH", "").split(os.pathsep)
+def _session_path(root: Path) -> str:
+    """``PATH`` without the checkout's own virtualenv, which only ``uv run`` adds."""
+
+    entries = [entry for entry in os.environ.get("PATH", "").split(os.pathsep) if entry]
     venv = os.environ.get("VIRTUAL_ENV")
-    if venv:
+    if venv and Path(venv).resolve().is_relative_to(root.resolve()):
         bin_dir = Path(venv) / ("Scripts" if sys.platform == "win32" else "bin")
-        entries = [entry for entry in entries if entry and Path(entry) != bin_dir]
+        entries = [entry for entry in entries if Path(entry) != bin_dir]
     return os.pathsep.join(entries)
 
 
@@ -833,22 +842,26 @@ def _cloud_server_suggestions(server: JsonObject, unreachable: str | None) -> li
 
 
 def _cloud_mcp_url_suggestions(launch: JsonObject | None) -> list[str]:
-    """The ``.mcp.json`` entry's own address, when it overrides the environment's."""
+    """The ``.mcp.json`` entry's own address, when it overrides the environment's.
+
+    Only a ``LAB_TRACKER_BASE_URL`` written into the entry does: ``lt-mcp`` reads
+    that name before the legacy one, so the environment's value wins over a
+    legacy key once it is set.
+    """
 
     if launch is None or launch["base_url_unreachable"] is None:
         return []
-    if not launch["base_url_from_mcp_json"]:
+    if not launch["base_url_from_mcp_json"] or launch["base_url_key"] != BASE_URL_ENV:
         return []
     return [
-        f"The repository's `.mcp.json` starts `lt-mcp` with {launch['base_url_key']}="
+        f"The repository's `.mcp.json` starts `lt-mcp` with {BASE_URL_ENV}="
         f"{launch['base_url']}, {unreachable_reason_text(launch['base_url_unreachable'])}, "
         "and that entry overrides the cloud environment's variable. Once "
         "`LAB_TRACKER_BASE_URL` holds the public address, `lt update --dry-run` previews "
         "rewriting the file to it and `lt update` applies it; committing the result "
-        "carries it into later sessions. Computers whose saved profile names another "
-        "address for this server then need `lt setup connect --base-url <public address> "
-        "--save-token`, because `lt-mcp` sends a saved token only to the profile's own "
-        "address."
+        "carries it into later sessions. `lt-mcp` sends a saved profile's token only to "
+        "that profile's own address, so people whose profile names another address for "
+        f"this server re-save it with the public one ({CLOUD_AGENTS_DOC}, step 5)."
     ]
 
 
