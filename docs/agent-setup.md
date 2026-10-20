@@ -203,6 +203,11 @@ Coding agents reach Lab Tracker exclusively through the MCP server (`lt-mcp`),
 which is itself an HTTP client of the API — never the database. Any
 MCP-capable agent works; **which one you use is up to you.**
 
+The steps below assume the agent runs on the machine where you install `lt`.
+An agent in a cloud session, such as Claude Code on the web, runs in a fresh VM
+cloned from the repository instead; [cloud agent sessions](cloud-agents.md)
+covers the environment settings that replace these steps there.
+
 Install the exact requirement shown by the server in two places:
 
 1. `uv tool install --force "<server-pinned requirement>"` supplies the
@@ -298,6 +303,7 @@ client do not apply to it.
 | Claude Desktop chat | you, in `claude_desktop_config.json` | no |
 | Codex in the ChatGPT desktop app | you, in the app's **Settings**, or `~/.codex/config.toml` | no |
 | Codex CLI | you, with `codex mcp add`, or `~/.codex/config.toml` | no |
+| Claude Code cloud session (claude.ai/code, `claude --cloud`) | the committed repository `.mcp.json`, with `lt-mcp` installed by the cloud environment's setup script | yes, `.mcp.json` |
 
 Two rules apply in this section. The first covers the registrations you make by
 hand, Claude Desktop chat and both Codex products; the second covers all four
@@ -526,6 +532,25 @@ Verify:
    the same terminal environment that launches `codex`.
 3. In-client read: ask Codex to call `lab_tracker_list_projects` with `limit` 1.
 
+#### Cloud sessions (Claude Code on the web and hosted agents)
+
+A cloud session runs the agent in a fresh VM cloned from the repository, so
+nothing installed or saved on your computer is there. It reads the committed
+`.mcp.json`, but `lt-mcp` comes from the cloud environment's setup script, the
+server address from the environment's `LAB_TRACKER_BASE_URL` (a public HTTPS
+address, because the VM's loopback is the VM itself), and the token from a
+network secret that the environment's proxy adds outside the VM.
+[Cloud agent sessions](cloud-agents.md) walks through each setting, the check
+on the address in `.mcp.json`, and which capture outlives the VM.
+
+Verify, from a session in that environment:
+
+1. Registration check: `lt setup status` shows `cloud_session.detected` as
+   `true` and no suggestion about `.mcp.json` or the server address.
+2. Launch check: `lt setup verify-mcp --expected-revision <full-revision>`.
+3. In-client read: ask the agent to call `lab_tracker_list_projects` with
+   `limit` 1.
+
 #### Cursor and GitHub Copilot
 
 **GitHub Copilot** IDEs use a different config schema — see
@@ -704,3 +729,9 @@ For compatibility, `reachable` remains true for HTTP responses below 500,
 including authentication errors; it describes connectivity, not token validity
 or project access. These diagnostics require an updated local Lab Tracker client
 or MCP process, so upgrade the client and restart the MCP host after installing.
+
+In a cloud session, `lt setup status` also judges the address itself: a
+loopback, private-network, bare, or `.local` host is reported as one the VM
+cannot reach before any probe result, and a public host that does not answer is
+reported as either an outage or a network-access setting that does not allow
+it. See [cloud agent sessions](cloud-agents.md).

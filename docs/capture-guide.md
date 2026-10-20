@@ -85,6 +85,7 @@ The same guidance appears in `lt setup status` and in each repository checked by
 | Let an assistant read the record before research decisions | Connect the MCP server | [Agent setup](agent-setup.md) |
 | Keep the reasoning from coding-agent sessions | `lt setup agent-hooks --yes` (your personal settings only) | [Agent session capture](agent-session-capture.md) |
 | Have files an agent writes into a watched folder captured at once | Included in the agent hooks (`lt watch touch`) | [Agent session capture](agent-session-capture.md) |
+| Use Lab Tracker from an agent in a cloud session (Claude Code on the web) | The cloud environment's setup script, server address, and network secret | [Cloud agent sessions](cloud-agents.md) |
 
 ## Server capture channels (operators)
 

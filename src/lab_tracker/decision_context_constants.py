@@ -76,6 +76,23 @@ CLIENT_MAINTENANCE_POLICY = (
 )
 
 
+CLOUD_SESSION_POLICY = (
+    "In a cloud session (a VM cloned from the repository for the task, such as "
+    "Claude Code on the web, where `CLAUDE_CODE_REMOTE=true`), nothing from the "
+    "person's computer is present and the VM is discarded later. If `lt` or "
+    "`lt-mcp` is missing there, or the Lab Tracker server is unreachable, do not "
+    "start `lab-tracker serve` in the VM and never ask for a token in the chat. "
+    "Name the cloud environment setting that is missing (a setup script that "
+    "installs the server-pinned client, `LAB_TRACKER_BASE_URL` set to the lab "
+    "server's public HTTPS address, network access to that host, or a network "
+    "secret or environment variable that carries the token), point to "
+    "`docs/cloud-agents.md` in the Lab Tracker repository, and proceed without "
+    "graph context. Before finishing a cloud session that captured anything, run "
+    "`lt outbox sync`, then `lt outbox status`: an unsynced capture is lost with "
+    "the VM."
+)
+
+
 EMPTY_PROJECT_ORIENTATION_POLICY = (
     "When a project has no records yet, the graph overview and decision context "
     "return a `suggest_orientation_checkpoint` next action. Say so, and suggest "
@@ -132,6 +149,7 @@ MCP_SERVER_INSTRUCTIONS = " ".join(
         EMPTY_PROJECT_ORIENTATION_POLICY,
         AGENT_SESSION_CAPTURE_DISCOVERY_POLICY,
         CLIENT_MAINTENANCE_POLICY,
+        CLOUD_SESSION_POLICY,
     )
 )
 
@@ -185,6 +203,8 @@ def managed_agent_activation_block() -> str:
             "If Lab Tracker is unavailable or ambiguous, say that explicitly and "
             "proceed without graph context. Do not create or mutate Lab Tracker "
             "records unless the user explicitly asks.",
+            "",
+            CLOUD_SESSION_POLICY,
             "",
             EMPTY_PROJECT_ORIENTATION_POLICY,
             "",

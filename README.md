@@ -267,7 +267,8 @@ Any MCP-capable coding agent can read the same permission-bounded context.
 the same across vendors: agents may suggest and stage when asked, but they do
 not operate the human commit gate. Follow the
 [AI and agent setup guide](docs/agent-setup.md) for credentials, scheduling,
-MCP, and verification.
+MCP, and verification, and [cloud agent sessions](docs/cloud-agents.md) when the
+agent runs in a cloud VM such as Claude Code on the web.
 
 ## Documentation
 
@@ -288,6 +289,7 @@ MCP, and verification.
   [HPC](docs/hpc-analysis-capture.md) ·
   [repository commits](docs/repo-report-capture.md) ·
   [coding-agent sessions](docs/agent-session-capture.md) ·
+  [cloud agent sessions](docs/cloud-agents.md) ·
   [server capture channels](docs/server-capture-channels.md) ·
   [session suggestions](docs/session-suggestions.md) ·
   [provenance export](docs/provenance-export.md)

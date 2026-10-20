@@ -78,6 +78,12 @@ watched-file captures for human review, with a bound project and a Read + stage
 evidence connection required for delivery. The full transcript stays local.
 See [capture and integration](references/capture.md) for every capture path.
 
+In a cloud session (`CLAUDE_CODE_REMOTE=true`), the VM is cloned from the
+repository and discarded later. `lt setup status` names the missing cloud
+environment settings for the person to change; never start a local server in
+the VM or ask for a token in the chat. Run `lt outbox sync`, then
+`lt outbox status`, before a cloud session that captured anything ends.
+
 For upkeep, doctor and MCP update notices prescribe a server-pinned
 `lt maintain --all --upgrade-client --revision <full-server-revision>
 --refresh-skills --dry-run`; review before applying the matching `--yes` command.

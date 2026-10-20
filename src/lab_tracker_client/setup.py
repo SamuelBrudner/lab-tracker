@@ -24,6 +24,7 @@ import time
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, NamedTuple
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -32,8 +33,10 @@ import lab_tracker_client.watch as watch_capture
 from lab_tracker.client_release import (
     ReleaseComparison,
     ReleaseIdentity,
+    client_install_command,
     installed_release,
     installed_source_revision,
+    normalized_revision,
     release_from_health,
     update_steps,
 )
@@ -49,6 +52,12 @@ from lab_tracker_client.client import (
     LTValidationError,
     connection_profile_path,
     load_connection_profile,
+)
+from lab_tracker_client.cloud_session import (
+    CLOUD_AGENTS_DOC,
+    cloud_session,
+    unreachable_from_cloud,
+    unreachable_reason_text,
 )
 from lab_tracker_client.connection_diagnostics import ConnectionTrace
 from lab_tracker_client.hooks import HOOK_BLOCK_BEGIN, hook_lt_path, hook_path_for_repo
@@ -288,24 +297,35 @@ def setup_status(target: str | Path = ".", *, brief: bool = False) -> JsonObject
         "autotrack_r": _autotrack_r_status(),
         "session": _session_status(root),
         "agent_hooks": _agent_hooks_status(root),
+        "cloud_session": _cloud_session_status(root, server, profile),
     }
-    payload["suggestions"] = _suggestions(payload)
+    payload["suggestions"] = (
+        _cloud_suggestions(payload)
+        if payload["cloud_session"]["detected"]
+        else _suggestions(payload)
+    )
     if not brief:
         return payload
-    suggestions = payload["suggestions"]
-    if suggestions:
-        brief_line = (
-            f"lab-tracker: {len(suggestions)} setup suggestion(s) — {suggestions[0]}"
-        )
-    else:
-        brief_line = "lab-tracker: capture is configured; server reachable."
-        if not payload["server"]["reachable"]:
-            brief_line = "lab-tracker: capture is configured; server currently unreachable."
     return {
         "command": "setup-status",
-        "brief": brief_line,
-        "suggestions": suggestions,
+        "brief": _brief_line(payload),
+        "suggestions": payload["suggestions"],
     }
+
+
+def _brief_line(status: JsonObject) -> str:
+    suggestions = status["suggestions"]
+    cloud = status["cloud_session"]
+    prefix = "lab-tracker (cloud session)" if cloud["detected"] else "lab-tracker"
+    if suggestions:
+        return f"{prefix}: {len(suggestions)} setup suggestion(s) — {suggestions[0]}"
+    # A cloud session with no suggestions reached its server: an unreachable one
+    # always carries a suggestion there.
+    if cloud["detected"]:
+        return f"{prefix}: server reachable; {_cloud_token_note(cloud['token_in_vm'])}"
+    if not status["server"]["reachable"]:
+        return f"{prefix}: capture is configured; server currently unreachable."
+    return f"{prefix}: capture is configured; server reachable."
 
 
 def _server_status(profile: dict[str, str]) -> JsonObject:
@@ -477,29 +497,7 @@ def _suggestions(status: JsonObject) -> list[str]:
             "URL before MCP configs bake the default localhost "
             "(`--dry-run` previews, `--yes` applies)."
         )
-    if not repo["scaffold"][".mcp.json"]:
-        suggestions.append(
-            "`lt setup init` scaffolds the integration files here "
-            "(`--dry-run` previews)."
-        )
-    elif repo.get("update_refusals"):
-        from lab_tracker.cli import update_refusal_suggestion
-
-        suggestions.append(
-            update_refusal_suggestion(
-                list(dict.fromkeys(str(item.get("name")) for item in repo["update_refusals"]))
-            )
-        )
-    elif any(item.get("drifted") for item in repo["conventions"]):
-        suggestions.append(
-            "Managed blocks differ from the installed package; `lt update` "
-            "refreshes them (`--dry-run` previews)."
-        )
-    if not repo["lt_ids"]["project_id_bound"]:
-        suggestions.append(
-            "`lt project bind` records the project id in lt_ids.json, "
-            "creating the file when missing (`--yes` applies)."
-        )
+    suggestions.extend(_repo_file_suggestions(repo))
     if not watch.get("config_present") or not watch.get("watch_count"):
         suggestions.append(_watch_setup_suggestion(status))
     if hooks.get("legacy_block_present") and not hooks.get("managed_block_present"):
@@ -561,6 +559,216 @@ def _suggestions(status: JsonObject) -> list[str]:
         )
     suggestions.extend(agent_capture_suggestions(status.get("agent_hooks", {})))
     return suggestions
+
+
+def _repo_file_suggestions(repo: JsonObject) -> list[str]:
+    """Scaffold and binding gaps: committed repository files, so cloud sessions share them."""
+
+    suggestions: list[str] = []
+    if not repo["scaffold"][".mcp.json"]:
+        suggestions.append(
+            "`lt setup init` scaffolds the integration files here "
+            "(`--dry-run` previews)."
+        )
+    elif repo.get("update_refusals"):
+        from lab_tracker.cli import update_refusal_suggestion
+
+        suggestions.append(
+            update_refusal_suggestion(
+                list(dict.fromkeys(str(item.get("name")) for item in repo["update_refusals"]))
+            )
+        )
+    elif any(item.get("drifted") for item in repo["conventions"]):
+        suggestions.append(
+            "Managed blocks differ from the installed package; `lt update` "
+            "refreshes them (`--dry-run` previews)."
+        )
+    if not repo["lt_ids"]["project_id_bound"]:
+        suggestions.append(
+            "`lt project bind` records the project id in lt_ids.json, "
+            "creating the file when missing (`--yes` applies)."
+        )
+    return suggestions
+
+
+def _cloud_session_status(root: Path, server: JsonObject, profile: dict[str, str]) -> JsonObject:
+    """What a cloud agent VM can use: the server address, the MCP launch, and tokens.
+
+    Off a cloud session this is only the detection result. The token report
+    says what this VM holds, not whether the server accepts it: a network
+    secret that a cloud environment's proxy adds outside the VM never shows.
+    """
+
+    session = cloud_session()
+    if not session["detected"]:
+        return session
+    profile_token = bool(profile.get("access_token"))
+    return {
+        **session,
+        "base_url_unreachable": unreachable_from_cloud(server["base_url"]),
+        "mcp_json": _mcp_json_launch(root),
+        "token_in_vm": {
+            "lt": bool(os.getenv("LAB_TRACKER_ACCESS_TOKEN")) or profile_token,
+            "lt_mcp": bool(
+                os.getenv("LAB_TRACKER_MCP_API_KEY") or os.getenv("LAB_TRACKER_MCP_TOKEN")
+            )
+            or profile_token,
+        },
+        "guide": CLOUD_AGENTS_DOC,
+    }
+
+
+def _mcp_json_launch(root: Path) -> JsonObject | None:
+    """The repository ``.mcp.json`` entry a Claude Code session starts ``lt-mcp`` from.
+
+    ``None`` when the file or its ``lab-tracker`` entry is missing or unreadable;
+    the scaffold check already reports a missing file.
+    """
+
+    try:
+        entry = json.loads((root / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"][
+            "lab-tracker"
+        ]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not isinstance(entry, dict):
+        return None
+    command = str(entry.get("command") or "")
+    env = entry.get("env")
+    if not isinstance(env, dict):
+        env = {}
+    base_url = env.get(BASE_URL_ENV) or env.get(LEGACY_MCP_BASE_URL_ENV)
+    return {
+        "command": command,
+        "command_found": bool(command) and _command_found(command),
+        "base_url": base_url,
+        "base_url_unreachable": unreachable_from_cloud(str(base_url)) if base_url else None,
+    }
+
+
+def _command_found(command: str) -> bool:
+    path = Path(command).expanduser()
+    return path.is_file() if path.is_absolute() else shutil.which(command) is not None
+
+
+def _cloud_suggestions(status: JsonObject) -> list[str]:
+    """Suggestions for a cloud agent VM: environment settings and committed files.
+
+    The VM is rebuilt from the repository for every session, so a saved profile,
+    a watch folder, a commit hook, an OS schedule, or personal hooks made here do
+    not outlive it, and a ``lab-tracker serve`` here would keep captures in a VM
+    that is discarded. Those suggestions are left out; what a person changes
+    instead lives in the cloud environment's settings or the repository.
+    """
+
+    cloud = status["cloud_session"]
+    revision = normalized_revision(status["client"]["server"]["revision"])
+    suggestions = _cloud_install_suggestions(status, cloud.get("mcp_json"), revision)
+    suggestions.extend(_cloud_server_suggestions(status["server"], cloud["base_url_unreachable"]))
+    suggestions.extend(_cloud_mcp_url_suggestions(cloud.get("mcp_json")))
+    suggestions.extend(_repo_file_suggestions(status["repo"]))
+    if status["skills"].get("all_resources_up_to_date") is False:
+        suggestions.append(
+            "The Lab Tracker skills are missing or stale in this VM. Skills in a "
+            "person's own skill folders do not reach cloud sessions; "
+            "`lt update --skills-only` in the cloud environment's setup script installs "
+            "them for every later session, and running it here fixes this session only."
+        )
+    return suggestions
+
+
+def _setup_script_install(revision: str | None) -> str:
+    install = client_install_command(revision)
+    if install is None:
+        return (
+            "the server-pinned `uv tool install` command from the web app's Setup page"
+        )
+    return f"`{install}`"
+
+
+def _cloud_install_suggestions(
+    status: JsonObject, launch: JsonObject | None, revision: str | None
+) -> list[str]:
+    """Missing or outdated executables, fixed in the environment's setup script."""
+
+    suggestions: list[str] = []
+    if status["lt_mcp"].get("importable") is False:
+        suggestions.append(_lt_mcp_suggestion(status["lt_mcp"]))
+    install = _setup_script_install(revision)
+    if launch is not None and not launch["command_found"]:
+        suggestions.append(
+            f"The repository's `.mcp.json` starts `{launch['command'] or 'lt-mcp'}`, which "
+            "is not installed in this VM, so the Lab Tracker MCP server cannot start. "
+            f"In the cloud environment's setup script, {install} installs `lt` and "
+            "`lt-mcp` for every later session."
+        )
+    elif status["client"].get("update_recommended"):
+        suggestions.append(
+            f"This lab-tracker client (release {status['client']['client']['version']}) is "
+            "behind its server. In a cloud session the client comes from the environment's "
+            f"setup script; replacing its install line with {install} updates every later "
+            "session."
+        )
+    return suggestions
+
+
+def _cloud_server_suggestions(server: JsonObject, unreachable: str | None) -> list[str]:
+    base_url = server["base_url"]
+    if unreachable is not None:
+        origin = {
+            "env": "from LAB_TRACKER_BASE_URL",
+            "profile": "from the saved connection profile",
+        }.get(server["source"], "the default, since nothing in this VM sets one")
+        return [
+            f"This cloud session's Lab Tracker address, {base_url} ({origin}), is "
+            f"{unreachable_reason_text(unreachable)}. A cloud VM reaches a lab server only "
+            "at a public HTTPS address, which a person sets as `LAB_TRACKER_BASE_URL` in "
+            f"the cloud environment's settings; {CLOUD_AGENTS_DOC} lists every setting."
+        ]
+    if server["reachable"]:
+        return []
+    host = urlsplit(base_url).hostname or base_url
+    return [
+        f"No Lab Tracker API answered at {base_url} from this cloud session "
+        f"({server.get('diagnosis')}). Either the server is down, or the cloud "
+        f"environment's network access does not allow {host}: listing it under the "
+        "environment's allowed domains, or adding a network secret for it, lets this "
+        f"VM reach it ({CLOUD_AGENTS_DOC})."
+    ]
+
+
+def _cloud_mcp_url_suggestions(launch: JsonObject | None) -> list[str]:
+    if launch is None or launch["base_url_unreachable"] is None:
+        return []
+    return [
+        f"The repository's `.mcp.json` starts `lt-mcp` with LAB_TRACKER_BASE_URL="
+        f"{launch['base_url']}, {unreachable_reason_text(launch['base_url_unreachable'])}, "
+        "and that entry overrides the cloud environment's variable. Once "
+        "`LAB_TRACKER_BASE_URL` holds the public address, `lt update --dry-run` previews "
+        "rewriting the file to it; committing the result carries it into later sessions."
+    ]
+
+
+def _cloud_token_note(tokens: JsonObject) -> str:
+    """The brief line's account of where this VM's Lab Tracker token comes from."""
+
+    if tokens["lt"] and tokens["lt_mcp"]:
+        return "this VM's environment supplies the Lab Tracker token."
+    if tokens["lt"] or tokens["lt_mcp"]:
+        holder, missing = (
+            ("lt", "LAB_TRACKER_MCP_API_KEY")
+            if tokens["lt"]
+            else ("lt-mcp", "LAB_TRACKER_ACCESS_TOKEN")
+        )
+        return (
+            f"only {holder} finds a token in this VM ({missing} is unset), so the other "
+            "relies on a network secret for this host."
+        )
+    return (
+        "no Lab Tracker token is in this VM, so authenticated calls rely on a network "
+        "secret for this host; `lt setup verify-mcp --expected-revision <revision>` "
+        "checks them."
+    )
 
 
 def _skills_status() -> JsonObject:

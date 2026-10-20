@@ -145,7 +145,10 @@ _NO_CREDENTIALS_MESSAGE = (
     "No Lab Tracker MCP credentials are configured, but the API requires "
     "authentication. Set LAB_TRACKER_MCP_API_KEY to an LPAT (mint via POST "
     "/auth/tokens) — the sanctioned auth method. LAB_TRACKER_MCP_USERNAME / "
-    "LAB_TRACKER_MCP_PASSWORD login is deprecated."
+    "LAB_TRACKER_MCP_PASSWORD login is deprecated. In a cloud agent session, a "
+    "person adds the token in the cloud environment's settings, as a network "
+    "secret for the Lab Tracker host or as LAB_TRACKER_MCP_API_KEY, never in the "
+    "chat (docs/cloud-agents.md)."
 )
 
 

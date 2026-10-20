@@ -1402,3 +1402,80 @@ def test_orient_checkpoint_pointers_name_a_real_button_and_route() -> None:
     assert _ORIENT_ROUTE.search(_without_js_comments(_read(_ROUTING))), (
         f"routing.jsx no longer serves the member-onboarding page at {_ORIENT_PATH}"
     )
+
+
+# Cloud agent sessions: docs/cloud-agents.md names the variables, commands, and
+# report fields the code reads and prints, so a rename cannot leave it stale.
+_CLOUD_AGENTS_DOC = _DOCS / "cloud-agents.md"
+# Docs that point readers at the cloud guide.
+_CLOUD_DOC_INBOUND = (
+    _AGENT_SETUP_DOC,
+    _DOCS / "capture-guide.md",
+    _DOCS / "configuration.md",
+    _DOCS / "retained-v1-surface.md",
+    _DOCS / "setup.md",
+    _REPO_ROOT / "README.md",
+)
+_CLOUD_DOC_LT_COMMANDS = (
+    "lt setup status",
+    "lt setup verify-mcp --expected-revision " + "a" * 40,
+    "lt update --dry-run",
+    "lt update --skills-only",
+    "lt outbox sync",
+    "lt outbox status",
+)
+
+
+def test_cloud_agents_doc_names_what_the_code_reads() -> None:
+    from lab_tracker.client_release import client_install_command
+    from lab_tracker_client import auth as auth_doctor_module
+    from lab_tracker_client import cloud_session
+
+    text = _collapsed_whitespace(_read(_CLOUD_AGENTS_DOC))
+    assert f"{cloud_session.CLAUDE_CODE_REMOTE_ENV}=true" in text
+    assert f"{cloud_session.CLOUD_SESSION_ENV}=1" in text
+    assert f"{cloud_session.CLOUD_SESSION_ENV}=0" in text
+    # The token names `lt` (LabTracker.from_env) and `lt-mcp` (MCPSettings) read.
+    assert "LAB_TRACKER_ACCESS_TOKEN" in inspect.getsource(LabTracker.from_env)
+    assert auth_doctor_module._API_KEY_ENV[0] == "LAB_TRACKER_MCP_API_KEY"
+    assert "LAB_TRACKER_ACCESS_TOKEN=lpat_..." in text
+    assert "LAB_TRACKER_MCP_API_KEY=lpat_..." in text
+    # The setup script line is the pinned install the Setup page renders.
+    pinned = client_install_command("<full-server-revision>")
+    assert pinned is not None and pinned in _read(_CLOUD_AGENTS_DOC)
+    for field in ("cloud_session.detected", "token_in_vm", "lab-tracker (cloud session)"):
+        assert field in text, field
+    assert "lab-tracker (cloud session)" in inspect.getsource(setup_helpers)
+    doc_path = _CLOUD_AGENTS_DOC.relative_to(_REPO_ROOT).as_posix()
+    assert cloud_session.CLOUD_AGENTS_DOC.startswith(doc_path)
+
+
+def test_cloud_agents_doc_lt_commands_parse() -> None:
+    text = _read(_CLOUD_AGENTS_DOC)
+    parser = lt_cli._build_parser()
+    for command in _CLOUD_DOC_LT_COMMANDS:
+        assert command.split(" --expected-revision ")[0] in text, command
+        parser.parse_args(shlex.split(command)[1:])
+
+
+def _relative_links(doc: Path) -> list[str]:
+    return [target for target in re.findall(r"\]\(([^)\s]+)\)", _read(doc)) if "://" not in target]
+
+
+def _link_resolves(doc: Path, target: str) -> bool:
+    path, _, anchor = target.partition("#")
+    resolved = (doc.parent / path).resolve() if path else doc
+    if not resolved.is_file():
+        return False
+    headings = re.findall(r"(?m)^#{1,6} (.+)$", _read(resolved))
+    return not anchor or anchor in {_github_anchor(heading) for heading in headings}
+
+
+def test_links_to_and_from_the_cloud_agents_doc_resolve() -> None:
+    links = [(_CLOUD_AGENTS_DOC, target) for target in _relative_links(_CLOUD_AGENTS_DOC)]
+    for doc in _CLOUD_DOC_INBOUND:
+        inbound = [target for target in _relative_links(doc) if "cloud-agents.md" in target]
+        assert inbound, f"{doc.name} does not link docs/cloud-agents.md"
+        links.extend((doc, target) for target in inbound)
+    broken = [f"{doc.name}: {target}" for doc, target in links if not _link_resolves(doc, target)]
+    assert not broken, f"broken cloud-agents links: {broken}"

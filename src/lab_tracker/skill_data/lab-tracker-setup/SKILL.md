@@ -57,8 +57,9 @@ short, consent-gated sequence on the `lt` CLI.
    folders, and commit-hook enrollment in one JSON payload, with
    suggestions for whatever is missing.
 3. **Connectivity** — when no server is reachable, `lab-tracker serve`
-   starts a local instance; a lab usually shares one instance and its
-   URL comes from whoever operates it.
+   starts a local instance (never in a cloud session's VM; see *Cloud
+   sessions* below); a lab usually shares one instance and its URL
+   comes from whoever operates it.
 4. **Connection profile** — `lt setup connect --base-url <url>
    --project <project-id> --yes` persists the server URL and exact
    default project in
@@ -208,6 +209,43 @@ later runs (`docs/configuration.md`, *Local evidence inbox imports*).
 but writes at once, with no `--dry-run` preview or `--yes` gate, so
 guided setup uses `lt hooks install` (`docs/repo-report-capture.md`).
 
+## Cloud sessions
+
+A cloud session (Claude Code on the web, `claude --cloud`, a cloud
+scheduled task, or another vendor's hosted agent) runs in a fresh VM
+cloned from the repository and discarded later, so nothing the steps
+above wrote to the person's computer is there. `lt setup status`
+recognizes one from `CLAUDE_CODE_REMOTE=true` (or an explicit
+`LAB_TRACKER_CLOUD_SESSION`) and suggests cloud environment settings
+instead, which a person changes in the environment's settings:
+
+- the setup script runs the server-pinned `uv tool install` (step 1)
+  and `lt update --skills-only`, so `lt`, `lt-mcp`, and both skills
+  are in every session's VM;
+- `LAB_TRACKER_BASE_URL` holds the lab server's public HTTPS address,
+  because the VM's loopback is the VM itself and the VM is on no lab
+  network or tailnet; the committed `.mcp.json` carries the same
+  address, since its entry overrides the environment's value;
+- the network access setting allows that host;
+- the token is a network secret for that host, which the
+  environment's proxy adds outside the VM, or else
+  `LAB_TRACKER_ACCESS_TOKEN` and `LAB_TRACKER_MCP_API_KEY` variables,
+  which anyone who uses the environment can read. It is never pasted
+  into the chat.
+
+Committed files (`.mcp.json`, `.claude/settings.json`, `lt_ids.json`,
+the managed blocks) reach every cloud session, so `lt setup init`,
+`lt update`, and `lt project bind` still apply. A saved profile, watch
+folders, commit hooks, OS schedules, autotrack startup files, and
+personal agent hooks made in the VM do not outlive it, and `lab-tracker
+serve` there would keep captures in a VM that is discarded; the
+`lab-tracker-repo-report` GitHub Action records commits pushed from
+cloud sessions instead. Before a cloud session that captured anything
+ends, `lt outbox sync` and then `lt outbox status` confirm nothing is
+left in the VM. `docs/cloud-agents.md` in the Lab Tracker repository
+walks through each setting, and `lt setup verify-mcp
+--expected-revision <revision>` run in the VM checks the result.
+
 ## After setup
 
 Captures stage for human review — nothing commits to the research
@@ -274,4 +312,4 @@ rerunning its pinned `uv add` (step 5), which neither `lt update` nor
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.3.0 sha256=61420e550cfa -->
+<!-- lab-tracker-setup-guide version=0.3.0 sha256=87ce30f9241a -->

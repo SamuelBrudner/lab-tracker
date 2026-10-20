@@ -1129,6 +1129,14 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
   `autotrack(project_id=...)`, `LAB_TRACKER_PROJECT_ID`, or the checkout's
   `lt_ids.json`; see [notebook-and-script-capture.md](notebook-and-script-capture.md)
   and [lab-tracker-r.md](lab-tracker-r.md)
+- `LAB_TRACKER_CLOUD_SESSION`: declares whether `lt setup status` runs in a
+  cloud agent session, a VM cloned from the repository that cannot reach
+  loopback or lab-network addresses and is discarded later. `0`, `false`, `no`,
+  or `off` declares it is not one; any other value declares it is. Unset, a
+  Claude Code cloud session is recognized from `CLAUDE_CODE_REMOTE=true`. A
+  cloud session's report adds a `cloud_session` block and suggests cloud
+  environment settings in place of computer-only setup; see
+  [cloud agent sessions](cloud-agents.md)
 - `LAB_TRACKER_AGENT_HOOKS`: `0`, `false`, `no`, or `off` turns off the
   coding-agent hooks `lt setup agent-hooks` installs: `lt agent session-end`
   and `lt watch touch` return at once without reading a transcript or queuing

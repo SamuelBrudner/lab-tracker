@@ -40,6 +40,7 @@ from lab_tracker.decision_context_constants import (
     CLAUDE_BLOCK_BEGIN,
     CLAUDE_BLOCK_END,
     CLIENT_MAINTENANCE_POLICY,
+    CLOUD_SESSION_POLICY,
     CODE_CONVENTIONS_BLOCK_BEGIN,
     CODE_CONVENTIONS_BLOCK_END,
     COMMIT_CAPTURE_RECOVERY_POLICY,
@@ -2019,6 +2020,8 @@ def _agents_fragment() -> str:
         Tracker repository, or the `lab-tracker://setup-guide` MCP resource.
 
         {COMMIT_CAPTURE_RECOVERY_POLICY}
+
+        {CLOUD_SESSION_POLICY}
 
         MCP config is scaffolded per agent and works with any MCP-capable
         coding agent: `.mcp.json` (Claude Code and other root-config readers),

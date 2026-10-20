@@ -565,6 +565,7 @@ npm run build
 - [Self-hosted operations (backup/restore/upgrade, first admin)](self-hosted-operations.md)
 - [Serve the shared graph on a LAN/VPN](lan-shared-graph.md)
 - [Capture guide (every capture path and its setup)](capture-guide.md)
+- [Cloud agent sessions (Claude Code on the web and hosted agents)](cloud-agents.md)
 - [Phone capture quickstart](phone-capture-quickstart.md)
 - [Windows fresh-clone setup](windows-fresh-clone.md)
 

@@ -63,6 +63,19 @@ def _isolate_lab_tracker_home(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("LAB_TRACKER_SKILLS_HOME", str(home / "skills"))
 
 
+@pytest.fixture(autouse=True)
+def _isolate_cloud_session_markers(monkeypatch):
+    """Run every test as on a person's computer, even inside a cloud agent VM.
+
+    A Claude Code cloud session exports ``CLAUDE_CODE_REMOTE=true``, which turns
+    ``lt setup status`` into its cloud-session variant. Tests of that variant set
+    the markers themselves.
+    """
+
+    monkeypatch.delenv("CLAUDE_CODE_REMOTE", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_CLOUD_SESSION", raising=False)
+
+
 @pytest.fixture
 def offline_server(monkeypatch):
     """Report the Lab Tracker server as unreachable without any network I/O.
