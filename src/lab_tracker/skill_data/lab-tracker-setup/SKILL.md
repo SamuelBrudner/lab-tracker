@@ -235,16 +235,24 @@ instead, which a person changes in the environment's settings:
 
 Committed files (`.mcp.json`, `.claude/settings.json`, `lt_ids.json`,
 the managed blocks) reach every cloud session, so `lt setup init`,
-`lt update`, and `lt project bind` still apply. A saved profile, watch
-folders, commit hooks, OS schedules, autotrack startup files, and
-personal agent hooks made in the VM do not outlive it, and `lab-tracker
-serve` there would keep captures in a VM that is discarded; the
-`lab-tracker-repo-report` GitHub Action records commits pushed from
-cloud sessions instead. Before a cloud session that captured anything
-ends, `lt outbox sync` and then `lt outbox status` confirm nothing is
-left in the VM. `docs/cloud-agents.md` in the Lab Tracker repository
-walks through each setting, and `lt setup verify-mcp
---expected-revision <revision>` run in the VM checks the result.
+`lt update`, and `lt project bind` still apply; the `.mcp.json`
+server and the `.claude/settings.json` hooks load only in a session
+with one repository. A saved profile, watch folders, commit hooks, OS
+schedules, autotrack startup files, and personal agent hooks made in
+the VM do not outlive it, and `lab-tracker serve` there would keep
+captures in a VM that is discarded. A client update is a new revision
+in the setup script: `lt maintain` in the VM changes only that
+session. The `lab-tracker-repo-report` GitHub Action records, in CI,
+the head commit of each push or pull request its workflow triggers
+on, pushes from cloud sessions included. Before a cloud session that
+captured anything ends, `lt outbox sync` and then `lt outbox status`
+confirm nothing is left in the VM. `docs/cloud-agents.md` in the Lab
+Tracker repository walks through each setting. In the VM, `lt setup
+verify-mcp --expected-revision <revision>` checks the installed
+`lt-mcp` and the token with the environment's variables, `lt setup
+status` checks the committed `.mcp.json` launch, and asking the agent
+to call `lab_tracker_list_projects` checks the server Claude Code
+started.
 
 ## After setup
 
@@ -312,4 +320,4 @@ rerunning its pinned `uv add` (step 5), which neither `lt update` nor
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.3.0 sha256=87ce30f9241a -->
+<!-- lab-tracker-setup-guide version=0.3.0 sha256=2dd9703cfc2f -->

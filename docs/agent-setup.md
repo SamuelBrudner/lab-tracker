@@ -306,8 +306,8 @@ client do not apply to it.
 | Claude Code cloud session (claude.ai/code, `claude --cloud`) | the committed repository `.mcp.json`, with `lt-mcp` installed by the cloud environment's setup script | yes, `.mcp.json` |
 
 Two rules apply in this section. The first covers the registrations you make by
-hand, Claude Desktop chat and both Codex products; the second covers all four
-clients. Cursor and GitHub Copilot follow their own pages, linked at the end of
+hand, Claude Desktop chat and both Codex products; the second covers every
+client in the table. Cursor and GitHub Copilot follow their own pages, linked at the end of
 this section, and those pages set out their own credential placement.
 
 **No credentials in the Claude Desktop or Codex settings file.** The saved
@@ -535,8 +535,8 @@ Verify:
 #### Cloud sessions (Claude Code on the web and hosted agents)
 
 A cloud session runs the agent in a fresh VM cloned from the repository, so
-nothing installed or saved on your computer is there. It reads the committed
-`.mcp.json`, but `lt-mcp` comes from the cloud environment's setup script, the
+nothing installed or saved on your computer is there. In a session with one
+repository it reads the committed `.mcp.json`, but `lt-mcp` comes from the cloud environment's setup script, the
 server address from the environment's `LAB_TRACKER_BASE_URL` (a public HTTPS
 address, because the VM's loopback is the VM itself), and the token from a
 network secret that the environment's proxy adds outside the VM.

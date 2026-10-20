@@ -342,3 +342,19 @@ def test_main_passes_the_stdio_notice_to_the_server_and_stderr(monkeypatch, caps
 
     assert events == [("build", "stdio", NOTICE), ("run", "stdio")]
     assert f"NOTICE: {NOTICE}" in capsys.readouterr().err
+
+
+def test_probe_moves_the_update_into_the_setup_script_in_a_cloud_session(monkeypatch) -> None:
+    # In a cloud VM `lt maintain` lasts one session and the agent cannot restart the
+    # host; the environment's setup script holds the client every session starts with.
+    monkeypatch.setenv("CLAUDE_CODE_REMOTE", "true")
+    notice = _probe_with(
+        monkeypatch,
+        {"status": "ok", "app": {"version": "0.2.0", "source_revision": SERVER_REVISION}},
+    )
+
+    assert notice is not None
+    assert "setup script" in notice
+    assert f"lab-tracker.git@{SERVER_REVISION}" in notice
+    assert "lt maintain --all" not in notice
+    assert "restart the MCP host" not in notice

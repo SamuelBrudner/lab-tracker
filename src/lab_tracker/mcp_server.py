@@ -25,6 +25,7 @@ from lab_tracker.client_release import (
     ReleaseComparison,
     ReleaseIdentity,
     installed_release,
+    normalized_revision,
     release_from_health,
     update_steps,
 )
@@ -106,6 +107,7 @@ from lab_tracker.mcp_tools.write import (
     lab_tracker_update_goal,
     lab_tracker_upload_visualization_file,
 )
+from lab_tracker_client.cloud_session import cloud_session, cloud_update_steps
 from lab_tracker_client.transport import HEALTH_PROBE_DEADLINE_SECONDS
 
 MCPTransport = Literal["stdio", "streamable-http"]
@@ -308,11 +310,15 @@ def probe_client_update_notice(api_settings: MCPSettings) -> str | None:
         return None
     if not update_recommended:
         return None
+    steps = (
+        cloud_update_steps(normalized_revision(comparison.server.revision))
+        if cloud_session()["detected"]
+        else update_steps(comparison.server)
+    )
     return (
         f"UPDATE AVAILABLE: this Lab Tracker MCP client runs release "
         f"{comparison.client.version}, but its server runs release "
-        f"{comparison.server.version}. Tell the person that "
-        f"{update_steps(comparison.server)}."
+        f"{comparison.server.version}. Tell the person that {steps}."
     )
 
 

@@ -7,6 +7,7 @@ from typing import Any
 from lab_tracker.decision_context import AGENT_CONSULTATION_POLICY
 from lab_tracker.decision_context_constants import code_facing_idioms
 from lab_tracker.setup_guide import setup_guide_markdown
+from lab_tracker_client.cloud_session import CLOUD_AGENTS_DOC
 
 
 def lab_tracker_quickstart() -> str:
@@ -22,6 +23,11 @@ def lab_tracker_quickstart() -> str:
         "Use `http://127.0.0.1:8000` only when the MCP process runs on the same "
         "machine as the API; remote agents should use the workstation HTTPS "
         "endpoint, for example `https://<workstation>.ts.net`. "
+        "In a cloud session (`CLAUDE_CODE_REMOTE=true`), do not start the app in "
+        "the VM: the address is the lab server's public HTTPS origin, and the token "
+        "comes from a network secret or `LAB_TRACKER_MCP_API_KEY` in the cloud "
+        f"environment's settings ({CLOUD_AGENTS_DOC}); a `*.ts.net` address is "
+        "reachable from outside its tailnet only through Tailscale Funnel. "
         "When API authentication is enabled, set `LAB_TRACKER_MCP_API_KEY` to a "
         "Lab Tracker personal access token (LPAT) — the sanctioned auth method. "
         "`LAB_TRACKER_MCP_USERNAME` / `LAB_TRACKER_MCP_PASSWORD` login is "

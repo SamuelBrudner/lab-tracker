@@ -12,9 +12,12 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
+
+from lab_tracker.client_release import client_install_command
 
 JsonObject = dict[str, Any]
 
@@ -31,6 +34,11 @@ _UNREACHABLE_REASONS = {
     LOOPBACK: "a loopback address, which inside a cloud VM is the VM itself",
     PRIVATE_NETWORK: "a private-network address, and a cloud VM is not on that network",
 }
+# Names that never resolve on the public internet: mDNS, the special-use and
+# ICANN-reserved private suffixes, and two undelegated router conventions.
+_PRIVATE_SUFFIXES = (".local", ".internal", ".home.arpa", ".lan", ".localdomain")
+# Claude Code expands ``${VAR}`` and ``${VAR:-default}`` in ``.mcp.json`` values.
+_CLAUDE_VARIABLE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
 
 def cloud_session(environ: Mapping[str, str] | None = None) -> JsonObject:
@@ -54,15 +62,22 @@ def unreachable_from_cloud(base_url: str) -> str | None:
     """Why a cloud VM cannot reach ``base_url``, or ``None`` when its address shows no reason.
 
     Only the address is judged. A public name the environment's network access
-    refuses is still ``None`` here; the health probe is what shows that.
+    refuses is still ``None`` here, and so is a value with no parseable host;
+    the health probe is what shows either.
     """
 
-    host = (urlsplit(base_url).hostname or "").rstrip(".").lower()
+    try:
+        host = (urlsplit(base_url).hostname or "").rstrip(".").lower()
+    except ValueError:
+        return None
+    if not host:
+        return None
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
         return _hostname_reason(host)
-    if address.is_loopback:
+    # An unspecified address (0.0.0.0, ::) connects to the local host.
+    if address.is_loopback or address.is_unspecified:
         return LOOPBACK
     return None if address.is_global else PRIVATE_NETWORK
 
@@ -70,8 +85,8 @@ def unreachable_from_cloud(base_url: str) -> str | None:
 def _hostname_reason(host: str) -> str | None:
     if host == "localhost" or host.endswith(".localhost"):
         return LOOPBACK
-    # A bare name resolves only on a local network or search domain; .local is mDNS.
-    if "." not in host or host.endswith(".local"):
+    # A bare name resolves only on a local network or search domain.
+    if "." not in host or host.endswith(_PRIVATE_SUFFIXES):
         return PRIVATE_NETWORK
     return None
 
@@ -80,3 +95,31 @@ def unreachable_reason_text(reason: str) -> str:
     """The phrase ``lt setup status`` uses for a reason from :func:`unreachable_from_cloud`."""
 
     return _UNREACHABLE_REASONS[reason]
+
+
+def expand_claude_variables(value: str, environ: Mapping[str, str]) -> str:
+    """``value`` with ``${VAR}`` and ``${VAR:-default}`` expanded as Claude Code does."""
+
+    return _CLAUDE_VARIABLE.sub(
+        lambda match: environ.get(match[1]) or (match[2] or ""),
+        value,
+    )
+
+
+def setup_script_install(revision: str | None) -> str:
+    """The setup-script install line for ``revision``, as a suggestion quotes it."""
+
+    install = client_install_command(revision)
+    if install is None:
+        return "the server-pinned `uv tool install` command from the web app's Setup page"
+    return f"`{install}`"
+
+
+def cloud_update_steps(revision: str | None) -> str:
+    """Where a client update belongs in a cloud session: the setup script, not the VM."""
+
+    return (
+        "in a cloud session the client comes from the environment's setup script, so "
+        f"replacing its install line with {setup_script_install(revision)} updates every "
+        "later session; `lt maintain` or a reinstall in this VM lasts only this session"
+    )

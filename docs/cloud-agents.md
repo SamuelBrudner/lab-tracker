@@ -62,10 +62,12 @@ environment settings below. Its `--brief` line, which the scaffolded
 
 ## Configure a Claude Code cloud environment
 
-Open the environment's settings: the cloud environment menu in the session's
-title bar, then **Edit** (or **New environment**). Each step below is one part
-of that dialog. An organization-shared environment is edited by an Owner from
-the **Cloud environments** page in claude.ai admin settings.
+Open the environment's settings. To create one, select **New environment** at
+the bottom of the environment selector under the message box on the
+new-session screen; to change the environment of a running session, select the
+caret after the session title, then **Edit cloud environment**. Each step below
+is one part of that dialog. An organization-shared environment is edited by an
+Owner from the **Cloud environments** page in claude.ai admin settings.
 
 ### 1. Setup script: install the client and skills
 
@@ -132,6 +134,12 @@ in an app that has not updated), select **Add secret** and fill in:
 - **Custom headers:** `Authorization` with the prefix `Bearer`, and the
   `lpat_…` token as the value.
 
+On a Team plan without an organization admin role, **Add secret** opens a
+shorter form instead: enter the server's host under **Host**, choose **Token**,
+and paste the `lpat_…` token as the **Value** (Anthropic's
+[shorter form](https://code.claude.com/docs/en/cloud-environments#add-a-secret-on-a-team-plan-without-an-organization-admin-role)).
+The verification below confirms the server accepts what the proxy sends.
+
 Leave `LAB_TRACKER_ACCESS_TOKEN` and `LAB_TRACKER_MCP_API_KEY` unset. Requests
 from the setup script never get the secret, which is fine because installing
 the client needs no Lab Tracker token. Anthropic's
@@ -164,6 +172,15 @@ address (on your computer, or in the cloud session itself), review the rewrite,
 then apply it with `lt update` and commit the result. Commit `lt_ids.json` too,
 so the project binding reaches every session.
 
+The committed address is also what `lt-mcp` uses on every computer that opens
+the repository, and `lt-mcp` sends a saved profile's token only to that
+profile's own address. Anyone whose profile names another address for the same
+server, such as `127.0.0.1` on the server host, then runs
+`lt setup connect --base-url <public address> --save-token --yes` once
+([agent setup](agent-setup.md#choose-your-client) explains the rule). Later,
+`lt update` on any computer rewrites `.mcp.json` from the address it resolves
+there, so check that file's change before committing an update.
+
 ## Verify from a cloud session
 
 Start a new session in the environment and ask the agent to run these:
@@ -186,10 +203,10 @@ Start a new session in the environment and ask the agent to run these:
   in the VM. Before a session that captured anything ends, the agent runs
   `lt outbox sync`, then `lt outbox status`, and reports anything still pending.
 - **Capture that suits a cloud session:** the MCP tools, `lt run`, and
-  `lt capture file` send what they capture while the session runs. Commits
-  pushed from cloud sessions are recorded in CI by the reusable
-  [`lab-tracker-repo-report` GitHub Action](pipeline-capture.md#ci-capture-github-action),
-  which needs nothing in the VM.
+  `lt capture file` send what they capture while the session runs. The reusable
+  [`lab-tracker-repo-report` GitHub Action](pipeline-capture.md#ci-capture-github-action)
+  records, in CI, the head commit of each push or pull request its workflow
+  triggers on, pushes from cloud sessions included, and needs nothing in the VM.
 - **Capture that does not:** watch folders, OS schedules (`lt setup schedule`),
   commit hooks in `.git/hooks`, and the personal agent hooks in
   `.claude/settings.local.json` are made per machine and lost with the VM.

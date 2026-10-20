@@ -47,6 +47,7 @@ from lab_tracker_client.client import (
     file_sha256,
     load_connection_profile,
 )
+from lab_tracker_client.cloud_session import cloud_session
 from lab_tracker_client.gitinfo import (
     DirtyState,
     HeadCommit,
@@ -1629,9 +1630,12 @@ def _resolve_capture_client(
     # from_env only applies the profile's project when the profile describes
     # the server being targeted; project ids are per-server.
     resolved_project_id = project_id or resolved_client.default_project_id
+    # In a cloud session the environment's proxy can add the token outside the VM
+    # (a network secret), so a VM without a local credential still tries the upload.
     has_credentials = bool(
         resolved_client.access_token
         or (resolved_client.username and resolved_client.password)
+        or cloud_session()["detected"]
     )
     if not resolved_project_id or not has_credentials:
         resolved_client.close()

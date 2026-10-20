@@ -81,7 +81,9 @@ See [capture and integration](references/capture.md) for every capture path.
 In a cloud session (`CLAUDE_CODE_REMOTE=true`), the VM is cloned from the
 repository and discarded later. `lt setup status` names the missing cloud
 environment settings for the person to change; never start a local server in
-the VM or ask for a token in the chat. Run `lt outbox sync`, then
+the VM or ask for a token in the chat. Personal agent hooks and an `lt maintain`
+upgrade made in the VM are lost with it, so do not offer them there; a client
+update belongs in the environment's setup script. Run `lt outbox sync`, then
 `lt outbox status`, before a cloud session that captured anything ends.
 
 For upkeep, doctor and MCP update notices prescribe a server-pinned

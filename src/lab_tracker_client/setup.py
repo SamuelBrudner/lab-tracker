@@ -21,6 +21,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -33,7 +34,6 @@ import lab_tracker_client.watch as watch_capture
 from lab_tracker.client_release import (
     ReleaseComparison,
     ReleaseIdentity,
-    client_install_command,
     installed_release,
     installed_source_revision,
     normalized_revision,
@@ -56,6 +56,9 @@ from lab_tracker_client.client import (
 from lab_tracker_client.cloud_session import (
     CLOUD_AGENTS_DOC,
     cloud_session,
+    cloud_update_steps,
+    expand_claude_variables,
+    setup_script_install,
     unreachable_from_cloud,
     unreachable_reason_text,
 )
@@ -272,7 +275,12 @@ def setup_status(target: str | Path = ".", *, brief: bool = False) -> JsonObject
 
     root = Path(target).expanduser().resolve()
     profile = load_connection_profile()
-    server = _server_status(profile)
+    try:
+        server = _server_status(profile)
+    except ValueError as exc:
+        # An address that does not parse is reported, not raised: a session hook
+        # that raises shows the agent nothing.
+        server = _unusable_server(exc)
     payload: JsonObject = {
         "command": "setup-status",
         "target": str(root),
@@ -410,9 +418,14 @@ def _behind_server_message(client: JsonObject) -> str:
         client["server"]["version"],
         client["server"]["revision"],
     )
+    steps = (
+        cloud_update_steps(normalized_revision(server.revision))
+        if cloud_session()["detected"]
+        else update_steps(server)
+    )
     return (
         f"This lab-tracker client (release {client['client']['version']}) is behind "
-        f"its server (release {server.version}); {update_steps(server)}."
+        f"its server (release {server.version}); {steps}."
     )
 
 
@@ -479,6 +492,8 @@ def _brief_error(error: object) -> str:
 
 def _suggestions(status: JsonObject) -> list[str]:
     suggestions = _install_suggestions(status)
+    if status["server"].get("diagnosis") == "server_check_failed":
+        suggestions.append(f"{status['server']['detail']} {status['server']['next_step']}")
     repo = status["repo"]
     hooks = status["hooks"]
     watch = status["watch"]
@@ -602,27 +617,81 @@ def _cloud_session_status(root: Path, server: JsonObject, profile: dict[str, str
     session = cloud_session()
     if not session["detected"]:
         return session
-    profile_token = bool(profile.get("access_token"))
+    launch = _mcp_json_launch(root)
+    base_url = server.get("base_url")
     return {
         **session,
-        "base_url_unreachable": unreachable_from_cloud(server["base_url"]),
-        "mcp_json": _mcp_json_launch(root),
+        "base_url_unreachable": unreachable_from_cloud(base_url) if base_url else None,
+        "mcp_json": launch,
         "token_in_vm": {
-            "lt": bool(os.getenv("LAB_TRACKER_ACCESS_TOKEN")) or profile_token,
-            "lt_mcp": bool(
-                os.getenv("LAB_TRACKER_MCP_API_KEY") or os.getenv("LAB_TRACKER_MCP_TOKEN")
-            )
-            or profile_token,
+            "lt": _token_in_environment(
+                os.environ, profile, ("LAB_TRACKER_ACCESS_TOKEN",), _LT_USERNAME_ENVS
+            ),
+            "lt_mcp": _token_in_environment(
+                _mcp_launch_environment(launch), profile, _MCP_TOKEN_ENVS, _MCP_USERNAME_ENVS
+            ),
         },
         "guide": CLOUD_AGENTS_DOC,
     }
 
 
+_LT_USERNAME_ENVS = ("LAB_TRACKER_USERNAME", "LAB_TRACKER_MCP_USERNAME")
+_MCP_TOKEN_ENVS = ("LAB_TRACKER_MCP_API_KEY", "LAB_TRACKER_MCP_TOKEN")
+_MCP_USERNAME_ENVS = ("LAB_TRACKER_MCP_USERNAME",)
+
+
+def _token_in_environment(
+    environ: Mapping[str, str],
+    profile: dict[str, str],
+    token_envs: tuple[str, ...],
+    username_envs: tuple[str, ...],
+) -> bool:
+    """Whether a client started with ``environ`` holds a token, as its ``from_env`` decides.
+
+    The profile token counts only where ``LabTracker.from_env`` and
+    ``MCPSettings.from_env`` keep it: a profile address that parses, no other
+    address in the environment, and no username login.
+    """
+
+    if any(environ.get(name) for name in token_envs):
+        return True
+    if not profile.get("access_token") or any(environ.get(name) for name in username_envs):
+        return False
+    try:
+        profile_base_url = normalize_instance_base_url(
+            profile.get("base_url") or DEFAULT_BASE_URL,
+            setting_name="connection profile base_url",
+        )
+        env_base_url = _environment_base_url(environ)
+    except ValueError:
+        return False
+    return env_base_url is None or env_base_url == profile_base_url
+
+
+def _environment_base_url(environ: Mapping[str, str]) -> str | None:
+    canonical = environ.get(BASE_URL_ENV)
+    legacy = environ.get(LEGACY_MCP_BASE_URL_ENV)
+    if not (canonical or legacy):
+        return None
+    return resolve_instance_base_url(
+        ((BASE_URL_ENV, canonical), (LEGACY_MCP_BASE_URL_ENV, legacy))
+    )
+
+
+def _mcp_launch_environment(launch: JsonObject | None) -> dict[str, str]:
+    """The environment Claude Code gives ``lt-mcp``: the session's, then the entry's ``env``."""
+
+    return {**os.environ, **(launch or {}).get("env", {})}
+
+
 def _mcp_json_launch(root: Path) -> JsonObject | None:
     """The repository ``.mcp.json`` entry a Claude Code session starts ``lt-mcp`` from.
 
-    ``None`` when the file or its ``lab-tracker`` entry is missing or unreadable;
-    the scaffold check already reports a missing file.
+    Values are expanded the way Claude Code expands them (``${VAR}`` and
+    ``${VAR:-default}``), and ``base_url`` is the address ``lt-mcp`` resolves
+    from the merged environment. ``None`` when the file or its ``lab-tracker``
+    entry is missing or unreadable; the scaffold check already reports a
+    missing file.
     """
 
     try:
@@ -633,22 +702,46 @@ def _mcp_json_launch(root: Path) -> JsonObject | None:
         return None
     if not isinstance(entry, dict):
         return None
-    command = str(entry.get("command") or "")
-    env = entry.get("env")
-    if not isinstance(env, dict):
-        env = {}
-    base_url = env.get(BASE_URL_ENV) or env.get(LEGACY_MCP_BASE_URL_ENV)
+    raw_env = entry.get("env")
+    env = {
+        str(key): expand_claude_variables(str(value), os.environ)
+        for key, value in (raw_env.items() if isinstance(raw_env, dict) else ())
+    }
+    command = expand_claude_variables(str(entry.get("command") or ""), os.environ)
+    merged = {**os.environ, **env}
+    key = next((name for name in (BASE_URL_ENV, LEGACY_MCP_BASE_URL_ENV) if merged.get(name)), None)
+    base_url = merged[key] if key else None
     return {
         "command": command,
-        "command_found": bool(command) and _command_found(command),
+        "command_found": _command_found(command) if command else None,
+        "env": env,
         "base_url": base_url,
-        "base_url_unreachable": unreachable_from_cloud(str(base_url)) if base_url else None,
+        "base_url_key": key,
+        "base_url_from_mcp_json": bool(key) and env.get(key) == base_url,
+        "base_url_unreachable": unreachable_from_cloud(base_url) if base_url else None,
     }
 
 
 def _command_found(command: str) -> bool:
-    path = Path(command).expanduser()
-    return path.is_file() if path.is_absolute() else shutil.which(command) is not None
+    """Whether the session's ``PATH`` starts ``command``, not the one ``uv run`` gives ``lt``.
+
+    ``uv run`` and an activated virtualenv put the project's environment first on
+    ``PATH``; Claude Code starts ``.mcp.json`` servers without it.
+    """
+
+    path = Path(command)
+    if path.is_absolute():
+        return path.is_file()
+    return shutil.which(command, path=_session_path()) is not None
+
+
+def _session_path() -> str:
+    entries = os.environ.get("PATH", "").split(os.pathsep)
+    venv = os.environ.get("VIRTUAL_ENV")
+    if venv:
+        bin_dir = Path(venv) / ("Scripts" if sys.platform == "win32" else "bin")
+        entries = [entry for entry in entries if entry and Path(entry) != bin_dir]
+    return os.pathsep.join(entries)
 
 
 def _cloud_suggestions(status: JsonObject) -> list[str]:
@@ -677,43 +770,39 @@ def _cloud_suggestions(status: JsonObject) -> list[str]:
     return suggestions
 
 
-def _setup_script_install(revision: str | None) -> str:
-    install = client_install_command(revision)
-    if install is None:
-        return (
-            "the server-pinned `uv tool install` command from the web app's Setup page"
-        )
-    return f"`{install}`"
-
-
 def _cloud_install_suggestions(
     status: JsonObject, launch: JsonObject | None, revision: str | None
 ) -> list[str]:
     """Missing or outdated executables, fixed in the environment's setup script."""
 
     suggestions: list[str] = []
+    install = setup_script_install(revision)
     if status["lt_mcp"].get("importable") is False:
-        suggestions.append(_lt_mcp_suggestion(status["lt_mcp"]))
-    install = _setup_script_install(revision)
-    if launch is not None and not launch["command_found"]:
         suggestions.append(
-            f"The repository's `.mcp.json` starts `{launch['command'] or 'lt-mcp'}`, which "
-            "is not installed in this VM, so the Lab Tracker MCP server cannot start. "
-            f"In the cloud environment's setup script, {install} installs `lt` and "
-            "`lt-mcp` for every later session."
+            f"{_lt_mcp_suggestion(status['lt_mcp'])} In a cloud session the client comes "
+            f"from the environment's setup script, so {install} there fixes every later "
+            "session; a reinstall in this VM lasts only this session."
+        )
+    if launch is not None and launch["command_found"] is False:
+        suggestions.append(
+            f"The repository's `.mcp.json` starts `{launch['command']}`, which is not "
+            "installed in this VM, so the Lab Tracker MCP server cannot start. In the "
+            f"cloud environment's setup script, {install} installs `lt` and `lt-mcp` for "
+            "every later session."
         )
     elif status["client"].get("update_recommended"):
-        suggestions.append(
-            f"This lab-tracker client (release {status['client']['client']['version']}) is "
-            "behind its server. In a cloud session the client comes from the environment's "
-            f"setup script; replacing its install line with {install} updates every later "
-            "session."
-        )
+        suggestions.append(_behind_server_message(status["client"]))
     return suggestions
 
 
 def _cloud_server_suggestions(server: JsonObject, unreachable: str | None) -> list[str]:
-    base_url = server["base_url"]
+    base_url = server.get("base_url")
+    if base_url is None:
+        return [
+            f"This cloud session's Lab Tracker address could not be read: {server['detail']} "
+            "A person sets `LAB_TRACKER_BASE_URL` to the lab server's public https:// "
+            f"origin in the cloud environment's settings ({CLOUD_AGENTS_DOC})."
+        ]
     if unreachable is not None:
         origin = {
             "env": "from LAB_TRACKER_BASE_URL",
@@ -728,24 +817,38 @@ def _cloud_server_suggestions(server: JsonObject, unreachable: str | None) -> li
     if server["reachable"]:
         return []
     host = urlsplit(base_url).hostname or base_url
+    tailnet = (
+        f" A {host} name is reachable from outside its tailnet only through Tailscale "
+        "Funnel."
+        if host.endswith(".ts.net")
+        else ""
+    )
     return [
         f"No Lab Tracker API answered at {base_url} from this cloud session "
         f"({server.get('diagnosis')}). Either the server is down, or the cloud "
         f"environment's network access does not allow {host}: listing it under the "
         "environment's allowed domains, or adding a network secret for it, lets this "
-        f"VM reach it ({CLOUD_AGENTS_DOC})."
+        f"VM reach it ({CLOUD_AGENTS_DOC}).{tailnet}"
     ]
 
 
 def _cloud_mcp_url_suggestions(launch: JsonObject | None) -> list[str]:
+    """The ``.mcp.json`` entry's own address, when it overrides the environment's."""
+
     if launch is None or launch["base_url_unreachable"] is None:
         return []
+    if not launch["base_url_from_mcp_json"]:
+        return []
     return [
-        f"The repository's `.mcp.json` starts `lt-mcp` with LAB_TRACKER_BASE_URL="
+        f"The repository's `.mcp.json` starts `lt-mcp` with {launch['base_url_key']}="
         f"{launch['base_url']}, {unreachable_reason_text(launch['base_url_unreachable'])}, "
         "and that entry overrides the cloud environment's variable. Once "
         "`LAB_TRACKER_BASE_URL` holds the public address, `lt update --dry-run` previews "
-        "rewriting the file to it; committing the result carries it into later sessions."
+        "rewriting the file to it and `lt update` applies it; committing the result "
+        "carries it into later sessions. Computers whose saved profile names another "
+        "address for this server then need `lt setup connect --base-url <public address> "
+        "--save-token`, because `lt-mcp` sends a saved token only to the profile's own "
+        "address."
     ]
 
 
@@ -753,7 +856,7 @@ def _cloud_token_note(tokens: JsonObject) -> str:
     """The brief line's account of where this VM's Lab Tracker token comes from."""
 
     if tokens["lt"] and tokens["lt_mcp"]:
-        return "this VM's environment supplies the Lab Tracker token."
+        return "a Lab Tracker token is in this VM for both `lt` and `lt-mcp`."
     if tokens["lt"] or tokens["lt_mcp"]:
         holder, missing = (
             ("lt", "LAB_TRACKER_MCP_API_KEY")

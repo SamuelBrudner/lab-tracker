@@ -49,6 +49,7 @@ from lab_tracker.models import (
     StoreCapability,
     StoreKind,
 )
+from lab_tracker_client.cloud_session import CLOUD_AGENTS_DOC
 from lab_tracker_client.transport import (
     MAX_UPLOAD_BYTES,
     HttpTransport,
@@ -1836,8 +1837,14 @@ class LabTracker:
         if not username or not password:
             if required:
                 raise LTAPIError(
-                    "LAB_TRACKER_USERNAME and LAB_TRACKER_PASSWORD are required "
-                    "when the Lab Tracker API has authentication enabled."
+                    "The Lab Tracker API requires authentication, and this client has "
+                    "no token. A personal access token from the web app's Agents page "
+                    "goes in LAB_TRACKER_ACCESS_TOKEN or, with `lt setup connect "
+                    "--save-token`, in the connection profile; LAB_TRACKER_USERNAME and "
+                    "LAB_TRACKER_PASSWORD log in instead. In a cloud session, a person "
+                    "adds the token in the cloud environment's settings, as a network "
+                    "secret for the Lab Tracker host or as LAB_TRACKER_ACCESS_TOKEN, "
+                    f"never in the chat ({CLOUD_AGENTS_DOC})."
                 )
             return None
         response = self._transport.send(

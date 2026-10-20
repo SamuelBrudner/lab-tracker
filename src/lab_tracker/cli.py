@@ -1713,6 +1713,7 @@ def _extract_version_line(
 
 
 def _doctor(target: str | Path = ".") -> dict[str, object]:
+    from lab_tracker_client.cloud_session import cloud_session
     from lab_tracker_client.setup import _agent_hooks_status, agent_capture_suggestions
 
     root = Path(target).expanduser().resolve()
@@ -1793,7 +1794,10 @@ def _doctor(target: str | Path = ".") -> dict[str, object]:
     }
     agent_hooks = _agent_hooks_status(root)
     payload["agent_hooks"] = agent_hooks
-    payload["suggestions"] = agent_capture_suggestions(agent_hooks)
+    # Personal agent hooks installed in a cloud VM are lost with it.
+    payload["suggestions"] = (
+        [] if cloud_session()["detected"] else agent_capture_suggestions(agent_hooks)
+    )
     errors = [
         {"name": target["name"], "error": target["error"]}
         for target in targets

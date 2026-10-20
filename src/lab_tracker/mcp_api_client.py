@@ -51,6 +51,7 @@ from lab_tracker.models import (
 from lab_tracker.provenance import ARA_LAYER_NAMES
 from lab_tracker.schemas import PersistedGraphEntityType
 from lab_tracker_client.client import load_connection_profile
+from lab_tracker_client.cloud_session import CLOUD_AGENTS_DOC
 from lab_tracker_client.transport import (
     MAX_UPLOAD_BYTES,
     HttpTransport,
@@ -145,10 +146,11 @@ _NO_CREDENTIALS_MESSAGE = (
     "No Lab Tracker MCP credentials are configured, but the API requires "
     "authentication. Set LAB_TRACKER_MCP_API_KEY to an LPAT (mint via POST "
     "/auth/tokens) — the sanctioned auth method. LAB_TRACKER_MCP_USERNAME / "
-    "LAB_TRACKER_MCP_PASSWORD login is deprecated. In a cloud agent session, a "
-    "person adds the token in the cloud environment's settings, as a network "
-    "secret for the Lab Tracker host or as LAB_TRACKER_MCP_API_KEY, never in the "
-    "chat (docs/cloud-agents.md)."
+    "LAB_TRACKER_MCP_PASSWORD login is deprecated. In a cloud session, a person "
+    "adds the token in the cloud environment's settings, as a network secret for "
+    "the Lab Tracker host or as LAB_TRACKER_MCP_API_KEY, never in the chat; if a "
+    "network secret is already set, its host must match this server's host exactly "
+    f"and its token must still be valid ({CLOUD_AGENTS_DOC})."
 )
 
 

@@ -689,12 +689,14 @@ research record:
   A failed `lt-mcp` probe, including a client that cannot be built, is written
   to stderr and startup continues.
   See [setup.md](setup.md#know-when-a-client-install-is-broken-or-behind-its-server).
-- Advisory cloud agent session guidance: in a VM cloned for a coding agent
+- Advisory cloud agent session guidance: `lt setup status` always reports a
+  `cloud_session` block (`detected`, `signal`). In a VM cloned for a coding agent
   (recognized from `CLAUDE_CODE_REMOTE=true`, or declared with
-  `LAB_TRACKER_CLOUD_SESSION`), `lt setup status` adds a `cloud_session` block
-  (the address checks, the repository `.mcp.json` launch, and whether the VM
-  holds a token) and suggests cloud environment settings in place of the
-  computer-only steps. The check reads only the address and local files; it adds
+  `LAB_TRACKER_CLOUD_SESSION`), the block adds the address checks, the
+  repository `.mcp.json` launch, and whether the VM holds a token
+  (`token_in_vm`), and the report suggests cloud environment settings in place
+  of the computer-only steps; `lt doctor`, the `lt-mcp` update notice, and figure
+  capture also behave as a cloud VM needs. The check reads only the address and local files; it adds
   no network probe. The agent instruction texts and `lt-mcp`'s missing-credential
   error carry the matching rules: no local server in the VM, no token in the
   chat, and an outbox sync before the session ends. See

@@ -3,22 +3,27 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
 
-from lab_tracker.cli import _agents_fragment, init_consumer_repo
+from lab_tracker.cli import _agents_fragment, _doctor, init_consumer_repo
 from lab_tracker.client_release import client_install_command
 from lab_tracker.decision_context_constants import (
     CLOUD_SESSION_POLICY,
     MCP_SERVER_INSTRUCTIONS,
     managed_agent_activation_block,
 )
-from lab_tracker.mcp_api_client import _NO_CREDENTIALS_MESSAGE
+from lab_tracker.mcp_api_client import _NO_CREDENTIALS_MESSAGE, MCPSettings
+from lab_tracker.mcp_tools.resources import lab_tracker_quickstart
 from lab_tracker.setup_guide import setup_guide_markdown, setup_skill_markdown
+from lab_tracker_client import figure
 from lab_tracker_client import setup as setup_helpers
+from lab_tracker_client.client import LabTracker, LTAPIError, connection_profile_path
 from lab_tracker_client.cloud_session import (
     CLAUDE_CODE_REMOTE_ENV,
+    CLOUD_AGENTS_DOC,
     CLOUD_SESSION_ENV,
     LOOPBACK,
     PRIVATE_NETWORK,
@@ -75,8 +80,19 @@ def test_cloud_session_detection(
         ("http://169.254.1.1", PRIVATE_NETWORK),
         ("http://labserver:8000", PRIVATE_NETWORK),
         ("http://labserver.local", PRIVATE_NETWORK),
+        ("http://0.0.0.0:8000", LOOPBACK),
+        ("http://[::]:8000", LOOPBACK),
+        ("http://box.internal", PRIVATE_NETWORK),
+        ("http://lab.home.arpa", PRIVATE_NETWORK),
+        ("http://router.lan", PRIVATE_NETWORK),
+        ("http://box.localdomain:8000", PRIVATE_NETWORK),
         (_PUBLIC_URL, None),
         ("https://lab.example.org.", None),
+        # No host to judge: left to the probe rather than called private.
+        ("", None),
+        ("lab.example.org", None),
+        ("${LAB_TRACKER_BASE_URL}", None),
+        ("http://[::1", None),
         ("https://lab.tail1234.ts.net", None),
         ("https://8.8.8.8", None),
     ],
@@ -228,7 +244,10 @@ def test_cloud_status_reports_the_mcp_json_launch_this_vm_cannot_run(
     assert payload["cloud_session"]["mcp_json"] == {
         "command": str(missing),
         "command_found": False,
+        "env": {"LAB_TRACKER_BASE_URL": "http://127.0.0.1:8000"},
         "base_url": "http://127.0.0.1:8000",
+        "base_url_key": "LAB_TRACKER_BASE_URL",
+        "base_url_from_mcp_json": True,
         "base_url_unreachable": LOOPBACK,
     }
     install, address = payload["suggestions"][:2]
@@ -239,6 +258,8 @@ def test_cloud_status_reports_the_mcp_json_launch_this_vm_cannot_run(
     assert "LAB_TRACKER_BASE_URL=http://127.0.0.1:8000" in address
     assert "overrides the cloud environment's variable" in address
     assert "`lt update --dry-run`" in address
+    assert "`lt update` applies it" in address
+    assert "lt setup connect --base-url <public address> --save-token" in address
 
 
 def test_cloud_status_points_to_the_setup_page_without_a_server_revision(
@@ -267,7 +288,7 @@ def test_cloud_status_moves_a_client_update_into_the_setup_script(
     assert len(behind) == 1
     assert f"`{client_install_command(_SERVER_REVISION)}`" in behind[0]
     assert "setup script" in behind[0]
-    assert "lt maintain" not in behind[0]
+    assert "lt maintain --all" not in behind[0]
 
 
 def test_cloud_status_puts_skills_in_the_setup_script(
@@ -289,7 +310,7 @@ def test_cloud_status_puts_skills_in_the_setup_script(
         ({}, "no Lab Tracker token is in this VM"),
         (
             {"LAB_TRACKER_ACCESS_TOKEN": "lpat_x", "LAB_TRACKER_MCP_API_KEY": "lpat_x"},
-            "this VM's environment supplies the Lab Tracker token",
+            "a Lab Tracker token is in this VM for both `lt` and `lt-mcp`",
         ),
         ({"LAB_TRACKER_ACCESS_TOKEN": "lpat_x"}, "LAB_TRACKER_MCP_API_KEY is unset"),
         ({"LAB_TRACKER_MCP_TOKEN": "lpat_x"}, "LAB_TRACKER_ACCESS_TOKEN is unset"),
@@ -345,6 +366,9 @@ def test_cloud_session_policy_reaches_every_agent_instruction_surface() -> None:
         "CLAUDE_CODE_REMOTE=true",
         "do not start `lab-tracker serve` in the VM",
         "never ask for a token in the chat",
+        "personal agent hooks",
+        "refuses a request for lack of a token",
+        "belongs in the environment's setup script rather than `lt maintain`",
         "`lt outbox sync`, then `lt outbox status`",
         "`docs/cloud-agents.md`",
     ):
@@ -371,6 +395,8 @@ def test_setup_guide_and_skill_describe_cloud_sessions() -> None:
 def test_missing_mcp_credentials_error_keeps_a_cloud_token_out_of_the_chat() -> None:
     assert "network secret" in _NO_CREDENTIALS_MESSAGE
     assert "never in the chat" in _NO_CREDENTIALS_MESSAGE
+    assert "host must match this server's host exactly" in _NO_CREDENTIALS_MESSAGE
+    assert CLOUD_AGENTS_DOC in _NO_CREDENTIALS_MESSAGE
 
 
 @pytest.mark.parametrize(
@@ -388,3 +414,271 @@ def test_an_unreadable_mcp_json_entry_is_reported_as_absent(
 
     assert payload["cloud_session"]["mcp_json"] is None
     assert not any(".mcp.json` starts" in item for item in payload["suggestions"])
+
+
+
+def _write_entry(repo: Path, entry: dict[str, object]) -> None:
+    (repo / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"lab-tracker": entry}}), encoding="utf-8"
+    )
+
+
+def _save_profile(base_url: str, token: str = "lpat_saved") -> None:
+    path = connection_profile_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"base_url": base_url, "access_token": token}), encoding="utf-8")
+
+
+def _mcp_json_suggestions(suggestions: list[str]) -> list[str]:
+    return [item for item in suggestions if "`.mcp.json` starts" in item]
+
+
+def test_mcp_json_variables_expand_as_claude_code_expands_them(
+    cloud_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", _PUBLIC_URL)
+    bin_dir = cloud_repo / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "lt-mcp").write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setenv("LT_BIN", str(bin_dir))
+    _online(monkeypatch)
+    _write_entry(
+        cloud_repo,
+        {"command": "${LT_BIN}/lt-mcp", "env": {"LAB_TRACKER_BASE_URL": "${LAB_TRACKER_BASE_URL}"}},
+    )
+
+    payload = setup_helpers.setup_status(cloud_repo)
+
+    launch = payload["cloud_session"]["mcp_json"]
+    assert launch["command"] == f"{bin_dir}/lt-mcp"
+    assert launch["command_found"] is True
+    assert launch["base_url"] == _PUBLIC_URL
+    assert launch["base_url_unreachable"] is None
+    assert _mcp_json_suggestions(payload["suggestions"]) == []
+
+
+def test_an_unset_mcp_json_variable_takes_its_default(
+    cloud_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _offline(monkeypatch)
+    _write_entry(
+        cloud_repo,
+        {
+            "command": str(Path(__file__)),
+            "env": {"LAB_TRACKER_BASE_URL": "${LAB_TRACKER_BASE_URL:-http://127.0.0.1:8000}"},
+        },
+    )
+
+    payload = setup_helpers.setup_status(cloud_repo)
+
+    assert payload["cloud_session"]["mcp_json"]["base_url"] == "http://127.0.0.1:8000"
+    assert len(_mcp_json_suggestions(payload["suggestions"])) == 1
+
+
+def test_a_legacy_mcp_json_address_yields_to_the_environment(
+    cloud_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # lt-mcp resolves LAB_TRACKER_BASE_URL before the legacy name, and Claude Code
+    # merges the entry's env over the session's, so the session's address wins.
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", _PUBLIC_URL)
+    _online(monkeypatch)
+    _write_entry(
+        cloud_repo,
+        {"command": str(Path(__file__)), "env": {"LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000"}},
+    )
+
+    payload = setup_helpers.setup_status(cloud_repo)
+
+    launch = payload["cloud_session"]["mcp_json"]
+    assert launch["base_url"] == _PUBLIC_URL
+    assert launch["base_url_from_mcp_json"] is False
+    assert _mcp_json_suggestions(payload["suggestions"]) == []
+
+
+def test_a_legacy_mcp_json_address_alone_is_named_by_its_key(
+    cloud_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _offline(monkeypatch)
+    _write_entry(
+        cloud_repo,
+        {"command": str(Path(__file__)), "env": {"LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000"}},
+    )
+
+    suggestions = _mcp_json_suggestions(setup_helpers.setup_status(cloud_repo)["suggestions"])
+
+    assert len(suggestions) == 1
+    assert "LAB_TRACKER_MCP_BASE_URL=http://127.0.0.1:8000" in suggestions[0]
+
+
+def test_an_http_mcp_json_entry_needs_no_local_executable(
+    cloud_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", _PUBLIC_URL)
+    _online(monkeypatch)
+    _write_entry(cloud_repo, {"type": "http", "url": "https://lab.example.org/mcp"})
+
+    payload = setup_helpers.setup_status(cloud_repo)
+
+    assert payload["cloud_session"]["mcp_json"]["command_found"] is None
+    assert not any("is not installed in this VM" in item for item in payload["suggestions"])
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a POSIX executable bit stands in for PATHEXT")
+def test_lt_mcp_only_in_the_uv_run_environment_counts_as_missing(
+    cloud_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `uv run lt` puts the project's .venv/bin first on PATH; Claude Code starts the
+    # .mcp.json server with the session's PATH, which does not have it.
+    venv = cloud_repo / ".venv"
+    bin_dir = venv / "bin"
+    bin_dir.mkdir(parents=True)
+    executable = bin_dir / "lt-mcp-cloud-test"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{Path(sys.executable).parent}")
+    monkeypatch.setenv("VIRTUAL_ENV", str(venv))
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", _PUBLIC_URL)
+    _online(monkeypatch)
+    _write_mcp_json(cloud_repo, command=executable.name, base_url=_PUBLIC_URL)
+
+    payload = setup_helpers.setup_status(cloud_repo)
+
+    assert payload["cloud_session"]["mcp_json"]["command_found"] is False
+    assert any("is not installed in this VM" in item for item in payload["suggestions"])
+    monkeypatch.delenv("VIRTUAL_ENV")
+    assert setup_helpers.setup_status(cloud_repo)["cloud_session"]["mcp_json"]["command_found"]
+
+
+def test_malformed_mcp_json_values_do_not_break_the_report(
+    cloud_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", _PUBLIC_URL)
+    _online(monkeypatch)
+    _write_entry(
+        cloud_repo,
+        {"command": "~nosuchuser/bin/lt-mcp", "env": {"LAB_TRACKER_BASE_URL": "http://[::1"}},
+    )
+
+    brief = setup_helpers.setup_status(cloud_repo, brief=True)
+
+    assert brief["brief"].startswith("lab-tracker (cloud session): ")
+    assert any("is not installed in this VM" in item for item in brief["suggestions"])
+
+
+@pytest.mark.parametrize("cloud", [True, False])
+def test_an_address_that_does_not_parse_is_a_suggestion_not_a_crash(
+    cloud_repo: Path, monkeypatch: pytest.MonkeyPatch, cloud: bool
+) -> None:
+    if not cloud:
+        monkeypatch.delenv(CLAUDE_CODE_REMOTE_ENV)
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", "lab.example.org")
+    probed = _probe(monkeypatch, {"reachable": True})
+
+    payload = setup_helpers.setup_status(cloud_repo)
+
+    assert probed == []
+    assert payload["server"]["diagnosis"] == "server_check_failed"
+    address = [item for item in payload["suggestions"] if "absolute http://" in item]
+    assert len(address) == 1
+    assert ("cloud environment's settings" in address[0]) is cloud
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {},
+        {"LAB_TRACKER_BASE_URL": "http://127.0.0.1:8000"},
+        {"LAB_TRACKER_BASE_URL": _PUBLIC_URL},
+        {"LAB_TRACKER_MCP_BASE_URL": _PUBLIC_URL},
+        {"LAB_TRACKER_USERNAME": "ada"},
+        {"LAB_TRACKER_MCP_USERNAME": "ada"},
+        {"LAB_TRACKER_MCP_TOKEN": "lpat_env"},
+    ],
+)
+def test_token_in_vm_follows_each_clients_profile_token_rules(
+    cloud_repo: Path, monkeypatch: pytest.MonkeyPatch, env: dict[str, str]
+) -> None:
+    _save_profile("http://127.0.0.1:8000")
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    _offline(monkeypatch)
+
+    tokens = setup_helpers.setup_status(cloud_repo)["cloud_session"]["token_in_vm"]
+
+    lt_client = LabTracker.from_env()
+    try:
+        lt_has_token = bool(lt_client.access_token)
+    finally:
+        lt_client.close()
+    assert tokens == {"lt": lt_has_token, "lt_mcp": bool(MCPSettings.from_env().api_key)}
+
+
+def test_a_profile_token_for_another_address_is_not_counted(
+    cloud_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _save_profile("http://127.0.0.1:8000")
+    _offline(monkeypatch)
+    assert setup_helpers.setup_status(cloud_repo)["cloud_session"]["token_in_vm"] == {
+        "lt": True,
+        "lt_mcp": True,
+    }
+
+    # The committed .mcp.json names the public address, so lt-mcp drops the token.
+    _write_mcp_json(cloud_repo, command=str(Path(__file__)), base_url=_PUBLIC_URL)
+    assert setup_helpers.setup_status(cloud_repo)["cloud_session"]["token_in_vm"] == {
+        "lt": True,
+        "lt_mcp": False,
+    }
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", _PUBLIC_URL)
+    assert setup_helpers.setup_status(cloud_repo)["cloud_session"]["token_in_vm"] == {
+        "lt": False,
+        "lt_mcp": False,
+    }
+
+
+def test_doctor_offers_no_personal_agent_hooks_in_a_cloud_vm(
+    cloud_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert _doctor(cloud_repo)["suggestions"] == []
+
+    monkeypatch.delenv(CLAUDE_CODE_REMOTE_ENV)
+    assert any("lt setup agent-hooks" in item for item in _doctor(cloud_repo)["suggestions"])
+
+
+def test_figure_capture_tries_the_upload_without_a_local_token_in_a_cloud_vm(
+    cloud_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A network secret adds the token outside the VM, so no local token is no reason to skip.
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", _PUBLIC_URL)
+
+    client, project_id, close_client = figure._resolve_capture_client(client=None, project_id="p-1")
+    try:
+        assert client is not None
+        assert (project_id, close_client) == ("p-1", True)
+    finally:
+        if client is not None:
+            client.close()
+
+    monkeypatch.delenv(CLAUDE_CODE_REMOTE_ENV)
+    assert figure._resolve_capture_client(client=None, project_id="p-1") == (None, None, False)
+
+
+def test_quickstart_resource_keeps_a_cloud_agent_off_a_local_server() -> None:
+    text = " ".join(lab_tracker_quickstart().split())
+    assert "In a cloud session (`CLAUDE_CODE_REMOTE=true`), do not start the app in the VM" in text
+    assert CLOUD_AGENTS_DOC in text
+    assert "only through Tailscale Funnel" in text
+
+
+def test_lt_without_a_token_names_an_access_token_and_keeps_it_out_of_the_chat() -> None:
+    client = LabTracker(base_url=_PUBLIC_URL)
+    try:
+        with pytest.raises(LTAPIError) as excinfo:
+            client._bearer_token(required=True)
+    finally:
+        client.close()
+    message = str(excinfo.value)
+    assert "LAB_TRACKER_ACCESS_TOKEN" in message
+    assert "lt setup connect --save-token" in " ".join(message.split())
+    assert "never in the chat" in message
+    assert CLOUD_AGENTS_DOC in message

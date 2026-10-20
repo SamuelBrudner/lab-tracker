@@ -1428,7 +1428,7 @@ _CLOUD_DOC_LT_COMMANDS = (
 
 def test_cloud_agents_doc_names_what_the_code_reads() -> None:
     from lab_tracker.client_release import client_install_command
-    from lab_tracker_client import auth as auth_doctor_module
+    from lab_tracker.mcp_api_client import MCPSettings
     from lab_tracker_client import cloud_session
 
     text = _collapsed_whitespace(_read(_CLOUD_AGENTS_DOC))
@@ -1437,7 +1437,7 @@ def test_cloud_agents_doc_names_what_the_code_reads() -> None:
     assert f"{cloud_session.CLOUD_SESSION_ENV}=0" in text
     # The token names `lt` (LabTracker.from_env) and `lt-mcp` (MCPSettings) read.
     assert "LAB_TRACKER_ACCESS_TOKEN" in inspect.getsource(LabTracker.from_env)
-    assert auth_doctor_module._API_KEY_ENV[0] == "LAB_TRACKER_MCP_API_KEY"
+    assert "LAB_TRACKER_MCP_API_KEY" in inspect.getsource(MCPSettings.from_env)
     assert "LAB_TRACKER_ACCESS_TOKEN=lpat_..." in text
     assert "LAB_TRACKER_MCP_API_KEY=lpat_..." in text
     # The setup script line is the pinned install the Setup page renders.
