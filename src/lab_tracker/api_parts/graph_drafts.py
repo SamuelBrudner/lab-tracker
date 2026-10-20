@@ -263,6 +263,58 @@ class GraphDraftsApiMixin:
             resource_id_attr="change_set_id",
         )
 
+    def decide_graph_draft_group(
+        self,
+        change_set_id: UUID,
+        *,
+        operation_ids: list[UUID],
+        decision: str,
+        expected_revision: str | None = None,
+        reject_reason: GraphOperationRejectReason | None = None,
+        edits: dict[UUID, dict[str, Any]] | None = None,
+        actor: AuthContext | None = None,
+    ) -> GraphChangeSet:
+        return self._with_usage_event(
+            lambda: self.graph_drafts.decide_graph_draft_group(
+                change_set_id,
+                operation_ids=operation_ids,
+                decision=decision,
+                expected_revision=expected_revision,
+                reject_reason=reject_reason,
+                edits=edits,
+                actor=actor,
+            ),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.GRAPH_CHANGE_SET,
+            actor=actor,
+            resource_id=change_set_id,
+            resource_id_attr="change_set_id",
+        )
+
+    def decide_graph_draft_clarification(
+        self,
+        change_set_id: UUID,
+        *,
+        question: str,
+        decision: str,
+        answer: str | None = None,
+        actor: AuthContext | None = None,
+    ) -> GraphChangeSet:
+        return self._with_usage_event(
+            lambda: self.graph_drafts.decide_graph_draft_clarification(
+                change_set_id,
+                question=question,
+                decision=decision,
+                answer=answer,
+                actor=actor,
+            ),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.GRAPH_CHANGE_SET,
+            actor=actor,
+            resource_id=change_set_id,
+            resource_id_attr="change_set_id",
+        )
+
     def submit_graph_change_set(
         self,
         change_set_id: UUID,

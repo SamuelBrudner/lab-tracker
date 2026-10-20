@@ -1027,6 +1027,20 @@ class GraphDraftSubmitRequest(RequestModel):
     review_note: NonBlankStr | None = None
 
 
+class GraphDraftGroupDecisionRequest(RequestModel):
+    operation_ids: list[UUID] = Field(min_length=1, max_length=1000)
+    expected_revision: NonBlankStr
+    decision: Literal["accepted", "rejected", "deferred", "resume"]
+    reject_reason: GraphOperationRejectReason | None = None
+    edits: dict[UUID, GraphDraftOperationUpdate] = Field(default_factory=dict)
+
+
+class GraphDraftClarificationDecisionRequest(RequestModel):
+    question: NonBlankStr
+    decision: Literal["answered", "deferred", "resume"]
+    answer: NonBlankStr | None = None
+
+
 class GraphChangeSetSummary(BaseModel):
     change_set_id: UUID
     project_id: UUID
@@ -1052,6 +1066,7 @@ class GraphChangeSetSummary(BaseModel):
     error_metadata: dict[str, Any] = Field(default_factory=dict)
     operation_count: int = 0
     deferred_count: int = 0
+    triage_summary: dict[str, int] | None = None
     created_at: datetime
     created_by: str | None = None
     created_by_user_id: UUID | None = None

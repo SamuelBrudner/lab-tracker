@@ -29,7 +29,8 @@ const entityTypeShape = /** @type {import("../contract.js").Validator<NonNullabl
     "analysis",
     "claim",
     "visualization",
-    "goal"
+    "goal",
+    "exploration_node"
   )
 );
 const operationKindShape = /** @type {import("../contract.js").Validator<NonNullable<GraphChangeOperation["op"]>>} */ (
@@ -76,8 +77,8 @@ const changeSetShape = object({
 });
 
 /** @param {string} changeSetId */
-async function getChangeSet(changeSetId, options = {}) {
-  const envelope = await apiFetch(`/graph-drafts/${changeSetId}`, options);
+async function getChangeSet(changeSetId, options = {}, prefetch = false) {
+  const envelope = await apiFetch(`/graph-drafts/${changeSetId}${prefetch ? "?record_view=false" : ""}`, options);
   return parseResource(envelope, changeSetShape);
 }
 

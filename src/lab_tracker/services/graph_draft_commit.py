@@ -9,6 +9,7 @@ from uuid import UUID
 
 from lab_tracker.auth import AuthContext
 from lab_tracker.errors import ValidationError
+from lab_tracker.graph_draft_triage import carryover_triage
 from lab_tracker.member_onboarding import (
     is_member_checkpoint,
     validate_member_alignment_operations,
@@ -180,9 +181,7 @@ class TransactionalDraftCommitCoordinator(BaseService):
         committed_by = self.authorization.admit_graph_commit(actor, change_set=change_set)
         if change_set.status == GraphChangeSetStatus.COMMITTING:
             raise ValidationError("This graph draft is already being committed.")
-        is_member_onboarding = (
-            change_set.purpose == GraphDraftPurpose.MEMBER_CHECKPOINT_ALIGNMENT
-        )
+        is_member_onboarding = change_set.purpose == GraphDraftPurpose.MEMBER_CHECKPOINT_ALIGNMENT
         if is_member_onboarding and change_set.status != GraphChangeSetStatus.SUBMITTED:
             raise ValidationError(
                 "Member onboarding proposals must be submitted before owner commit."
@@ -273,6 +272,13 @@ class TransactionalDraftCommitCoordinator(BaseService):
                 change_set.change_set_id,
                 change_set.committed_at,
             )
+            followup = carryover_triage(change_set, ref_map)
+            if followup is not None:
+                self.records.save_graph_change_set(followup)
+                change_set.review_metadata = {
+                    **change_set.review_metadata,
+                    "review_triage_carryover_to": str(followup.change_set_id),
+                }
             self.records.save_graph_change_set(change_set)
             if is_member_onboarding:
                 self.record_usage_event(
@@ -288,9 +294,7 @@ class TransactionalDraftCommitCoordinator(BaseService):
         self,
         change_set: GraphChangeSet,
     ) -> None:
-        checkpoint = self.records.get_member_onboarding_checkpoint(
-            change_set.source_note_id
-        )
+        checkpoint = self.records.get_member_onboarding_checkpoint(change_set.source_note_id)
         if checkpoint is None or not is_member_checkpoint(checkpoint):
             raise ValidationError("Member onboarding source checkpoint is unavailable.")
         validate_member_alignment_operations(
@@ -327,9 +331,7 @@ class TransactionalDraftCommitCoordinator(BaseService):
                 self.goals.reached_project_ids(
                     None if is_create else operation.target_entity_id,
                     project_id=(
-                        _payload_uuid(operation.payload.get("project_id"))
-                        if is_create
-                        else None
+                        _payload_uuid(operation.payload.get("project_id")) if is_create else None
                     ),
                     targets=_payload_goal_link_targets(operation.payload),
                 )
@@ -377,17 +379,11 @@ class TransactionalDraftCommitCoordinator(BaseService):
                     raise ValidationError("Onboarding note links require targets.")
                 for target in raw_targets:
                     if not isinstance(target, dict) or target.get("entity_type") != "question":
-                        raise ValidationError(
-                            "Onboarding note links require question targets."
-                        )
+                        raise ValidationError("Onboarding note links require question targets.")
                     try:
-                        question = self.questions.get_question(
-                            UUID(str(target.get("entity_id")))
-                        )
+                        question = self.questions.get_question(UUID(str(target.get("entity_id"))))
                     except (TypeError, ValueError) as exc:
-                        raise ValidationError(
-                            "Onboarding question target is invalid."
-                        ) from exc
+                        raise ValidationError("Onboarding question target is invalid.") from exc
                     project_ids.add(question.project_id)
         for project_id in sorted(project_ids, key=str):
             self.commit_repository.lock_project_question_dag(project_id)
@@ -400,16 +396,12 @@ class TransactionalDraftCommitCoordinator(BaseService):
             if not _is_note_question_link(operation):
                 continue
             for target in operation.payload.get("targets", []):
-                question = self.questions.get_question(
-                    UUID(str(target.get("entity_id")))
-                )
+                question = self.questions.get_question(UUID(str(target.get("entity_id"))))
                 if question.status not in {
                     QuestionStatus.ACTIVE,
                     QuestionStatus.STAGED,
                 }:
-                    raise ValidationError(
-                        "Onboarding may link only active or staged questions."
-                    )
+                    raise ValidationError("Onboarding may link only active or staged questions.")
 
     def _lock_dataset_update_projects(
         self,
@@ -437,14 +429,9 @@ class TransactionalDraftCommitCoordinator(BaseService):
                 limit=None,
                 offset=0,
             )
-            experiment_ids.update(
-                experiment.experiment_id
-                for experiment in parent_experiments
-            )
+            experiment_ids.update(experiment.experiment_id for experiment in parent_experiments)
         if dataset_ids_by_project:
-            self.commit_repository.lock_experiment_updates(
-                sorted(experiment_ids, key=str)
-            )
+            self.commit_repository.lock_experiment_updates(sorted(experiment_ids, key=str))
         for project_id in sorted(dataset_ids_by_project, key=str):
             self.commit_repository.lock_dataset_updates(
                 project_id,
@@ -476,8 +463,7 @@ def _takes_project_reference_lock(operations: list[GraphChangeOperation]) -> boo
     """
 
     return any(
-        operation.entity_type in _PROJECT_REFERENCE_LOCKING_ENTITY_TYPES
-        for operation in operations
+        operation.entity_type in _PROJECT_REFERENCE_LOCKING_ENTITY_TYPES for operation in operations
     )
 
 

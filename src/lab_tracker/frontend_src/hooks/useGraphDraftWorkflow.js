@@ -319,7 +319,7 @@ function useGraphDraftWorkflow({
   // independently non-duplicable and never aimed at a draft that is no
   // longer the active route. Resolves true only when the server accepted it.
   async function patchOperation(operation, body, flashMessage) {
-    if (!isCurrent) {
+    if (!isCurrent || pendingCommandsRef.current.triage) {
       return false;
     }
     const commandKey = `op:${operation.operation_id}`;
@@ -449,7 +449,7 @@ function useGraphDraftWorkflow({
   }
 
   async function acceptAll() {
-    if (!changeSet || !canEditDraft) {
+    if (!changeSet || !canEditDraft || pendingCommandsRef.current.triage) {
       return;
     }
     const dirty = [];
@@ -602,13 +602,95 @@ function useGraphDraftWorkflow({
     }
   }
 
+  async function decideTriageGroup(group, decision, rejectReason = null) {
+    if (!canEditDraft || Object.values(pendingCommandsRef.current).some(Boolean)) {
+      return false;
+    }
+    const ids = decision === "resume" ? group.deferred_operation_ids : group.pending_operation_ids;
+    if (!ids?.length) {
+      return false;
+    }
+    const edits = {};
+    if (decision === "accepted" || decision === "rejected") {
+      for (const id of ids) {
+        const operation = changeSet.operations.find((item) => item.operation_id === id);
+        if (!operation || pendingCommandsRef.current[`op:${id}`]) {
+          return false;
+        }
+        const payload = bufferedPayload(operation);
+        if (!payload) {
+          return false;
+        }
+        edits[id] = { payload, review_note: operationReviewNotes[id]?.trim() || null };
+      }
+    }
+    if (!beginCommand("triage")) {
+      return false;
+    }
+    const requestedId = changeSetId;
+    const generation = loadGenerationRef.current;
+    setBusy(true);
+    setFlash("", "");
+    try {
+      const nextChangeSet = await apiRequest(`/graph-drafts/${requestedId}/triage-decision`, {
+        body: { operation_ids: ids, expected_revision: group.revision, decision, reject_reason: rejectReason, edits },
+        method: "POST", token,
+      });
+      if (generation !== loadGenerationRef.current) {
+        return false;
+      }
+      adoptChangeSet(nextChangeSet);
+      if (decision === "accepted") {
+        setBulkAcceptedIds(ids);
+      }
+      setFlash(decision === "deferred" ? "Saved for later." : decision === "resume" ? "Decision returned to review." : "Decision saved.");
+      return true;
+    } catch (err) {
+      if (generation === loadGenerationRef.current) {
+        setFlash("", err.message || "Failed to save this triage decision.");
+      }
+      return false;
+    } finally {
+      endCommand("triage");
+      setBusy(false);
+    }
+  }
+
+  async function decideTriageClarification(group, decision, answer = null) {
+    if (!canEditDraft || Object.values(pendingCommandsRef.current).some(Boolean) || !beginCommand("triage")) {
+      return false;
+    }
+    const generation = loadGenerationRef.current;
+    setBusy(true);
+    setFlash("", "");
+    try {
+      const next = await apiRequest(`/graph-drafts/${changeSetId}/triage-clarification`, {
+        body: { question: group.question, decision, answer }, method: "POST", token,
+      });
+      if (generation !== loadGenerationRef.current) {
+        return false;
+      }
+      adoptChangeSet(next);
+      setFlash(decision === "answered" ? "Answer saved with this review." : "Clarification saved for review.");
+      return true;
+    } catch (err) {
+      if (generation === loadGenerationRef.current) {
+        setFlash("", err.message || "Failed to save the clarification.");
+      }
+      return false;
+    } finally {
+      endCommand("triage");
+      setBusy(false);
+    }
+  }
+
   // Shown as the commit field's placeholder and used verbatim when the person
   // leaves it empty, so a typed message is optional rather than a gate.
   const suggestedCommitMessage = defaultCommitMessage(changeSet, acceptedCount);
 
   async function commitDraft(event) {
     event.preventDefault();
-    if (!changeSet || !canCommitDraft) {
+    if (!changeSet || !canCommitDraft || pendingCommandsRef.current.triage) {
       return;
     }
     const message = commitMessage.trim() || suggestedCommitMessage;
@@ -640,7 +722,7 @@ function useGraphDraftWorkflow({
   }
 
   async function submitDraft() {
-    if (!changeSet || !canSubmitDraft) {
+    if (!changeSet || !canSubmitDraft || pendingCommandsRef.current.triage) {
       return;
     }
     if (!beginCommand("submit")) {
@@ -771,6 +853,8 @@ function useGraphDraftWorkflow({
     decideProvenanceLink,
     acceptAll,
     undoAcceptAll,
+    decideTriageGroup,
+    decideTriageClarification,
     commitDraft,
     submitDraft,
     reviewDraft,

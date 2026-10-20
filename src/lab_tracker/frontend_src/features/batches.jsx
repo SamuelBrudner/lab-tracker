@@ -5,6 +5,8 @@ import { formatDate } from "../shared/formatters.js";
 import { DailyReviewScheduleForm } from "./daily-review-schedule.jsx";
 import { DelegatedCurationForm } from "./delegated-curation.jsx";
 import { SessionSuggestionsCard } from "./sessions/SessionSuggestionsCard.jsx";
+import { CatchUpReview } from "./graph-drafts/CatchUpReview.jsx";
+import { ReviewEngagement } from "./graph-drafts/ReviewEngagement.jsx";
 
 const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
@@ -222,6 +224,10 @@ function BatchCards({ batches, emptyMessage, navigate }) {
         ) : null}
         {batch.model ? <span className="pill">{batch.model}</span> : null}
       </div>
+      {batch.triage_summary ? <p className="review-queue-prompt">
+        {(batch.triage_summary.judgment || 0) + (batch.triage_summary.confirmations || 0)} decisions need your input
+        {batch.triage_summary.later > 0 ? ` · ${batch.triage_summary.later} can wait` : ""}
+      </p> : null}
       <button
         type="button"
         className="btn-primary"
@@ -241,6 +247,8 @@ function BatchReviewPage({
   navigate,
   canManageGraph,
   canManageProject = false,
+  user = null,
+  canWrite = false,
   setBusy,
   setFlash,
 }) {
@@ -252,6 +260,7 @@ function BatchReviewPage({
   const [captureDrafts, setCaptureDrafts] = useState([]);
   const [captureDraftsError, setCaptureDraftsError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [catchUp, setCatchUp] = useState(false);
   // Each load bumps the generation; results, failures and the loading reset of
   // a superseded load (e.g. for a previously selected project) are ignored.
   const loadGenerationRef = useRef(0);
@@ -460,6 +469,8 @@ function BatchReviewPage({
               canWrite={canManageGraph}
             />
             <h3>Ready for you</h3>
+            {batches.length > 1 ? <button type="button" className="btn-primary" onClick={() => setCatchUp(true)}>Triage across pending reviews</button> : null}
+            {catchUp ? <CatchUpReview key={selectedProjectId || "all"} token={token} projectId={selectedProjectId} user={user} canWrite={canWrite} canManageGraph={canManageGraph} navigate={navigate} setBusy={setBusy} setFlash={setFlash} onClose={() => { setCatchUp(false); loadBatches(); }} /> : null}
             <BatchCards
               batches={batches}
               emptyMessage="No daily reviews need your response."
@@ -513,6 +524,7 @@ function BatchReviewPage({
 
           {canManageProject && selectedProjectId ? (
             <div className="stack">
+              <ReviewEngagement token={token} projectId={selectedProjectId} />
               <h3>What AI may apply on its own</h3>
               <DelegatedCurationForm
                 token={token}
