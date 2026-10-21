@@ -304,6 +304,7 @@ client do not apply to it.
 | Codex in the ChatGPT desktop app | you, in the app's **Settings**, or `~/.codex/config.toml` | no |
 | Codex CLI | you, with `codex mcp add`, or `~/.codex/config.toml` | no |
 | Claude Code cloud session (claude.ai/code, `claude --cloud`) | the committed repository `.mcp.json`, with `lt-mcp` installed by the cloud environment's setup script | yes, `.mcp.json` |
+| Codex cloud task (ChatGPT, `codex cloud`, `@codex` on GitHub) | nothing: OpenAI documents no MCP server for cloud tasks, so the agent reads `AGENTS.md` and runs the `lt` that the environment's install script installs | yes, the `AGENTS.md` block |
 
 Two rules apply in this section. The first covers the registrations you make by
 hand, Claude Desktop chat and both Codex products; the second covers each
@@ -532,18 +533,23 @@ Verify:
    the same terminal environment that launches `codex`.
 3. In-client read: ask Codex to call `lab_tracker_list_projects` with `limit` 1.
 
-#### Cloud sessions (Claude Code on the web and hosted agents)
+#### Cloud sessions (Claude Code on the web, Codex cloud, and hosted agents)
 
 A cloud session runs the agent in a fresh VM cloned from the repository, so
-nothing installed or saved on your computer is there. In a session with one
-repository it reads the committed `.mcp.json`, but `lt-mcp` comes from the cloud environment's setup script, the
-server address from the environment's `LAB_TRACKER_BASE_URL` (a public HTTPS
-address, because the VM's loopback is the VM itself), and the token from a
-network secret that the environment's proxy adds outside the VM.
-[Cloud agent sessions](cloud-agents.md) walks through each setting, the check
-on the address in `.mcp.json`, and which capture outlives the VM.
+nothing installed or saved on your computer is there. Claude Code, in a session
+with one repository, reads the committed `.mcp.json`, but `lt-mcp` comes from
+the cloud environment's setup script, the server address from the environment's
+`LAB_TRACKER_BASE_URL` (normally a public HTTPS address, because the VM's
+loopback is the VM itself), and the token from a network secret that the
+environment's proxy adds outside the VM. A Codex cloud task has no Lab Tracker
+MCP server: its agent reads `AGENTS.md` and uses `lt`, which the environment's
+install script installs, with `LAB_TRACKER_CLOUD_SESSION=codex` set so
+`lt setup status` recognizes the task. [Cloud agent sessions](cloud-agents.md)
+walks through each setting for both, the check on the address in `.mcp.json`,
+and which capture outlives the VM.
 
-Verify, from a session in that environment:
+Verify, from a Claude Code session in that environment (Codex tasks use
+`lt setup status`, `lt readiness`, and `lt prime`, as the cloud page shows):
 
 1. Registration check: `lt setup status` shows `cloud_session.detected` as
    `true` and no suggestion about `.mcp.json` or the server address.

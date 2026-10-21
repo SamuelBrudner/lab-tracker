@@ -212,26 +212,41 @@ guided setup uses `lt hooks install` (`docs/repo-report-capture.md`).
 ## Cloud sessions
 
 A cloud session (Claude Code on the web, `claude --cloud`, a cloud
-scheduled task, or another vendor's hosted agent) runs in a fresh VM
-cloned from the repository and discarded later, so nothing the steps
-above wrote to the person's computer is there. `lt setup status`
-recognizes one from `CLAUDE_CODE_REMOTE=true` (or an explicit
-`LAB_TRACKER_CLOUD_SESSION`) and suggests cloud environment settings
-instead, which a person changes in the environment's settings:
+scheduled task, a Codex cloud task, or another vendor's hosted agent)
+runs in a fresh VM cloned from the repository and discarded later, so
+nothing the steps above wrote to the person's computer is there. `lt
+setup status` recognizes one from `CLAUDE_CODE_REMOTE=true` or an
+explicit `LAB_TRACKER_CLOUD_SESSION` (OpenAI documents no marker for a
+Codex cloud task, so its environment sets
+`LAB_TRACKER_CLOUD_SESSION=codex`) and suggests cloud environment
+settings instead, which a person changes in the environment's settings:
 
-- the setup script runs the server-pinned `uv tool install` (step 1)
-  and `lt update --skills-only`, so `lt`, `lt-mcp`, and both skills
-  are in every session's VM;
-- `LAB_TRACKER_BASE_URL` holds the lab server's public HTTPS address,
-  because the VM's loopback is the VM itself and the VM is on no lab
-  network or tailnet; the committed `.mcp.json` carries the same
-  address, since its entry overrides the environment's value;
-- the network access setting allows that host;
-- the token is a network secret for that host, which the
-  environment's proxy adds outside the VM, or else
-  `LAB_TRACKER_ACCESS_TOKEN` and `LAB_TRACKER_MCP_API_KEY` variables,
-  which anyone who uses the environment can read. It is never pasted
-  into the chat.
+- the setup script (a Codex environment's install script) runs the
+  server-pinned `uv tool install` (step 1) and `lt update
+  --skills-only`, so `lt`, `lt-mcp`, and both skills are in every
+  session's VM;
+- `LAB_TRACKER_BASE_URL` holds an address the VM can reach, normally
+  the lab server's public HTTPS address: the VM's loopback is the VM
+  itself, and only a VPN the environment joins (a Codex environment's
+  Tailscale setting) puts it on a lab network or tailnet; for Claude
+  Code, the committed `.mcp.json` carries the same address, since its
+  entry overrides the environment's value;
+- the network or internet access setting allows that host (a Codex
+  agent has none until it is turned on);
+- the token is a network secret for that host or an environment
+  variable (`LAB_TRACKER_ACCESS_TOKEN` and `LAB_TRACKER_MCP_API_KEY`),
+  which anyone who uses the environment can read. A Claude Code network
+  secret never enters the VM; a Codex one reaches programs as a
+  placeholder under the variable's name, replaced only on HTTPS port
+  443; a Codex Cloud (Legacy) secret reaches only the setup script, so
+  there the token is an environment variable. It is never pasted into
+  the chat.
+
+OpenAI documents no MCP server for Codex cloud tasks, so a Codex agent
+there reads AGENTS.md and reaches Lab Tracker through `lt` (`lt
+prime` lists the project's open questions). Codex Cloud (Legacy), which
+still runs @codex requests on GitHub and Linear tasks, can limit the
+agent to GET, HEAD, and OPTIONS requests, which blocks every capture.
 
 Committed files (`.mcp.json`, `.claude/settings.json`, `lt_ids.json`,
 the managed blocks) reach every cloud session, so `lt setup init`,
@@ -320,4 +335,4 @@ rerunning its pinned `uv add` (step 5), which neither `lt update` nor
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.3.0 sha256=2dd9703cfc2f -->
+<!-- lab-tracker-setup-guide version=0.3.0 sha256=e1c9b2a2422a -->

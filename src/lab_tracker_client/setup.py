@@ -54,10 +54,15 @@ from lab_tracker_client.client import (
     load_connection_profile,
 )
 from lab_tracker_client.cloud_session import (
+    CLAUDE_CODE,
     CLOUD_AGENTS_DOC,
+    CODEX,
+    PRIVATE_NETWORK,
     cloud_session,
     cloud_update_steps,
+    codex_network_disabled,
     expand_claude_variables,
+    script_name,
     setup_script_install,
     unreachable_from_cloud,
     unreachable_reason_text,
@@ -330,7 +335,8 @@ def _brief_line(status: JsonObject) -> str:
     # A cloud session with no suggestions reached its server: an unreachable one
     # always carries a suggestion there.
     if cloud["detected"]:
-        return f"{prefix}: server reachable; {_cloud_token_note(cloud['token_in_vm'])}"
+        note = _cloud_token_note(cloud["token_in_vm"], cloud["host"])
+        return f"{prefix}: server reachable; {note}"
     if not status["server"]["reachable"]:
         return f"{prefix}: capture is configured; server currently unreachable."
     return f"{prefix}: capture is configured; server reachable."
@@ -418,9 +424,10 @@ def _behind_server_message(client: JsonObject) -> str:
         client["server"]["version"],
         client["server"]["revision"],
     )
+    session = cloud_session()
     steps = (
-        cloud_update_steps(normalized_revision(server.revision))
-        if cloud_session()["detected"]
+        cloud_update_steps(normalized_revision(server.revision), session["host"])
+        if session["detected"]
         else update_steps(server)
     )
     return (
@@ -492,6 +499,7 @@ def _brief_error(error: object) -> str:
 
 def _suggestions(status: JsonObject) -> list[str]:
     suggestions = _install_suggestions(status)
+    suggestions.extend(_codex_network_suggestions(status["server"]))
     if status["server"].get("diagnosis") == "server_check_failed":
         suggestions.append(f"{status['server']['detail']} {status['server']['next_step']}")
     repo = status["repo"]
@@ -617,11 +625,11 @@ def _cloud_session_status(root: Path, server: JsonObject, profile: dict[str, str
     session = cloud_session()
     if not session["detected"]:
         return session
-    launch = _mcp_json_launch(root)
-    base_url = server.get("base_url")
+    # Only Claude Code starts lt-mcp from the repository's .mcp.json.
+    launch = _mcp_json_launch(root) if session["host"] == CLAUDE_CODE else None
     return {
         **session,
-        "base_url_unreachable": unreachable_from_cloud(base_url) if base_url else None,
+        "base_url_unreachable": _base_url_unreachable(server),
         "mcp_json": launch,
         "token_in_vm": {
             "lt": _token_in_environment(
@@ -633,6 +641,21 @@ def _cloud_session_status(root: Path, server: JsonObject, profile: dict[str, str
         },
         "guide": CLOUD_AGENTS_DOC,
     }
+
+
+def _base_url_unreachable(server: JsonObject) -> str | None:
+    """Why this VM cannot reach the server's address, judged by the address and the probe.
+
+    A loopback address is the VM itself even when something answers there. A
+    private address that answered is reached through a network the environment
+    joined (a Codex environment's VPN), so only an unanswered one is reported.
+    """
+
+    base_url = server.get("base_url")
+    reason = unreachable_from_cloud(base_url) if base_url else None
+    if reason == PRIVATE_NETWORK and server.get("reachable"):
+        return None
+    return reason
 
 
 _LT_USERNAME_ENVS = ("LAB_TRACKER_USERNAME", "LAB_TRACKER_MCP_USERNAME")
@@ -764,39 +787,67 @@ def _cloud_suggestions(status: JsonObject) -> list[str]:
     """
 
     cloud = status["cloud_session"]
+    host = cloud["host"]
     revision = normalized_revision(status["client"]["server"]["revision"])
-    suggestions = _cloud_install_suggestions(status, cloud.get("mcp_json"), revision)
-    suggestions.extend(_cloud_server_suggestions(status["server"], cloud["base_url_unreachable"]))
+    suggestions = _cloud_install_suggestions(status, cloud.get("mcp_json"), revision, host)
+    suggestions.extend(_codex_network_suggestions(status["server"]))
+    suggestions.extend(
+        _cloud_server_suggestions(status["server"], cloud["base_url_unreachable"], host)
+    )
     suggestions.extend(_cloud_mcp_url_suggestions(cloud.get("mcp_json")))
+    if host == CODEX and not cloud["token_in_vm"]["lt"]:
+        suggestions.append(
+            "No Lab Tracker token is in this VM, and in a Codex cloud task even a network "
+            "secret shows up here, as a placeholder. In Codex Cloud, a network secret "
+            "with the key LAB_TRACKER_ACCESS_TOKEN and the server's host as its allowed "
+            "domain supplies one without exposing it; in Codex Cloud (Legacy), whose "
+            "secrets reach only the setup script, it is an environment variable. A person "
+            "adds it in the environment's settings, never in the chat."
+        )
     suggestions.extend(_repo_file_suggestions(status["repo"]))
     if status["skills"].get("all_resources_up_to_date") is False:
         suggestions.append(
             "The Lab Tracker skills are missing or stale in this VM. Skills in a "
             "person's own skill folders do not reach cloud sessions; "
-            "`lt update --skills-only` in the cloud environment's setup script installs "
-            "them for every later session, and running it here fixes this session only."
+            f"`lt update --skills-only` in the cloud environment's {script_name(host)} "
+            "installs them for every later session, and running it here fixes this "
+            "session only."
         )
     return suggestions
 
 
+def _codex_network_suggestions(server: JsonObject) -> list[str]:
+    """Codex ran this command without network, so the probe's failure says nothing else."""
+
+    if server.get("reachable") or not codex_network_disabled():
+        return []
+    return [
+        "Codex runs this command with network access off "
+        "(CODEX_SANDBOX_NETWORK_DISABLED=1), so it cannot reach Lab Tracker: on a "
+        "computer, Codex's sandbox settings decide whether commands get network "
+        "access, and in a Codex cloud task, the environment's internet access does."
+    ]
+
+
 def _cloud_install_suggestions(
-    status: JsonObject, launch: JsonObject | None, revision: str | None
+    status: JsonObject, launch: JsonObject | None, revision: str | None, host: str | None
 ) -> list[str]:
     """Missing or outdated executables, fixed in the environment's setup script."""
 
     suggestions: list[str] = []
     install = setup_script_install(revision)
+    script = script_name(host)
     if status["lt_mcp"].get("importable") is False:
         suggestions.append(
             f"{_lt_mcp_suggestion(status['lt_mcp'])} In a cloud session the client comes "
-            f"from the environment's setup script, so {install} there fixes every later "
+            f"from the environment's {script}, so {install} there fixes every later "
             "session; a reinstall in this VM lasts only this session."
         )
     if launch is not None and launch["command_found"] is False:
         suggestions.append(
             f"The repository's `.mcp.json` starts `{launch['command']}`, which is not "
             "installed in this VM, so the Lab Tracker MCP server cannot start. In the "
-            f"cloud environment's setup script, {install} installs `lt` and `lt-mcp` for "
+            f"cloud environment's {script}, {install} installs `lt` and `lt-mcp` for "
             "every later session."
         )
     elif status["client"].get("update_recommended"):
@@ -804,7 +855,9 @@ def _cloud_install_suggestions(
     return suggestions
 
 
-def _cloud_server_suggestions(server: JsonObject, unreachable: str | None) -> list[str]:
+def _cloud_server_suggestions(
+    server: JsonObject, unreachable: str | None, host: str | None
+) -> list[str]:
     base_url = server.get("base_url")
     if base_url is None:
         return [
@@ -819,26 +872,44 @@ def _cloud_server_suggestions(server: JsonObject, unreachable: str | None) -> li
         }.get(server["source"], "the default, since nothing in this VM sets one")
         return [
             f"This cloud session's Lab Tracker address, {base_url} ({origin}), is "
-            f"{unreachable_reason_text(unreachable)}. A cloud VM reaches a lab server only "
-            "at a public HTTPS address, which a person sets as `LAB_TRACKER_BASE_URL` in "
-            f"the cloud environment's settings; {CLOUD_AGENTS_DOC} lists every setting."
+            f"{unreachable_reason_text(unreachable, host)}. A person sets "
+            "`LAB_TRACKER_BASE_URL` to an address this VM can reach, normally the lab "
+            "server's public HTTPS origin, in the cloud environment's settings; "
+            f"{CLOUD_AGENTS_DOC} lists every setting."
         ]
     if server["reachable"]:
         return []
-    host = urlsplit(base_url).hostname or base_url
-    tailnet = (
-        f" A {host} name is reachable from outside its tailnet only through Tailscale "
-        "Funnel."
-        if host.endswith(".ts.net")
-        else ""
-    )
+    name = urlsplit(base_url).hostname or base_url
     return [
         f"No Lab Tracker API answered at {base_url} from this cloud session "
-        f"({server.get('diagnosis')}). Either the server is down, or the cloud "
-        f"environment's network access does not allow {host}: listing it under the "
-        "environment's allowed domains, or adding a network secret for it, lets this "
-        f"VM reach it ({CLOUD_AGENTS_DOC}).{tailnet}"
+        f"({server.get('diagnosis')}). {_network_access_advice(name, host)} "
+        f"({CLOUD_AGENTS_DOC}).{_tailnet_note(name, host)}"
     ]
+
+
+def _network_access_advice(name: str, host: str | None) -> str:
+    if host == CODEX:
+        return (
+            f"Either the server is down, or the Codex environment's internet access, "
+            f"which is off unless turned on, does not allow {name}: allowing {name} "
+            "there, which saving a network secret for it also does, lets this VM reach it"
+        )
+    return (
+        f"Either the server is down, or the cloud environment's network access does not "
+        f"allow {name}: listing it under the environment's allowed domains, or adding a "
+        "network secret for it, lets this VM reach it"
+    )
+
+
+def _tailnet_note(name: str, host: str | None) -> str:
+    if not name.endswith(".ts.net"):
+        return ""
+    if host == CODEX:
+        return (
+            f" A {name} name is reachable through the Codex environment's Tailscale VPN, "
+            "or from anywhere through Tailscale Funnel."
+        )
+    return f" A {name} name is reachable from outside its tailnet only through Tailscale Funnel."
 
 
 def _cloud_mcp_url_suggestions(launch: JsonObject | None) -> list[str]:
@@ -855,7 +926,8 @@ def _cloud_mcp_url_suggestions(launch: JsonObject | None) -> list[str]:
         return []
     return [
         f"The repository's `.mcp.json` starts `lt-mcp` with {BASE_URL_ENV}="
-        f"{launch['base_url']}, {unreachable_reason_text(launch['base_url_unreachable'])}, "
+        f"{launch['base_url']}, "
+        f"{unreachable_reason_text(launch['base_url_unreachable'], CLAUDE_CODE)}, "
         "and that entry overrides the cloud environment's variable. Once "
         "`LAB_TRACKER_BASE_URL` holds the public address, `lt update --dry-run` previews "
         "rewriting the file to it and `lt update` applies it; committing the result "
@@ -865,9 +937,13 @@ def _cloud_mcp_url_suggestions(launch: JsonObject | None) -> list[str]:
     ]
 
 
-def _cloud_token_note(tokens: JsonObject) -> str:
+def _cloud_token_note(tokens: JsonObject, host: str | None) -> str:
     """The brief line's account of where this VM's Lab Tracker token comes from."""
 
+    if host == CODEX:
+        # Codex starts no lt-mcp in a cloud task, and its network secrets show up as
+        # placeholders, so `lt`'s variable is the whole story (a gap is a suggestion).
+        return "a Lab Tracker token is available to `lt` in this VM."
     if tokens["lt"] and tokens["lt_mcp"]:
         return "a Lab Tracker token is in this VM for both `lt` and `lt-mcp`."
     if tokens["lt"] or tokens["lt_mcp"]:

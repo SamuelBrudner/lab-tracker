@@ -3,17 +3,21 @@
 A coding agent does not always run on your computer. Claude Code on the web
 ([claude.ai/code](https://claude.ai/code)), cloud sessions started from the
 Claude desktop or mobile app or with `claude --cloud`, cloud scheduled tasks,
-and other vendors' hosted agents run in a **cloud session**: a fresh virtual
-machine (VM) with your repository cloned into it. Lab Tracker works there, but
+Codex cloud tasks, and other vendors' hosted agents run in a **cloud session**:
+a fresh virtual machine (VM) with your repository cloned into it. Lab Tracker works there, but
 the setup in [agent setup](agent-setup.md) assumes the agent runs where you
 installed `lt` and saved your connection profile, and none of that is in the VM.
 
-This page is for the person who sets up the cloud environment. It covers Claude
-Code cloud sessions in detail; the [last section](#other-hosted-agents) gives
-the same checklist for other hosted agents. Anthropic's
+This page is for the person who sets up the cloud environment. It covers
+[Claude Code cloud sessions](#configure-a-claude-code-cloud-environment) and
+[Codex cloud tasks](#configure-a-codex-cloud-environment) in detail; the
+[last section](#other-hosted-agents) gives the same checklist for other hosted
+agents. Anthropic's
 [cloud environment documentation](https://code.claude.com/docs/en/cloud-environments)
-is the reference for every environment setting named here, and its screens
-change faster than this page, so follow it where the two differ.
+and OpenAI's
+[cloud environments guide](https://learn.chatgpt.com/docs/environments/cloud-environments)
+are the references for every environment setting named here, and their screens
+change faster than this page, so follow them where they differ.
 
 **The rules do not change in the cloud.** An agent still proposes and a person
 still commits, tokens are still minted by a person in the web app, and a token
@@ -24,7 +28,7 @@ is never pasted into an agent's chat.
 | | On your computer | In a cloud session |
 | --- | --- | --- |
 | `lt` and `lt-mcp` | `uv tool install` once | Installed by the environment's **setup script**, because each session starts from a fresh VM |
-| Server address | Loopback, LAN, or tailnet addresses work | Only a **public HTTPS address** works: the VM's loopback is the VM itself, and the VM is on no lab network or tailnet |
+| Server address | Loopback, LAN, or tailnet addresses work | An address the VM can reach, normally a **public HTTPS address**: the VM's loopback is the VM itself, and it joins a lab network or tailnet only through a VPN its environment provides (a Codex environment's Tailscale setting; Anthropic-hosted Claude Code environments have none) |
 | Token | Saved profile (`lt setup connect --save-token`) | A **network secret**, added outside the VM, or an environment variable |
 | Repository files (`.mcp.json`, `.claude/settings.json`, `lt_ids.json`, the managed `CLAUDE.md` block) | Present | Present, because they are committed |
 | Skills in `~/.claude/skills` | Installed once | Not carried over; installed by the setup script |
@@ -33,7 +37,10 @@ is never pasted into an agent's chat.
 
 `lt setup status` recognizes a Claude Code cloud session from the
 `CLAUDE_CODE_REMOTE=true` variable that Anthropic sets in every cloud session
-VM. There it reports a `cloud_session` block and replaces the suggestions that
+VM. OpenAI documents no such variable for Codex cloud tasks, so a Codex
+environment declares itself with `LAB_TRACKER_CLOUD_SESSION=codex`
+([below](#2-environment-variables-the-address-and-the-cloud-marker)). In a cloud
+session the report's `cloud_session` block and replaces the suggestions that
 only make sense on a computer (start a local server, save a profile, add watch
 folders, install commit hooks or personal agent hooks) with the cloud
 environment settings below. Its `--brief` line, which the scaffolded
@@ -45,10 +52,13 @@ environment settings below. Its `--brief` line, which the scaffolded
   public HTTPS address with authentication on: a
   [Render deployment](one-click-cloud-deploy.md), an instance published through
   [Tailscale Funnel](self-hosted-operations.md#publishing-through-tailscale-funnel),
-  or one behind your institution's reverse proxy. A tailnet-only address, a LAN
-  address, or `127.0.0.1` cannot be reached from a cloud VM. Publishing an
-  instance is its operator's decision; if the lab's server is private, use
-  [Remote Control](#or-keep-the-agent-on-your-computer) instead.
+  or one behind your institution's reverse proxy. A Claude Code cloud VM cannot
+  reach a tailnet-only address, a LAN address, or `127.0.0.1`; a Codex cloud
+  task reaches a tailnet only through its environment's
+  [Tailscale VPN](#5-a-private-server-tailscale). A Codex network secret is
+  substituted only for HTTPS on port 443, so with one, serve the API on 443.
+  Publishing an instance is its operator's decision; if the lab's server is
+  private, use [Remote Control](#or-keep-the-agent-on-your-computer) instead.
 - **The server-pinned install requirement.** The web app's **Setup** page shows
   the `uv tool install --force "lab-tracker @ git+…@<revision>"` command pinned
   to the server's full revision (see
@@ -183,7 +193,8 @@ there, so check that file's change before committing an update.
 
 ## Verify from a cloud session
 
-Start a new session in the environment and ask the agent to run these:
+For Claude Code, start a new session in the environment and ask the agent to
+run these (Codex has [its own checks](#verify-a-codex-cloud-task)):
 
 1. `lt setup status` should show `cloud_session.detected: true`, a reachable
    server, and no suggestions about the address. Its `token_in_vm` shows
@@ -195,6 +206,108 @@ Start a new session in the environment and ask the agent to run these:
 3. Ask the agent to call `lab_tracker_list_projects` with `limit` 1. It should
    return a project, or an empty list when the token's user belongs to none,
    rather than an authentication error.
+
+## Configure a Codex cloud environment
+
+Codex runs cloud tasks from ChatGPT on the web, the desktop and mobile apps,
+`codex cloud`, and the IDE extension. OpenAI currently runs two cloud systems
+with different settings, so check which one your tasks use:
+
+- **Codex Cloud**, with published, reusable
+  [cloud environments](https://learn.chatgpt.com/docs/environments/cloud-environments).
+  Tasks from ChatGPT on the web, desktop, and mobile, and Slack and Teams
+  delegation, use these.
+- **[Codex Cloud (Legacy)](https://learn.chatgpt.com/docs/environments/cloud-environment)**,
+  which still runs `@codex` requests on GitHub pull requests (other than
+  reviews) and Linear tasks, and which OpenAI plans to retire.
+
+Nothing on your computer reaches a Codex cloud task: not your `lt`
+installation, saved profile, VPN, or personal skills. OpenAI documents no MCP
+server support for Codex cloud tasks, so the agent there has no
+`lab_tracker_get_decision_context`. It reads the repository's `AGENTS.md`,
+where `lt setup init` writes the managed Lab Tracker block, and it reaches
+Lab Tracker through `lt` commands: `lt prime` lists the project's open
+questions, and captures (`lt run`, `lt capture file`, commit hooks) work as on
+a computer.
+
+### 1. Install script: install the client and skills
+
+In Codex Cloud, an environment records an **Install script** that prepares the
+VM, and **Publish** snapshots the prepared filesystem that every new task
+starts from; a change reaches new tasks only after you republish. In Codex
+Cloud (Legacy) the same commands go in the **Setup script**, whose result is
+cached for up to 12 hours. Either way, install the server-pinned client and
+the skills:
+
+```bash
+uv tool install --force "lab-tracker @ git+https://github.com/SamuelBrudner/lab-tracker.git@<full-server-revision>"
+"$(uv tool dir --bin)/lt" update --skills-only || true
+```
+
+The install needs `github.com`, which the **Package managers** preset (Legacy:
+**Common dependencies**) allows. Skills can also be committed to the
+repository's `.agents/skills`, which cloud tasks read directly.
+
+### 2. Environment variables: the address and the cloud marker
+
+```text
+LAB_TRACKER_BASE_URL=https://lab.example.org
+LAB_TRACKER_CLOUD_SESSION=codex
+```
+
+`LAB_TRACKER_CLOUD_SESSION=codex` is what lets `lt setup status` give its
+cloud report in a Codex task, worded for Codex. Environment variables reach the
+agent and every program in the task, in both systems.
+
+### 3. Internet access: allow the server's host
+
+A Codex agent has no internet access until the environment turns it on. In
+Codex Cloud, turn on internet access, choose **Package managers** or **Custom
+domains only** under **Allow domains**, and add the server's exact host (for
+example `lab.example.org`) under **Additional allowed domains**: subdomains are
+not covered by their parent. Saving a network secret for the host (step 4) also
+allows it. In Codex Cloud (Legacy), set agent internet access to **On** and add
+the host to the allowlist, and leave the allowed HTTP methods unrestricted:
+limiting them to `GET`, `HEAD`, and `OPTIONS` blocks every Lab Tracker capture
+and draft request.
+
+### 4. The token
+
+**Codex Cloud: a network secret.** Add one network secret per name the two
+commands read, each with the `lpat_…` token as its value and the server's host
+under **Allowed domains**:
+
+- **Key** `LAB_TRACKER_ACCESS_TOKEN` (read by `lt`);
+- **Key** `LAB_TRACKER_MCP_API_KEY` (read by `lt-mcp`, if anything starts it).
+
+Programs see a placeholder under that name, and the proxy puts the real token
+in its place on requests to the allowed host. That works only for HTTPS on port
+443, so a server on another port needs a direct environment variable instead.
+A shared environment can ask each person for their own value through their
+**Personal vault**, so no one's token is shared.
+
+**Codex Cloud (Legacy): an environment variable.** Legacy secrets reach only
+the setup script and are removed before the agent runs, so the token must be an
+environment variable under both names, which the agent and everyone who uses
+the environment can read. Mint a token for this environment alone.
+
+### 5. A private server: Tailscale
+
+A Codex Cloud environment can join a tailnet through its VPN setting, with
+Tailscale as the supported provider (create the auth key as **Reusable** and
+**Ephemeral**). Allow the server in both the tailnet's access rules and the
+environment's internet access, and use its fully qualified name, which must
+resolve to an IPv4 address. Codex Cloud (Legacy) has no VPN setting.
+
+### Verify a Codex cloud task
+
+Start a new task (after publishing, in Codex Cloud) and ask the agent to run:
+
+1. `lt setup status`, which should show `cloud_session.host` as `codex`, a
+   reachable server, and no suggestion about the address;
+2. `lt readiness`, an authenticated read that proves the network secret or
+   token works;
+3. `lt prime`, which should list the bound project's open questions.
 
 ## While a cloud session works
 
@@ -245,6 +358,6 @@ Any hosted coding agent needs the same four things, under its own names:
    machine.
 
 Set `LAB_TRACKER_CLOUD_SESSION=1` in that environment so `lt setup status`
-gives the cloud-session report there too. On a machine that sets
+gives the cloud-session report there too (`codex` for a Codex environment). On a machine that sets
 `CLAUDE_CODE_REMOTE=true` but can reach the lab's network, such as a self-hosted
 runner inside it, `LAB_TRACKER_CLOUD_SESSION=0` keeps the ordinary report.

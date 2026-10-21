@@ -1423,6 +1423,8 @@ _CLOUD_DOC_LT_COMMANDS = (
     "lt update --skills-only",
     "lt outbox sync",
     "lt outbox status",
+    "lt readiness",
+    "lt prime",
 )
 
 
@@ -1435,6 +1437,10 @@ def test_cloud_agents_doc_names_what_the_code_reads() -> None:
     assert f"{cloud_session.CLAUDE_CODE_REMOTE_ENV}=true" in text
     assert f"{cloud_session.CLOUD_SESSION_ENV}=1" in text
     assert f"{cloud_session.CLOUD_SESSION_ENV}=0" in text
+    assert f"{cloud_session.CLOUD_SESSION_ENV}={cloud_session.CODEX}" in text
+    configuration = _collapsed_whitespace(_read(_DOCS / "configuration.md"))
+    for name in cloud_session.CODEX_HARNESS_ENVS:
+        assert name in configuration, name
     # The token names `lt` (LabTracker.from_env) and `lt-mcp` (MCPSettings) read.
     assert "LAB_TRACKER_ACCESS_TOKEN" in inspect.getsource(LabTracker.from_env)
     assert "LAB_TRACKER_MCP_API_KEY" in inspect.getsource(MCPSettings.from_env)

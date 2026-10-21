@@ -310,9 +310,10 @@ def probe_client_update_notice(api_settings: MCPSettings) -> str | None:
         return None
     if not update_recommended:
         return None
+    session = cloud_session()
     steps = (
-        cloud_update_steps(normalized_revision(comparison.server.revision))
-        if cloud_session()["detected"]
+        cloud_update_steps(normalized_revision(comparison.server.revision), session["host"])
+        if session["detected"]
         else update_steps(comparison.server)
     )
     return (

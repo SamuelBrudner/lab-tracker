@@ -1130,10 +1130,13 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
   `lt_ids.json`; see [notebook-and-script-capture.md](notebook-and-script-capture.md)
   and [lab-tracker-r.md](lab-tracker-r.md)
 - `LAB_TRACKER_CLOUD_SESSION`: declares whether `lt setup status` runs in a
-  cloud agent session, a VM cloned from the repository that cannot reach
-  loopback or lab-network addresses and is discarded later. `0`, `false`, `no`,
-  or `off` declares it is not one; any other value declares it is. Unset, a
-  Claude Code cloud session is recognized from `CLAUDE_CODE_REMOTE=true`. In a
+  cloud agent session, a VM cloned from the repository that is discarded later
+  and reaches neither the person's computer nor, without a VPN, the lab's
+  network. `0`, `false`, `no`,
+  or `off` declares it is not one; any other value declares it is, and `codex`
+  (or Codex's own `CODEX_THREAD_ID` or `CODEX_CI`) also marks the agent as
+  Codex, whose cloud tasks OpenAI gives no marker of their own. Unset, a Claude
+  Code cloud session is recognized from `CLAUDE_CODE_REMOTE=true`. In a
   cloud session the report's `cloud_session` block adds the address and token
   checks, the suggestions name cloud environment settings in place of
   computer-only setup, and figure capture tries the upload without a local

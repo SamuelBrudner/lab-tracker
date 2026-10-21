@@ -43,24 +43,35 @@ _COMPUTER_ONLY_PHRASES = (
 )
 
 
+_REMOTE = CLAUDE_CODE_REMOTE_ENV
+_DECLARED = CLOUD_SESSION_ENV
+
+
 @pytest.mark.parametrize(
-    ("environ", "detected", "signal"),
+    ("environ", "detected", "signal", "host"),
     [
-        ({}, False, None),
-        ({CLAUDE_CODE_REMOTE_ENV: "true"}, True, CLAUDE_CODE_REMOTE_ENV),
-        ({CLAUDE_CODE_REMOTE_ENV: "TRUE "}, True, CLAUDE_CODE_REMOTE_ENV),
-        ({CLAUDE_CODE_REMOTE_ENV: "false"}, False, None),
-        ({CLAUDE_CODE_REMOTE_ENV: "1"}, False, None),
-        ({CLOUD_SESSION_ENV: "1"}, True, CLOUD_SESSION_ENV),
-        ({CLOUD_SESSION_ENV: "codex"}, True, CLOUD_SESSION_ENV),
-        ({CLOUD_SESSION_ENV: "off", CLAUDE_CODE_REMOTE_ENV: "true"}, False, CLOUD_SESSION_ENV),
-        ({CLOUD_SESSION_ENV: "  ", CLAUDE_CODE_REMOTE_ENV: "true"}, True, CLAUDE_CODE_REMOTE_ENV),
+        ({}, False, None, None),
+        ({_REMOTE: "true"}, True, _REMOTE, "claude-code"),
+        ({_REMOTE: "TRUE "}, True, _REMOTE, "claude-code"),
+        ({_REMOTE: "false"}, False, None, None),
+        ({_REMOTE: "1"}, False, None, None),
+        ({_DECLARED: "1"}, True, _DECLARED, None),
+        ({_DECLARED: "codex"}, True, _DECLARED, "codex"),
+        ({_DECLARED: "Codex "}, True, _DECLARED, "codex"),
+        # Codex's harness marks the commands its agent runs; OpenAI documents no
+        # cloud marker, so these name the agent only once a cloud session is declared.
+        ({_DECLARED: "1", "CODEX_THREAD_ID": "t-1"}, True, _DECLARED, "codex"),
+        ({_DECLARED: "1", "CODEX_CI": "1"}, True, _DECLARED, "codex"),
+        ({"CODEX_THREAD_ID": "t-1", "CODEX_CI": "1"}, False, None, None),
+        ({_DECLARED: "1", _REMOTE: "true"}, True, _DECLARED, "claude-code"),
+        ({_DECLARED: "off", _REMOTE: "true"}, False, _DECLARED, None),
+        ({_DECLARED: "  ", _REMOTE: "true"}, True, _REMOTE, "claude-code"),
     ],
 )
 def test_cloud_session_detection(
-    environ: dict[str, str], detected: bool, signal: str | None
+    environ: dict[str, str], detected: bool, signal: str | None, host: str | None
 ) -> None:
-    assert cloud_session(environ) == {"detected": detected, "signal": signal}
+    assert cloud_session(environ) == {"detected": detected, "signal": signal, "host": host}
 
 
 @pytest.mark.parametrize(
@@ -186,7 +197,7 @@ def test_off_a_cloud_session_status_reports_only_the_detection(
 
     payload = _status(cloud_repo)
 
-    assert payload["cloud_session"] == {"detected": False, "signal": None}
+    assert payload["cloud_session"] == {"detected": False, "signal": None, "host": None}
     assert any("lab-tracker serve" in item for item in payload["suggestions"])
 
 
@@ -228,7 +239,7 @@ def test_cloud_status_flags_a_private_address_from_the_environment(
     address = [item for item in suggestions if "100.101.102.103" in item]
     assert len(address) == 1
     assert "from LAB_TRACKER_BASE_URL" in address[0]
-    assert "a cloud VM is not on that network" in address[0]
+    assert "Anthropic-hosted Claude Code environment is on no lab network" in address[0]
 
 
 def test_cloud_status_explains_a_public_server_that_does_not_answer(
@@ -384,7 +395,9 @@ def test_cloud_session_policy_reaches_every_agent_instruction_surface() -> None:
         "never ask for a token in the chat",
         "personal agent hooks",
         "refuses a request for lack of a token",
-        "belongs in the environment's setup script rather than `lt maintain`",
+        "belongs in the environment's setup or install script rather than `lt maintain`",
+        "a Codex cloud task",
+        "`lt prime` lists the project's open questions",
         "`lt outbox sync`, then `lt outbox status`",
         "`docs/cloud-agents.md`",
     ):
@@ -500,7 +513,10 @@ def test_a_legacy_mcp_json_address_yields_to_the_environment(
     _online(monkeypatch)
     _write_entry(
         cloud_repo,
-        {"command": str(Path(__file__)), "env": {"LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000"}},
+        {
+            "command": str(Path(__file__)),
+            "env": {"LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000"},
+        },
     )
 
     payload = _status(cloud_repo)
@@ -519,7 +535,10 @@ def test_a_legacy_mcp_json_address_alone_needs_only_the_environment_variable(
     _offline(monkeypatch)
     _write_entry(
         cloud_repo,
-        {"command": str(Path(__file__)), "env": {"LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000"}},
+        {
+            "command": str(Path(__file__)),
+            "env": {"LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000"},
+        },
     )
 
     payload = _status(cloud_repo)
@@ -766,5 +785,133 @@ def test_a_refused_request_without_a_token_is_not_an_outage() -> None:
     assert figure._is_transport_failure(excinfo.value) is False
 
     offline = LTAPIError("Lab Tracker request GET /health failed: connection refused")
-    offline.connection_diagnostic = {"diagnosis": "tcp_connection_failed"}  # type: ignore[attr-defined]
+    diagnostic = {"diagnosis": "tcp_connection_failed"}
+    offline.connection_diagnostic = diagnostic  # type: ignore[attr-defined]
     assert figure._is_transport_failure(offline) is True
+
+
+
+@pytest.fixture
+def codex_repo(cloud_repo: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A repository inside a Codex cloud task, declared by its environment."""
+
+    monkeypatch.delenv(CLAUDE_CODE_REMOTE_ENV)
+    monkeypatch.setenv(CLOUD_SESSION_ENV, "codex")
+    return cloud_repo
+
+
+def test_a_codex_task_skips_the_claude_code_mcp_json_checks(
+    codex_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Codex does not start servers from .mcp.json, so its launch is not judged.
+    _offline(monkeypatch)
+    missing = str(codex_repo / "nowhere" / "lt-mcp")
+    _write_mcp_json(codex_repo, command=missing, base_url="http://127.0.0.1:8000")
+
+    payload = _status(codex_repo)
+
+    cloud = payload["cloud_session"]
+    assert (cloud["host"], cloud["mcp_json"]) == ("codex", None)
+    assert not any(".mcp.json" in item for item in payload["suggestions"])
+    assert any("nothing in this VM sets one" in item for item in payload["suggestions"])
+
+
+def test_a_codex_task_names_its_install_script(
+    codex_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", _PUBLIC_URL)
+    _online(monkeypatch, version="999.0.0")
+
+    suggestions = _status(codex_repo)["suggestions"]
+
+    behind = [item for item in suggestions if "behind its server" in item]
+    skills = [item for item in suggestions if "skills" in item]
+    assert len(behind) == len(skills) == 1
+    for item in (behind[0], skills[0]):
+        assert "install script (setup script in Codex Cloud (Legacy))" in item
+
+
+def test_a_codex_task_can_reach_a_private_address_through_its_vpn(
+    codex_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", "http://100.101.102.103:8000")
+    _online(monkeypatch)
+    assert _status(codex_repo)["cloud_session"]["base_url_unreachable"] is None
+
+    _offline(monkeypatch)
+    payload = _status(codex_repo)
+
+    assert payload["cloud_session"]["base_url_unreachable"] == PRIVATE_NETWORK
+    address = [item for item in payload["suggestions"] if "100.101.102.103" in item]
+    assert len(address) == 1
+    assert "Tailscale VPN setting" in address[0]
+
+
+def test_a_codex_task_explains_internet_access_that_is_off_by_default(
+    codex_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", "https://lab.tail1234.ts.net")
+    _offline(monkeypatch, diagnosis="proxy_connection_failed")
+
+    suggestions = _status(codex_repo)["suggestions"]
+
+    answer = [item for item in suggestions if "No Lab Tracker API answered" in item]
+    assert len(answer) == 1
+    assert "internet access, which is off unless turned on" in answer[0]
+    assert "saving a network secret for it" in answer[0]
+    assert "through the Codex environment's Tailscale VPN" in answer[0]
+
+
+def test_a_loopback_address_is_the_vm_itself_even_when_something_answers(
+    cloud_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A lab-tracker serve started in the VM answers, but its database goes with the VM.
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", "http://127.0.0.1:8000")
+    _online(monkeypatch)
+
+    assert _status(cloud_repo)["cloud_session"]["base_url_unreachable"] == LOOPBACK
+
+
+@pytest.mark.parametrize("cloud", [True, False])
+def test_codex_without_network_is_named_before_any_address_advice(
+    cloud_repo: Path, monkeypatch: pytest.MonkeyPatch, cloud: bool
+) -> None:
+    if cloud:
+        monkeypatch.delenv(CLAUDE_CODE_REMOTE_ENV)
+        monkeypatch.setenv(CLOUD_SESSION_ENV, "codex")
+    else:
+        monkeypatch.delenv(CLAUDE_CODE_REMOTE_ENV)
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", _PUBLIC_URL)
+    monkeypatch.setenv("CODEX_SANDBOX_NETWORK_DISABLED", "1")
+    _offline(monkeypatch)
+
+    suggestions = _status(cloud_repo)["suggestions"]
+
+    assert suggestions[0].startswith("Codex runs this command with network access off")
+
+    _online(monkeypatch)
+    assert not any("network access off" in item for item in _status(cloud_repo)["suggestions"])
+
+
+def test_a_codex_task_without_a_token_variable_is_told_where_one_goes(
+    codex_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", _PUBLIC_URL)
+    _online(monkeypatch)
+    _bound_scaffold(codex_repo, _PUBLIC_URL)
+
+    suggestions = _status(codex_repo)["suggestions"]
+
+    token = [item for item in suggestions if "No Lab Tracker token is in this VM" in item]
+    assert len(token) == 1
+    assert "network secret with the key LAB_TRACKER_ACCESS_TOKEN" in token[0]
+    assert "never in the chat" in token[0]
+
+    # A network secret's placeholder is enough: the proxy swaps in the real token.
+    monkeypatch.setenv("LAB_TRACKER_ACCESS_TOKEN", "placeholder-from-codex")
+    brief = _status(codex_repo, brief=True)
+    assert brief["suggestions"] == []
+    assert brief["brief"] == (
+        "lab-tracker (cloud session): server reachable; "
+        "a Lab Tracker token is available to `lt` in this VM."
+    )
