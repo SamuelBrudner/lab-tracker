@@ -398,6 +398,7 @@ def test_cloud_session_policy_reaches_every_agent_instruction_surface() -> None:
         "belongs in the environment's setup or install script rather than `lt maintain`",
         "a Codex cloud task",
         "`lt prime --project <project_id from lt_ids.json>` ranks the project's open questions",
+        "`lt decision-context --task-kind <kind> --query <text>` returns the decision context",
         "`LAB_TRACKER_CLOUD_SESSION=codex` (Codex sets no marker of its own)",
         "`lt outbox sync`, then `lt outbox status`",
         "`docs/cloud-agents.md`",

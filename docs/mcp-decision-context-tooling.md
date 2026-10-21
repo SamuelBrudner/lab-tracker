@@ -159,9 +159,11 @@ Which surfaces expose the person/window scope:
   `until` in the request body (`AssistantDecisionContextRequest`).
 - MCP: `lab_tracker_get_decision_context` takes the same three parameters,
   validates them as described above, and forwards them in that POST body.
-- Python client / `lt` CLI: `lab_tracker_client` has no decision-context method
-  or command, so it exposes none of these filters. Use the MCP tool or call the
-  HTTP endpoint directly for a `progress_review` briefing.
+- Python client / `lt` CLI: `LabTracker.decision_context(...)` and
+  `lt decision-context` (`--created-by`, `--since`, `--until`) take the same
+  three filters, validate them the same way, and send the same POST body, for
+  agents and scripts with no MCP server. The command also adds the empty-project
+  `suggest_orientation_checkpoint` next action the MCP tool adds.
 
 Response shape:
 
@@ -440,8 +442,9 @@ Add a concise rule to `AGENTS.md`:
 ```md
 ## Lab Tracker Knowledge Graph Consultation
 
-Before research-facing decisions, consult the Lab Tracker MCP server. This
-includes choosing variables to plot, analyses to run, figures or slides to make,
+Before research-facing decisions, consult Lab Tracker through its MCP server, or
+with `lt decision-context` where no MCP server runs. This includes choosing
+variables to plot, analyses to run, figures or slides to make,
 experimental controls to prioritize, summaries to write, and research writing
 such as manuscripts, grants, abstracts, results, discussion text, and figure
 legends.
@@ -450,7 +453,9 @@ Prefer `lab_tracker_get_decision_context` when available. Otherwise use
 `lab_tracker_list_projects`, `lab_tracker_graph_overview`,
 `lab_tracker_search_graph`, `lab_tracker_get_graph_neighborhood`, and the
 low-level list/read tools. Graph-native reads are for orientation and navigation;
-decision context remains mandatory before a research-facing decision.
+decision context remains mandatory before a research-facing decision. Without an
+MCP server, `lt decision-context --task-kind <kind> --query <text>` returns the
+same decision-context packet.
 
 If Lab Tracker is unavailable or ambiguous, state that explicitly. Do not create
 or mutate Lab Tracker records unless the user explicitly asks.

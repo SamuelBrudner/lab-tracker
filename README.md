@@ -75,7 +75,8 @@ The core loop is deliberately small:
    each recorded as `auto_accepted`. Acceptance provenance distinguishes
    individually selected operations from bulk and delegated acceptance.
 4. **Retrieve and export.** Search the record, inspect the project graph, ask
-   an MCP-capable assistant for bounded decision context, or export PROV-O /
+   an MCP-capable assistant (or any agent, through `lt decision-context`) for
+   bounded decision context, or export PROV-O /
    JSON-LD provenance and plaintext sidecars that can travel with the data.
 
 Direct human work is intentionally different from AI output. A person with

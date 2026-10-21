@@ -243,12 +243,15 @@ settings instead, which a person changes in the environment's settings:
   the chat.
 
 OpenAI documents no MCP server for Codex cloud tasks, so a Codex agent
-there reads AGENTS.md and reaches Lab Tracker through `lt`, without
-decision context: `lt prime --project <project_id from lt_ids.json>`
+there reads AGENTS.md and reaches Lab Tracker through `lt`:
+`lt decision-context --task-kind <kind> --query <text>` returns
+the decision context the MCP tool returns, for the project in
+`lt_ids.json`, and `lt prime --project <project_id from lt_ids.json>`
 ranks the project's open questions under its planned or in-progress
 goals. Codex Cloud (Legacy), which
 still runs @codex requests on GitHub and Linear tasks, can limit the
-agent to GET, HEAD, and OPTIONS requests, which blocks every capture.
+agent to GET, HEAD, and OPTIONS requests, which blocks every capture
+and `lt decision-context`, a POST.
 
 Committed files (`.mcp.json`, `.claude/settings.json`, `lt_ids.json`,
 the managed blocks) reach every cloud session, so `lt setup init`,
@@ -339,4 +342,4 @@ rerunning its pinned `uv add` (step 5), which neither `lt update` nor
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.3.0 sha256=efa093ad6e96 -->
+<!-- lab-tracker-setup-guide version=0.3.0 sha256=7f10c8107e4d -->

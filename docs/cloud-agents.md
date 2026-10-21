@@ -227,10 +227,16 @@ installation, saved profile, VPN, or personal skills. OpenAI documents no MCP
 server support for Codex cloud tasks, so the agent there has no
 `lab_tracker_get_decision_context`. It reads the repository's `AGENTS.md`,
 where `lt setup init` writes the managed Lab Tracker block, and it reaches
-Lab Tracker through `lt` commands: `lt prime --project <project_id>` (the id in
-`lt_ids.json`) ranks up to five of the project's open questions under its
-planned or in-progress goals, and `lt run` and `lt capture file` send what they
-capture while the task runs.
+Lab Tracker through `lt` commands instead:
+
+- `lt decision-context --task-kind <kind> --query "<the decision>"` returns
+  the same decision-context packet as the MCP tool, as JSON, for the project in
+  `lt_ids.json` (or `--project`); anchors (`--question`, `--dataset`,
+  `--analysis`, `--claim`, `--visualization`) and the `progress_review` filters
+  (`--created-by`, `--since`, `--until`) work as they do there;
+- `lt prime --project <project_id>` ranks up to five of the project's open
+  questions under its planned or in-progress goals;
+- `lt run` and `lt capture file` send what they capture while the task runs.
 
 ### 1. Install script: install the client and skills
 
@@ -268,10 +274,11 @@ Codex Cloud, turn on internet access, choose **Package managers** or **Custom
 domains only** under **Allow domains**, and add the server's exact host (for
 example `lab.example.org`) under **Additional allowed domains**: subdomains are
 not covered by their parent. Saving an environment-owned network secret for the
-host (step 4) also allows it; a Personal vault secret does not. In Codex Cloud (Legacy), set agent internet access to **On** and add
-the host to the allowlist, and leave the allowed HTTP methods unrestricted:
-limiting them to `GET`, `HEAD`, and `OPTIONS` blocks every Lab Tracker capture
-and draft request.
+host (step 4) also allows it; a Personal vault secret does not. In Codex Cloud
+(Legacy), set agent internet access to **On** and add the host to the
+allowlist, and leave the allowed HTTP methods unrestricted: limiting them to
+`GET`, `HEAD`, and `OPTIONS` blocks every Lab Tracker capture and draft request,
+and `lt decision-context`, which is a POST.
 
 ### 4. The token
 
@@ -309,7 +316,10 @@ Start a new task (after publishing, in Codex Cloud) and ask the agent to run:
    reachable server, and no suggestion about the address;
 2. `lt readiness`, an authenticated read that proves the network secret or
    token works;
-3. `lt prime --project <project_id>`, which should rank the project's open
+3. `lt decision-context --task-kind summary --query "where the project stands"`,
+   which should print a packet whose `data.scope.project` is the bound project
+   (a refusal such as `ambiguous_project` exits 1 and names the candidates);
+4. `lt prime --project <project_id>`, which should rank the project's open
    questions, or say that no planned or in-progress goal is open.
 
 ## While a cloud session works

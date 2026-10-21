@@ -567,7 +567,7 @@ research record:
   meeting, or your own advances and plots since last July). The decision-context
   endpoint exposes the same `created_by`/`since`/`until` filters plus a
   `progress_review` task kind, assembling a person-scoped, windowed briefing in
-  one call. The caller supplies the window; Lab Tracker stores no meeting
+  one call, through the MCP tool or `lt decision-context`. The caller supplies the window; Lab Tracker stores no meeting
   schedule.
 - Goals and goal links as explicit planning and evidence-spanning records
   connected to retained graph entities.
@@ -737,7 +737,11 @@ research record:
   project with delegated curation on and are refused everywhere else. Each
   `POST /assistant/decision-context` consultation records a content-free
   `view decision_context` usage event: project, actor, principal type, and
-  surface only, never the query, task kind, or anchor ids.
+  surface only, never the query, task kind, or anchor ids. `lt decision-context`
+  is the same read for agents with no MCP server: it takes the tool's arguments
+  as flags, defaults the project to `LAB_TRACKER_PROJECT_ID`, the checkout's
+  `lt_ids.json`, then the saved profile, adds the same orientation next action,
+  and exits 1 on a refusal the server reports in the body.
 
 Anything not listed above is out of the retained v1 surface and should not
 shape the default runtime, supported docs, or simplified architecture.

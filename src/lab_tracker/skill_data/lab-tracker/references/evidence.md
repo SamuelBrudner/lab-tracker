@@ -34,7 +34,8 @@ available; otherwise use stable publication labels such as
 `published-pdf:elife-67855-v2`.
 
 Before research-facing decisions, use `lab_tracker_get_decision_context` when
-available. This includes choosing variables to plot, analyses to run, figures or
+available, or `lt decision-context --task-kind <kind> --query <text>` where no
+MCP server runs. This includes choosing variables to plot, analyses to run, figures or
 slides to make, experimental controls to prioritize, summaries to write, and
 research writing such as manuscripts, grants, abstracts, results, discussion
 text, and figure legends. If Lab Tracker is unavailable or ambiguous, state that

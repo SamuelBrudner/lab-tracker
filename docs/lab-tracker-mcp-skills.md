@@ -216,7 +216,10 @@ instead of guessing. Use it before research-facing read-then-write tasks.
 
 The MCP tool calls the Lab Tracker API endpoint `POST /assistant/decision-context`;
 the API remains the single context-building path for browser users, MCP clients,
-scripts, and future workers.
+scripts, and future workers. An agent with no MCP server, such as one in a Codex
+cloud task, gets the same packet from `lt decision-context --task-kind <kind>
+--query <text>`, which takes the tool's arguments as flags and defaults the
+project to the checkout's `lt_ids.json`.
 
 `lab_tracker_describe_schema` calls `GET /schema/describe` and returns
 source-derived metadata for entity create/update fields, required fields,

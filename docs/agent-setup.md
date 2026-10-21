@@ -545,13 +545,14 @@ environment's proxy adds outside the VM. A Codex cloud task has no Lab Tracker
 MCP server: its agent reads `AGENTS.md` and uses `lt`, which the environment's
 install script installs (its setup script in Codex Cloud (Legacy), which runs
 `@codex` on GitHub), with `LAB_TRACKER_CLOUD_SESSION=codex` set so
-`lt setup status` recognizes the task. [Cloud agent sessions](cloud-agents.md)
+`lt setup status` recognizes the task; `lt decision-context` gives it the
+decision context the MCP tool would. [Cloud agent sessions](cloud-agents.md)
 walks through each setting for both, the check on the address in `.mcp.json`,
 and which capture outlives the VM.
 
 Verify, from a Claude Code session in that environment (Codex tasks use
-`lt setup status`, `lt readiness`, and `lt prime --project <project_id>`, as the
-cloud page shows):
+`lt setup status`, `lt readiness`, `lt decision-context`, and
+`lt prime --project <project_id>`, as the cloud page shows):
 
 1. Registration check: `lt setup status` shows `cloud_session.detected` as
    `true` and no suggestion about `.mcp.json` or the server address.
@@ -585,7 +586,8 @@ credential. A researcher connecting `lt` or `lt-mcp` does not need to enter an
 OpenAI key locally for Lab Tracker.
 
 Every scaffolded instruction file carries the same policy, whatever the vendor: consult
-`lab_tracker_get_decision_context` before research-facing decisions; stage
+`lab_tracker_get_decision_context` (or, without an MCP server,
+`lt decision-context`) before research-facing decisions; stage
 evidence and request drafts only when asked; never accept or commit a draft
 yourself, except through the delegated-curation tools when the user asks and
 the server admits it (a Curate graph token in a project whose owner granted

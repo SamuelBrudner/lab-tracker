@@ -29,7 +29,8 @@ EXPLORATION_NODE_TYPE_ORDER: tuple[str, ...] = (
 )
 
 RESEARCH_FACING_DECISION_POLICY = (
-    "Before research-facing decisions, consult the Lab Tracker MCP server. This "
+    "Before research-facing decisions, consult Lab Tracker through its MCP server, or "
+    "with `lt decision-context` where no MCP server runs. This "
     "includes choosing variables to plot, analyses to run, figures or slides to make, "
     "experimental controls to prioritize, summaries to write, and research writing such "
     "as manuscripts, grants, abstracts, results, discussion text, and figure legends. "
@@ -89,9 +90,10 @@ CLOUD_SESSION_POLICY = (
     "`LAB_TRACKER_CLOUD_SESSION=codex` (Codex sets no marker of its own): until then, "
     "name that variable as a missing setting and do not relay the report's "
     "computer-only suggestions. Where no Lab Tracker MCP server runs, as in a Codex "
-    "cloud task, decision context is unavailable, and `lt prime --project "
-    "<project_id from lt_ids.json>` ranks the project's open questions under its "
-    "planned or in-progress goals. If `lt` is missing, or the Lab Tracker server is "
+    "cloud task, `lt decision-context --task-kind <kind> --query <text>` returns the "
+    "decision context (reading the project from `lt_ids.json`), and `lt prime "
+    "--project <project_id from lt_ids.json>` ranks the project's open questions under "
+    "its planned or in-progress goals. If `lt` is missing, or the Lab Tracker server is "
     "unreachable or refuses a request for lack of a token or rejects the one it got, "
     "do not start `lab-tracker serve` in the VM: name the cloud environment "
     "setting that is missing (a setup or install script that installs the "
@@ -121,7 +123,9 @@ Prefer `lab_tracker_get_decision_context` when available. Otherwise use
 `lab_tracker_list_projects`, `lab_tracker_graph_overview`,
 `lab_tracker_search_graph`, `lab_tracker_get_graph_neighborhood`, and the
 low-level list/read tools. Graph-native reads are for orientation and navigation;
-decision context remains mandatory before a research-facing decision.
+decision context remains mandatory before a research-facing decision. Without an
+MCP server, `lt decision-context --task-kind <kind> --query <text>` returns the
+same decision-context packet.
 
 If Lab Tracker is unavailable or ambiguous, state that explicitly. Do not create
 or mutate Lab Tracker records unless the user explicitly asks.
@@ -190,7 +194,9 @@ def managed_agent_activation_block() -> str:
             RESEARCH_FACING_DECISION_POLICY,
             "",
             "Call `lab_tracker_get_decision_context` first when the MCP server is "
-            "available. If the user asks what research thread to advance, call "
+            "available; without one, `lt decision-context --task-kind <kind> --query "
+            "<text>` returns the same packet. If the user asks what research thread to "
+            "advance, call "
             "`lab_tracker_next_questions` first, then load decision context for the "
             "selected question.",
             "For non-decision graph navigation, use "

@@ -1425,6 +1425,7 @@ _CLOUD_DOC_LT_COMMANDS = (
     "lt outbox status",
     "lt readiness",
     "lt prime",
+    'lt decision-context --task-kind summary --query "where the project stands"',
 )
 
 
