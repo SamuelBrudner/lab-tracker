@@ -214,8 +214,9 @@ versioning stay with the store. See
 
 Coding and analysis agents (Claude, Codex, Copilot, Cursor; MATLAB for figure
 capture only) are **grounded, read-first, suggestion-only** participants that
-reach Lab Tracker exclusively through the MCP server, itself an HTTP client of
-the API — never the database directly.
+reach Lab Tracker through the MCP server or the `lt` CLI (`lt decision-context`
+where no MCP server runs), both HTTP clients of the API — never the database
+directly.
 
 The central behavior: before any _research-facing decision_ — choosing plot
 variables, analyses, or controls; deciding figures or slides; writing

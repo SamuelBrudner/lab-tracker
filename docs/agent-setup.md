@@ -199,8 +199,9 @@ shows pending events.
 
 ## 4. Connect coding agents over MCP
 
-Coding agents reach Lab Tracker exclusively through the MCP server (`lt-mcp`),
-which is itself an HTTP client of the API — never the database. Any
+Coding agents reach Lab Tracker through the MCP server (`lt-mcp`) or, where none
+runs, the `lt` CLI (`lt decision-context`); both are HTTP clients of the API,
+never of the database. Any
 MCP-capable agent works; **which one you use is up to you.**
 
 The steps below assume the agent runs on the machine where you install `lt`.

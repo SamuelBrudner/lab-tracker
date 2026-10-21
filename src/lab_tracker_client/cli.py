@@ -33,7 +33,6 @@ from lab_tracker.assistant_next_questions import is_research_facing_prompt
 from lab_tracker.decision_context_constants import TASK_KIND_VALUES
 from lab_tracker_client import outbox as _outbox
 from lab_tracker_client._version import __version__
-from lab_tracker_client.capture_project import resolve_capture_project_in_checkout
 from lab_tracker_client.cli_hpc_epilog import add_hpc_epilog_parser
 from lab_tracker_client.cli_pipeline import add_pipeline_parsers
 from lab_tracker_client.cli_run import add_run_parsers
@@ -2373,9 +2372,11 @@ def _add_decision_context_parser(
         "--project",
         type=_uuid_argument,
         help=(
-            "Project UUID. Defaults to LAB_TRACKER_PROJECT_ID, the checkout's lt_ids.json, "
-            "then the saved profile's project; with none, the server picks the only "
-            "project you can see or the one the query matches."
+            "Project UUID. Without an anchor flag it defaults to LAB_TRACKER_PROJECT_ID, "
+            "the checkout's lt_ids.json, then the saved profile's project; with an anchor, "
+            "the anchor's project is used. With neither, the server uses the only project "
+            "a member account can read or the one project the query matches, and "
+            "otherwise lists candidate projects with exit status 1."
         ),
     )
     for anchor in _DECISION_CONTEXT_ANCHORS:
@@ -2437,41 +2438,66 @@ def _decision_context_limit(text: str) -> int:
 
 
 def _cmd_decision_context(client: LabTracker, args: argparse.Namespace) -> Any:
-    packet = client.decision_context(
-        task_kind=args.task_kind,
-        query=args.query,
-        project_id=_decision_context_project(client, args.project),
-        **{f"{anchor}_id": getattr(args, anchor) for anchor in _DECISION_CONTEXT_ANCHORS},
-        created_by=args.created_by,
-        since=args.since,
-        until=args.until,
-        limit=args.limit,
+    since = parse_aware_datetime(args.since, "--since")
+    until = parse_aware_datetime(args.until, "--until")
+    if since is not None and until is not None and since > until:
+        raise LTAPIError("--since must not be later than --until.")
+    anchors = {f"{anchor}_id": getattr(args, anchor) for anchor in _DECISION_CONTEXT_ANCHORS}
+    # An anchor names its own project, as it does for the MCP tool; a default
+    # project would only make the server refuse an anchor from another one.
+    project_id = (
+        args.project
+        if any(anchors.values())
+        else _decision_context_project(client, args.project)
     )
+    try:
+        packet = client.decision_context(
+            task_kind=args.task_kind,
+            query=args.query,
+            project_id=project_id,
+            **anchors,
+            created_by=args.created_by,
+            since=args.since,
+            until=args.until,
+            limit=args.limit,
+        )
+    except LTValidationError as exc:
+        raise LTAPIError(str(exc)) from None
     return {"command": "decision-context", **_with_orientation_hint(client, packet)}
 
 
 def _decision_context_project(client: LabTracker, explicit: str | None) -> str | None:
-    """The project a decision-context request names: flag, env, checkout, then profile."""
+    """The project a decision-context request names: flag, env, lt_ids.json, then profile."""
 
-    try:
-        checkout: Path | None = git_capture.repo_toplevel(Path.cwd())
-    except (LTValidationError, OSError):
-        checkout = None
-    resolved = resolve_capture_project_in_checkout(checkout, project_id=explicit)
-    project_id: str | None
-    if resolved is not None:
-        project_id, source = resolved.project_id, resolved.source.value
-    else:
-        project_id, source = client.default_project_id, "connection profile"
+    project_id, source = _decision_context_project_source(client, explicit)
     if project_id is None:
         return None
     try:
         return str(UUID(project_id))
     except ValueError:
         raise LTAPIError(
-            f"The project id {project_id!r} (from the {source}) is not a Lab Tracker UUID; "
-            "pass --project or fix the binding."
+            f"The project id {project_id!r} from {source} is not a Lab Tracker UUID; "
+            "pass --project or fix it there."
         ) from None
+
+
+def _decision_context_project_source(
+    client: LabTracker, explicit: str | None
+) -> tuple[str | None, str]:
+    if explicit:
+        return explicit, "--project"
+    from_env = os.getenv("LAB_TRACKER_PROJECT_ID", "").strip()
+    if from_env:
+        return from_env, "LAB_TRACKER_PROJECT_ID"
+    try:
+        checkout: Path | None = git_capture.repo_toplevel(Path.cwd())
+    except (LTValidationError, OSError):
+        checkout = None
+    bound = git_capture.project_from_ids(checkout) if checkout is not None else None
+    if bound and checkout is not None:
+        return bound, str(checkout / "lt_ids.json")
+    profile = (client.default_project_id or "").strip() or None
+    return profile, "the saved connection profile"
 
 
 def _with_orientation_hint(client: LabTracker, packet: dict[str, Any]) -> dict[str, Any]:

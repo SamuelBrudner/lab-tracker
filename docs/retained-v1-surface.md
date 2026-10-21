@@ -739,8 +739,9 @@ research record:
   `view decision_context` usage event: project, actor, principal type, and
   surface only, never the query, task kind, or anchor ids. `lt decision-context`
   is the same read for agents with no MCP server: it takes the tool's arguments
-  as flags, defaults the project to `LAB_TRACKER_PROJECT_ID`, the checkout's
-  `lt_ids.json`, then the saved profile, adds the same orientation next action,
+  as flags, defaults the project, when no anchor names one, to
+  `LAB_TRACKER_PROJECT_ID`, the checkout's `lt_ids.json`, then the saved
+  profile, adds the same orientation next action,
   and exits 1 on a refusal the server reports in the body.
 
 Anything not listed above is out of the retained v1 surface and should not

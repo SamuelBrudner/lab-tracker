@@ -246,7 +246,8 @@ OpenAI documents no MCP server for Codex cloud tasks, so a Codex agent
 there reads AGENTS.md and reaches Lab Tracker through `lt`:
 `lt decision-context --task-kind <kind> --query <text>` returns
 the decision context the MCP tool returns, for the project in
-`lt_ids.json`, and `lt prime --project <project_id from lt_ids.json>`
+`LAB_TRACKER_PROJECT_ID` or `lt_ids.json` unless an anchor names one,
+and `lt prime --project <project_id from lt_ids.json>`
 ranks the project's open questions under its planned or in-progress
 goals. Codex Cloud (Legacy), which
 still runs @codex requests on GitHub and Linear tasks, can limit the
@@ -342,4 +343,4 @@ rerunning its pinned `uv add` (step 5), which neither `lt update` nor
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.3.0 sha256=7f10c8107e4d -->
+<!-- lab-tracker-setup-guide version=0.3.0 sha256=02d26b6d8aae -->

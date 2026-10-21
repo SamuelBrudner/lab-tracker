@@ -231,7 +231,7 @@ Lab Tracker through `lt` commands instead:
 
 - `lt decision-context --task-kind <kind> --query "<the decision>"` returns
   the same decision-context packet as the MCP tool, as JSON, for the project in
-  `lt_ids.json` (or `--project`); anchors (`--question`, `--dataset`,
+  `LAB_TRACKER_PROJECT_ID` or `lt_ids.json` (or `--project`); anchors (`--question`, `--dataset`,
   `--analysis`, `--claim`, `--visualization`) and the `progress_review` filters
   (`--created-by`, `--since`, `--until`) work as they do there;
 - `lt prime --project <project_id>` ranks up to five of the project's open

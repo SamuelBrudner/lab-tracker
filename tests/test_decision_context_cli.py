@@ -104,6 +104,13 @@ def _packet_handler(packet: dict[str, Any], overview: dict[str, Any] | None = No
     return handler
 
 
+def _last_line(err: str) -> str:
+    """The CLI's own last stderr line; a leaked logging handler can print above it."""
+
+    lines = err.strip().splitlines()
+    return lines[-1] if lines else ""
+
+
 def _run(capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, dict[str, Any] | None, str]:
     try:
         lt_cli.main(["decision-context", *argv])
@@ -194,7 +201,7 @@ def test_a_malformed_bound_project_is_named_instead_of_sent(
     code, payload, err = _run(capsys, "--task-kind", "plot", "--query", "q")
 
     assert (code, payload) == (1, None)
-    assert "'not-a-uuid' (from the environment) is not a Lab Tracker UUID" in err
+    assert "'not-a-uuid' from LAB_TRACKER_PROJECT_ID is not a Lab Tracker UUID" in err
     assert server.requests == []
 
 
@@ -229,7 +236,7 @@ def test_an_inaccessible_project_is_a_one_line_error(
     code, payload, err = _run(capsys, "--task-kind", "plot", "--query", "q", "--project", PROJECT)
 
     assert (code, payload) == (1, None)
-    assert err.startswith("error: ") and "Project access required." in err
+    assert _last_line(err) == "error: Project access required."
 
 
 @pytest.mark.parametrize(
@@ -365,3 +372,112 @@ def test_decision_context_against_the_real_api(
     assert [item["question_id"] for item in data["questions"]] == [
         question.json()["data"]["question_id"]
     ]
+
+
+def test_a_malformed_lt_ids_binding_names_the_file(
+    connection: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    subprocess.run(["git", "init", "-q", str(connection)], check=True)
+    (connection / "lt_ids.json").write_text(json.dumps({"project_id": "proj-1"}), encoding="utf-8")
+    server = _serve(monkeypatch, _packet_handler(_packet()))
+
+    code, _, err = _run(capsys, "--task-kind", "plot", "--query", "q")
+
+    assert code == 1
+    assert f"'proj-1' from {(connection / 'lt_ids.json').resolve()} is not" in err
+    assert server.requests == []
+
+
+def test_an_explicit_project_beats_the_environment(
+    connection: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("LAB_TRACKER_PROJECT_ID", OTHER_PROJECT)
+    server = _serve(monkeypatch, _packet_handler(_packet()))
+
+    assert _run(capsys, "--task-kind", "plot", "--query", "q", "--project", PROJECT)[0] == 0
+
+    assert server.bodies("/assistant/decision-context")[0]["project_id"] == PROJECT
+
+
+@pytest.mark.parametrize("anchor", ["question", "dataset", "analysis", "claim", "visualization"])
+def test_an_anchor_names_its_own_project_instead_of_the_default(
+    connection: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    anchor: str,
+) -> None:
+    monkeypatch.setenv("LAB_TRACKER_PROJECT_ID", OTHER_PROJECT)
+    server = _serve(monkeypatch, _packet_handler(_packet()), default_project_id=PROJECT)
+
+    assert _run(capsys, "--task-kind", "plot", "--query", "q", f"--{anchor}", QUESTION)[0] == 0
+
+    body = server.bodies("/assistant/decision-context")[0]
+    assert "project_id" not in body
+    assert body[f"{anchor}_id"] == QUESTION
+
+
+def test_a_window_that_ends_before_it_starts_fails_before_any_request(
+    connection: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    server = _serve(monkeypatch, _packet_handler(_packet()))
+
+    code, payload, err = _run(
+        capsys,
+        "--task-kind", "progress_review", "--query", "q",
+        # 01:00 at -04:00 is 05:00 UTC, after 04:00 UTC: compared as times, not text.
+        "--since", "2026-10-08T01:00:00-04:00",
+        "--until", "2026-10-08T04:00:00Z",
+    )  # fmt: skip
+
+    assert (code, payload) == (1, None)
+    assert _last_line(err) == "error: --since must not be later than --until."
+    assert server.requests == []
+
+
+def test_a_server_validation_error_is_one_line(
+    connection: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _serve(
+        monkeypatch,
+        lambda _request: httpx.Response(
+            422, json={"error": {"code": "request_validation_error", "message": "Bad query."}}
+        ),
+    )
+
+    code, payload, err = _run(capsys, "--task-kind", "plot", "--query", "q")
+
+    assert (code, payload) == (1, None)
+    assert _last_line(err) == "error: Bad query."
+    assert "LTValidationError" not in err
+
+
+def test_an_anchor_in_another_project_resolves_against_the_real_api(
+    connection: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    client: Any,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    def create(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        response = client.post(path, json=payload, headers=admin_auth_headers)
+        assert response.status_code in (200, 201), response.text
+        return response.json()["data"]
+
+    bound = create("/projects", {"name": "Alpha"})["project_id"]
+    other = create("/projects", {"name": "Beta"})["project_id"]
+    question = create(
+        "/questions",
+        {"project_id": other, "text": "Does beta decode?", "question_type": "descriptive"},
+    )["question_id"]
+    subprocess.run(["git", "init", "-q", str(connection)], check=True)
+    (connection / "lt_ids.json").write_text(json.dumps({"project_id": bound}), encoding="utf-8")
+    token = admin_auth_headers["Authorization"].split(" ", 1)[1]
+    lt = LabTracker(base_url="http://testserver", access_token=token, transport=client._transport)
+    monkeypatch.setattr(lt_cli.LabTracker, "from_env", lambda: lt)
+
+    code, payload, _ = _run(
+        capsys, "--task-kind", "plot", "--query", "beta decode", "--question", question
+    )
+
+    assert code == 0 and payload is not None
+    assert payload["data"]["scope"]["project"]["project_id"] == other

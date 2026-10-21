@@ -1978,7 +1978,8 @@ def _agents_fragment() -> str:
         - Use MCP tools for lightweight reads and small interactive writes during an
           agent session. Without an MCP server, `lt decision-context --task-kind
           <kind> --query "<the decision>"` returns the decision context the MCP
-          tool returns, for the project in `lt_ids.json`.
+          tool returns, for the project in `LAB_TRACKER_PROJECT_ID` or
+          `lt_ids.json` unless an anchor flag names one.
         - Use `scripts.lt.upsert_note(...)` from committed scripts for substantive
           findings notes that should stay synced with code, plots, and tables.
         - Use `python -m scripts.lt quick "..." --project <PROJECT_ID>` for scratch
