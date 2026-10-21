@@ -49,7 +49,7 @@ from lab_tracker.models import (
     StoreCapability,
     StoreKind,
 )
-from lab_tracker_client.cloud_session import CLOUD_AGENTS_DOC
+from lab_tracker_client.cloud_session import CLOUD_AGENTS_DOC, cloud_session
 from lab_tracker_client.transport import (
     MAX_UPLOAD_BYTES,
     HttpTransport,
@@ -448,6 +448,14 @@ class LabTracker:
                     "--save-token', or set LAB_TRACKER_ACCESS_TOKEN, or set "
                     "LAB_TRACKER_USERNAME and LAB_TRACKER_PASSWORD so the client "
                     "can log in."
+                )
+            if cloud_session()["detected"]:
+                raise LTAPIError(
+                    "LAB_TRACKER_ACCESS_TOKEN was rejected by the Lab Tracker API. In a "
+                    "cloud session it comes from the environment's settings: a Codex "
+                    "network secret is substituted only on HTTPS port 443 for a host in "
+                    "its allowed domains, and otherwise the server receives the "
+                    f"placeholder; a person replaces an expired token there ({CLOUD_AGENTS_DOC})."
                 )
             raise LTAPIError(
                 "LAB_TRACKER_ACCESS_TOKEN was rejected by the Lab Tracker API. "

@@ -143,7 +143,7 @@ def script_name(host: str | None) -> str:
 
     return {
         CLAUDE_CODE: "setup script",
-        CODEX: "install script (setup script in Codex Cloud (Legacy))",
+        CODEX: "install script, then republished (setup script in Codex Cloud (Legacy))",
     }.get(host or "", "setup or install script")
 
 

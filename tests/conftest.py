@@ -65,15 +65,22 @@ def _isolate_lab_tracker_home(tmp_path_factory, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _isolate_cloud_session_markers(monkeypatch):
-    """Run every test as on a person's computer, even inside a cloud agent VM.
+    """Run every test as on a person's computer, even inside a cloud agent VM or Codex.
 
     A Claude Code cloud session exports ``CLAUDE_CODE_REMOTE=true``, which turns
     ``lt setup status`` into its cloud-session variant. Tests of that variant set
     the markers themselves.
     """
 
-    monkeypatch.delenv("CLAUDE_CODE_REMOTE", raising=False)
-    monkeypatch.delenv("LAB_TRACKER_CLOUD_SESSION", raising=False)
+    for name in (
+        "CLAUDE_CODE_REMOTE",
+        "LAB_TRACKER_CLOUD_SESSION",
+        # Codex's harness and sandbox mark the commands it runs.
+        "CODEX_THREAD_ID",
+        "CODEX_CI",
+        "CODEX_SANDBOX_NETWORK_DISABLED",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture

@@ -80,12 +80,13 @@ See [capture and integration](references/capture.md) for every capture path.
 
 In a cloud session (Claude Code on the web, where `CLAUDE_CODE_REMOTE=true`, or a
 Codex cloud task), the VM is cloned from the repository and discarded later.
-Where no Lab Tracker MCP server runs, as in a Codex cloud task, `lt prime` lists
-the project's open questions. `lt setup status` names the missing cloud
+Where no Lab Tracker MCP server runs, as in a Codex cloud task, decision context
+is unavailable; `lt prime --project <project_id from lt_ids.json>` ranks the
+project's open questions under its planned or in-progress goals. `lt setup status` names the missing cloud
 environment settings for the person to change; never start a local server in
 the VM or ask for a token in the chat. Personal agent hooks and an `lt maintain`
 upgrade made in the VM are lost with it, so do not offer them there; a client
-update belongs in the environment's setup script. Run `lt outbox sync`, then
+update belongs in the environment's setup or install script. Run `lt outbox sync`, then
 `lt outbox status`, before a cloud session that captured anything ends.
 
 For upkeep, doctor and MCP update notices prescribe a server-pinned

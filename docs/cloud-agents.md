@@ -27,11 +27,11 @@ is never pasted into an agent's chat.
 
 | | On your computer | In a cloud session |
 | --- | --- | --- |
-| `lt` and `lt-mcp` | `uv tool install` once | Installed by the environment's **setup script**, because each session starts from a fresh VM |
+| `lt` and `lt-mcp` | `uv tool install` once | Installed by the environment's **setup script** (Codex: **install script**), because each session starts from a fresh VM |
 | Server address | Loopback, LAN, or tailnet addresses work | An address the VM can reach, normally a **public HTTPS address**: the VM's loopback is the VM itself, and it joins a lab network or tailnet only through a VPN its environment provides (a Codex environment's Tailscale setting; Anthropic-hosted Claude Code environments have none) |
 | Token | Saved profile (`lt setup connect --save-token`) | A **network secret**, added outside the VM, or an environment variable |
-| Repository files (`.mcp.json`, `.claude/settings.json`, `lt_ids.json`, the managed `CLAUDE.md` block) | Present | Present, because they are committed |
-| Skills in `~/.claude/skills` | Installed once | Not carried over; installed by the setup script |
+| Repository files (`.mcp.json`, `.claude/settings.json`, `lt_ids.json`, the managed `CLAUDE.md` and `AGENTS.md` blocks) | Present | Present, because they are committed |
+| Skills in `~/.claude/skills` and `~/.agents/skills` | Installed once | Not carried over; installed by the setup or install script |
 | Saved profile, watch folders, commit hooks, OS schedules, autotrack startup files, personal agent hooks | Persist | Made in the VM, they are lost with it |
 | Offline captures | Wait in the checkout's outbox and sync later | Lost with the VM unless synced before the session ends |
 
@@ -40,16 +40,17 @@ is never pasted into an agent's chat.
 VM. OpenAI documents no such variable for Codex cloud tasks, so a Codex
 environment declares itself with `LAB_TRACKER_CLOUD_SESSION=codex`
 ([below](#2-environment-variables-the-address-and-the-cloud-marker)). In a cloud
-session the report's `cloud_session` block and replaces the suggestions that
-only make sense on a computer (start a local server, save a profile, add watch
+session the report fills in its `cloud_session` block and replaces the
+suggestions that only make sense on a computer (start a local server, save a profile, add watch
 folders, install commit hooks or personal agent hooks) with the cloud
 environment settings below. Its `--brief` line, which the scaffolded
 `SessionStart` hook hands the agent, starts with `lab-tracker (cloud session)`.
 
 ## Before you start
 
-- **A server the internet can reach.** The lab's Lab Tracker must answer at a
-  public HTTPS address with authentication on: a
+- **A server the cloud VM can reach.** The lab's Lab Tracker must answer, with
+  authentication on, at an address the VM can reach, normally a public HTTPS
+  address: a
   [Render deployment](one-click-cloud-deploy.md), an instance published through
   [Tailscale Funnel](self-hosted-operations.md#publishing-through-tailscale-funnel),
   or one behind your institution's reverse proxy. A Claude Code cloud VM cannot
@@ -226,9 +227,10 @@ installation, saved profile, VPN, or personal skills. OpenAI documents no MCP
 server support for Codex cloud tasks, so the agent there has no
 `lab_tracker_get_decision_context`. It reads the repository's `AGENTS.md`,
 where `lt setup init` writes the managed Lab Tracker block, and it reaches
-Lab Tracker through `lt` commands: `lt prime` lists the project's open
-questions, and captures (`lt run`, `lt capture file`, commit hooks) work as on
-a computer.
+Lab Tracker through `lt` commands: `lt prime --project <project_id>` (the id in
+`lt_ids.json`) ranks up to five of the project's open questions under its
+planned or in-progress goals, and `lt run` and `lt capture file` send what they
+capture while the task runs.
 
 ### 1. Install script: install the client and skills
 
@@ -244,9 +246,9 @@ uv tool install --force "lab-tracker @ git+https://github.com/SamuelBrudner/lab-
 "$(uv tool dir --bin)/lt" update --skills-only || true
 ```
 
-The install needs `github.com`, which the **Package managers** preset (Legacy:
-**Common dependencies**) allows. Skills can also be committed to the
-repository's `.agents/skills`, which cloud tasks read directly.
+The install needs `github.com` and PyPI (`pypi.org`, `files.pythonhosted.org`),
+which Codex Cloud's **Package managers** preset allows; a Codex Cloud (Legacy)
+setup script has internet access whatever the agent's setting.
 
 ### 2. Environment variables: the address and the cloud marker
 
@@ -265,8 +267,8 @@ A Codex agent has no internet access until the environment turns it on. In
 Codex Cloud, turn on internet access, choose **Package managers** or **Custom
 domains only** under **Allow domains**, and add the server's exact host (for
 example `lab.example.org`) under **Additional allowed domains**: subdomains are
-not covered by their parent. Saving a network secret for the host (step 4) also
-allows it. In Codex Cloud (Legacy), set agent internet access to **On** and add
+not covered by their parent. Saving an environment-owned network secret for the
+host (step 4) also allows it; a Personal vault secret does not. In Codex Cloud (Legacy), set agent internet access to **On** and add
 the host to the allowlist, and leave the allowed HTTP methods unrestricted:
 limiting them to `GET`, `HEAD`, and `OPTIONS` blocks every Lab Tracker capture
 and draft request.
@@ -307,7 +309,8 @@ Start a new task (after publishing, in Codex Cloud) and ask the agent to run:
    reachable server, and no suggestion about the address;
 2. `lt readiness`, an authenticated read that proves the network secret or
    token works;
-3. `lt prime`, which should list the bound project's open questions.
+3. `lt prime --project <project_id>`, which should rank the project's open
+   questions, or say that no planned or in-progress goal is open.
 
 ## While a cloud session works
 

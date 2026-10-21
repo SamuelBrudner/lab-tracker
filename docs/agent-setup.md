@@ -304,7 +304,7 @@ client do not apply to it.
 | Codex in the ChatGPT desktop app | you, in the app's **Settings**, or `~/.codex/config.toml` | no |
 | Codex CLI | you, with `codex mcp add`, or `~/.codex/config.toml` | no |
 | Claude Code cloud session (claude.ai/code, `claude --cloud`) | the committed repository `.mcp.json`, with `lt-mcp` installed by the cloud environment's setup script | yes, `.mcp.json` |
-| Codex cloud task (ChatGPT, `codex cloud`, `@codex` on GitHub) | nothing: OpenAI documents no MCP server for cloud tasks, so the agent reads `AGENTS.md` and runs the `lt` that the environment's install script installs | yes, the `AGENTS.md` block |
+| Codex cloud task (ChatGPT, `codex cloud`, `@codex` on GitHub) | nothing: OpenAI documents no MCP server for cloud tasks, so the agent reads `AGENTS.md` and runs the `lt` that the environment's install script installs (its setup script in Codex Cloud (Legacy), which runs `@codex` on GitHub) | yes, the `AGENTS.md` block |
 
 Two rules apply in this section. The first covers the registrations you make by
 hand, Claude Desktop chat and both Codex products; the second covers each
@@ -543,13 +543,15 @@ the cloud environment's setup script, the server address from the environment's
 loopback is the VM itself), and the token from a network secret that the
 environment's proxy adds outside the VM. A Codex cloud task has no Lab Tracker
 MCP server: its agent reads `AGENTS.md` and uses `lt`, which the environment's
-install script installs, with `LAB_TRACKER_CLOUD_SESSION=codex` set so
+install script installs (its setup script in Codex Cloud (Legacy), which runs
+`@codex` on GitHub), with `LAB_TRACKER_CLOUD_SESSION=codex` set so
 `lt setup status` recognizes the task. [Cloud agent sessions](cloud-agents.md)
 walks through each setting for both, the check on the address in `.mcp.json`,
 and which capture outlives the VM.
 
 Verify, from a Claude Code session in that environment (Codex tasks use
-`lt setup status`, `lt readiness`, and `lt prime`, as the cloud page shows):
+`lt setup status`, `lt readiness`, and `lt prime --project <project_id>`, as the
+cloud page shows):
 
 1. Registration check: `lt setup status` shows `cloud_session.detected` as
    `true` and no suggestion about `.mcp.json` or the server address.

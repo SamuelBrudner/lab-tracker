@@ -243,8 +243,10 @@ settings instead, which a person changes in the environment's settings:
   the chat.
 
 OpenAI documents no MCP server for Codex cloud tasks, so a Codex agent
-there reads AGENTS.md and reaches Lab Tracker through `lt` (`lt
-prime` lists the project's open questions). Codex Cloud (Legacy), which
+there reads AGENTS.md and reaches Lab Tracker through `lt`, without
+decision context: `lt prime --project <project_id from lt_ids.json>`
+ranks the project's open questions under its planned or in-progress
+goals. Codex Cloud (Legacy), which
 still runs @codex requests on GitHub and Linear tasks, can limit the
 agent to GET, HEAD, and OPTIONS requests, which blocks every capture.
 
@@ -262,12 +264,14 @@ the head commit of each push or pull request its workflow triggers
 on, pushes from cloud sessions included. Before a cloud session that
 captured anything ends, `lt outbox sync` and then `lt outbox status`
 confirm nothing is left in the VM. `docs/cloud-agents.md` in the Lab
-Tracker repository walks through each setting. In the VM, `lt setup
-verify-mcp --expected-revision <revision>` checks the installed
-`lt-mcp` and the token with the environment's variables, `lt setup
-status` checks the committed `.mcp.json` launch, and asking the agent
-to call `lab_tracker_list_projects` checks the server Claude Code
-started.
+Tracker repository walks through each setting. In a Claude Code VM,
+`lt setup verify-mcp --expected-revision <revision>` checks the
+installed `lt-mcp` and the token with the environment's variables,
+`lt setup status` checks the committed `.mcp.json` launch, and asking
+the agent to call `lab_tracker_list_projects` checks the server Claude
+Code started. In a Codex cloud task, which starts no `lt-mcp`, `lt
+setup status` shows `cloud_session.host` as `codex` and `lt readiness`
+checks the token.
 
 ## After setup
 
@@ -335,4 +339,4 @@ rerunning its pinned `uv add` (step 5), which neither `lt update` nor
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.3.0 sha256=e1c9b2a2422a -->
+<!-- lab-tracker-setup-guide version=0.3.0 sha256=efa093ad6e96 -->

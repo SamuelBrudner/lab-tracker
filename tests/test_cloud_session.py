@@ -397,7 +397,8 @@ def test_cloud_session_policy_reaches_every_agent_instruction_surface() -> None:
         "refuses a request for lack of a token",
         "belongs in the environment's setup or install script rather than `lt maintain`",
         "a Codex cloud task",
-        "`lt prime` lists the project's open questions",
+        "`lt prime --project <project_id from lt_ids.json>` ranks the project's open questions",
+        "`LAB_TRACKER_CLOUD_SESSION=codex` (Codex sets no marker of its own)",
         "`lt outbox sync`, then `lt outbox status`",
         "`docs/cloud-agents.md`",
     ):
@@ -828,7 +829,7 @@ def test_a_codex_task_names_its_install_script(
     skills = [item for item in suggestions if "skills" in item]
     assert len(behind) == len(skills) == 1
     for item in (behind[0], skills[0]):
-        assert "install script (setup script in Codex Cloud (Legacy))" in item
+        assert "install script, then republished (setup script in Codex Cloud (Legacy))" in item
 
 
 def test_a_codex_task_can_reach_a_private_address_through_its_vpn(
@@ -858,7 +859,7 @@ def test_a_codex_task_explains_internet_access_that_is_off_by_default(
     answer = [item for item in suggestions if "No Lab Tracker API answered" in item]
     assert len(answer) == 1
     assert "internet access, which is off unless turned on" in answer[0]
-    assert "saving a network secret for it" in answer[0]
+    assert "saving an environment-owned network secret for it in Codex Cloud" in answer[0]
     assert "through the Codex environment's Tailscale VPN" in answer[0]
 
 
@@ -888,6 +889,9 @@ def test_codex_without_network_is_named_before_any_address_advice(
     suggestions = _status(cloud_repo)["suggestions"]
 
     assert suggestions[0].startswith("Codex runs this command with network access off")
+    # Nothing answers inside the sandbox, so no advice blames the server or offers one.
+    assert not any("lab-tracker serve" in item for item in suggestions)
+    assert not any("No Lab Tracker API answered" in item for item in suggestions)
 
     _online(monkeypatch)
     assert not any("network access off" in item for item in _status(cloud_repo)["suggestions"])
@@ -915,3 +919,68 @@ def test_a_codex_task_without_a_token_variable_is_told_where_one_goes(
         "lab-tracker (cloud session): server reachable; "
         "a Lab Tracker token is available to `lt` in this VM."
     )
+
+
+def test_a_proxy_refusal_does_not_count_as_reaching_a_private_address(
+    codex_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", "http://100.101.102.103:8000")
+    _probe(monkeypatch, {"reachable": True, "diagnosis": "http_error", "status_code": 403})
+
+    assert _status(codex_repo)["cloud_session"]["base_url_unreachable"] == PRIVATE_NETWORK
+
+
+def test_a_reached_private_address_in_mcp_json_is_not_flagged_either(
+    cloud_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private = "http://100.101.102.103:8000"
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", private)
+    _online(monkeypatch)
+    _write_mcp_json(cloud_repo, command=str(Path(__file__)), base_url=private)
+
+    payload = _status(cloud_repo)
+
+    assert payload["cloud_session"]["base_url_unreachable"] is None
+    assert payload["cloud_session"]["mcp_json"]["base_url_unreachable"] is None
+    assert _mcp_json_suggestions(payload["suggestions"]) == []
+
+
+@pytest.mark.parametrize(
+    ("base_url", "network_secret"),
+    [
+        ("https://lab.example.org", True),
+        ("https://lab.example.org:443", True),
+        ("https://lab.example.org:8443", False),
+        ("http://lab.example.org", False),
+    ],
+)
+def test_a_codex_token_suggestion_offers_a_network_secret_only_on_https_443(
+    codex_repo: Path, monkeypatch: pytest.MonkeyPatch, base_url: str, network_secret: bool
+) -> None:
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", base_url)
+    _online(monkeypatch)
+
+    suggestions = _status(codex_repo)["suggestions"]
+
+    token = [item for item in suggestions if "No Lab Tracker token is in this VM" in item]
+    assert len(token) == 1
+    assert ("network secret with the key LAB_TRACKER_ACCESS_TOKEN" in token[0]) is network_secret
+    assert ("not HTTPS on port 443" in token[0]) is not network_secret
+
+
+def test_a_rejected_token_in_a_cloud_session_explains_the_network_secret(
+    cloud_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import httpx
+
+    monkeypatch.setenv("LAB_TRACKER_ACCESS_TOKEN", "placeholder")
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", _PUBLIC_URL)
+    client = LabTracker.from_env()
+    try:
+        with pytest.raises(LTAPIError) as excinfo:
+            client.refresh_bearer(httpx.Response(401))
+    finally:
+        client.close()
+    message = " ".join(str(excinfo.value).split())
+    assert "substituted only on HTTPS port 443" in message
+    assert CLOUD_AGENTS_DOC in message

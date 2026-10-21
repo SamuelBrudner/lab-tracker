@@ -697,7 +697,7 @@ research record:
   launch, and whether the VM holds a token (`token_in_vm`), and the report
   suggests cloud environment settings in place of the computer-only steps. On
   any machine, a command Codex runs with `CODEX_SANDBOX_NETWORK_DISABLED=1` gets
-  a suggestion naming that instead of the server; `lt doctor`, the `lt-mcp` update notice, and figure
+  a suggestion naming that in place of the unreachable-server advice; `lt doctor`, the `lt-mcp` update notice, and figure
   capture also behave as a cloud VM needs. The check reads only the address and local files; it adds
   no network probe. The agent instruction texts and `lt-mcp`'s missing-credential
   error carry the matching rules: no local server in the VM, no token in the

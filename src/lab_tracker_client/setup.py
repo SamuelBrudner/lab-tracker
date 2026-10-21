@@ -508,7 +508,12 @@ def _suggestions(status: JsonObject) -> list[str]:
     skills = status["skills"]
     # Only when nothing configured the URL at all: an env- or profile-pinned
     # server that is temporarily down is an outage, not a setup gap.
-    if not status["server"]["reachable"] and status["server"]["source"] == "default":
+    # Inside Codex's network-less sandbox nothing answers, so no server is missing.
+    if (
+        not status["server"]["reachable"]
+        and status["server"]["source"] == "default"
+        and not codex_network_disabled()
+    ):
         suggestions.append(
             f"No Lab Tracker API responded at {status['server']['base_url']}; "
             "`lab-tracker serve` starts a local instance and `lt setup connect` "
@@ -627,9 +632,12 @@ def _cloud_session_status(root: Path, server: JsonObject, profile: dict[str, str
         return session
     # Only Claude Code starts lt-mcp from the repository's .mcp.json.
     launch = _mcp_json_launch(root) if session["host"] == CLAUDE_CODE else None
+    unreachable = _base_url_unreachable(server)
+    if launch is not None and _same_reached_address(launch, server, unreachable):
+        launch["base_url_unreachable"] = None
     return {
         **session,
-        "base_url_unreachable": _base_url_unreachable(server),
+        "base_url_unreachable": unreachable,
         "mcp_json": launch,
         "token_in_vm": {
             "lt": _token_in_environment(
@@ -643,6 +651,17 @@ def _cloud_session_status(root: Path, server: JsonObject, profile: dict[str, str
     }
 
 
+def _same_reached_address(launch: JsonObject, server: JsonObject, unreachable: str | None) -> bool:
+    """Whether ``.mcp.json`` names the private address the probe just reached."""
+
+    if launch["base_url_unreachable"] != PRIVATE_NETWORK or unreachable is not None:
+        return False
+    try:
+        return normalize_instance_base_url(launch["base_url"]) == server.get("base_url")
+    except ValueError:
+        return False
+
+
 def _base_url_unreachable(server: JsonObject) -> str | None:
     """Why this VM cannot reach the server's address, judged by the address and the probe.
 
@@ -653,7 +672,8 @@ def _base_url_unreachable(server: JsonObject) -> str | None:
 
     base_url = server.get("base_url")
     reason = unreachable_from_cloud(base_url) if base_url else None
-    if reason == PRIVATE_NETWORK and server.get("reachable"):
+    # Only a clean answer proves it: a proxy's 403 also counts as "reachable".
+    if reason == PRIVATE_NETWORK and server.get("reachable") and not server.get("diagnosis"):
         return None
     return reason
 
@@ -796,14 +816,7 @@ def _cloud_suggestions(status: JsonObject) -> list[str]:
     )
     suggestions.extend(_cloud_mcp_url_suggestions(cloud.get("mcp_json")))
     if host == CODEX and not cloud["token_in_vm"]["lt"]:
-        suggestions.append(
-            "No Lab Tracker token is in this VM, and in a Codex cloud task even a network "
-            "secret shows up here, as a placeholder. In Codex Cloud, a network secret "
-            "with the key LAB_TRACKER_ACCESS_TOKEN and the server's host as its allowed "
-            "domain supplies one without exposing it; in Codex Cloud (Legacy), whose "
-            "secrets reach only the setup script, it is an environment variable. A person "
-            "adds it in the environment's settings, never in the chat."
-        )
+        suggestions.append(_codex_token_suggestion(status["server"].get("base_url")))
     suggestions.extend(_repo_file_suggestions(status["repo"]))
     if status["skills"].get("all_resources_up_to_date") is False:
         suggestions.append(
@@ -814,6 +827,29 @@ def _cloud_suggestions(status: JsonObject) -> list[str]:
             "session only."
         )
     return suggestions
+
+
+def _codex_token_suggestion(base_url: str | None) -> str:
+    """Where a Codex task's missing token goes; network secrets need HTTPS on port 443."""
+
+    parts = urlsplit(base_url or "")
+    if parts.scheme == "https" and parts.port in (None, 443):
+        where = (
+            "In Codex Cloud, a network secret with the key LAB_TRACKER_ACCESS_TOKEN and "
+            "the server's host as its allowed domain supplies one without exposing it; in "
+            "Codex Cloud (Legacy), whose secrets reach only the setup script, it is an "
+            "environment variable."
+        )
+    else:
+        where = (
+            "This server is not HTTPS on port 443, where Codex Cloud substitutes network "
+            "secrets, so the token is a LAB_TRACKER_ACCESS_TOKEN environment variable."
+        )
+    return (
+        "No Lab Tracker token is in this VM, and in a Codex cloud task even a network "
+        f"secret shows up here, as a placeholder. {where} A person adds it in the "
+        "environment's settings, never in the chat."
+    )
 
 
 def _codex_network_suggestions(server: JsonObject) -> list[str]:
@@ -877,7 +913,7 @@ def _cloud_server_suggestions(
             "server's public HTTPS origin, in the cloud environment's settings; "
             f"{CLOUD_AGENTS_DOC} lists every setting."
         ]
-    if server["reachable"]:
+    if server["reachable"] or codex_network_disabled():
         return []
     name = urlsplit(base_url).hostname or base_url
     return [
@@ -892,7 +928,8 @@ def _network_access_advice(name: str, host: str | None) -> str:
         return (
             f"Either the server is down, or the Codex environment's internet access, "
             f"which is off unless turned on, does not allow {name}: allowing {name} "
-            "there, which saving a network secret for it also does, lets this VM reach it"
+            "there, which saving an environment-owned network secret for it in Codex "
+            "Cloud also does, lets this VM reach it"
         )
     return (
         f"Either the server is down, or the cloud environment's network access does not "
