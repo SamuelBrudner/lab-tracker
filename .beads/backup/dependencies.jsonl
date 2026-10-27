@@ -364,6 +364,7 @@
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-8g54","issue_id":"lab-tracker-8g54.6","type":"parent-child"}
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-8g54","issue_id":"lab-tracker-8g54.7","type":"parent-child"}
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-8g54","issue_id":"lab-tracker-8g54.8","type":"parent-child"}
+{"created_at":"2026-10-13T09:59:17Z","created_by":"SamuelBrudner","depends_on_id":"lab-tracker-u190","issue_id":"lab-tracker-8m5f","type":"discovered-from"}
 {"created_at":"2026-06-04T12:55:53Z","created_by":"import","depends_on_id":"lab-tracker-6lx","issue_id":"lab-tracker-8pk","type":"related"}
 {"created_at":"2026-06-04T12:55:53Z","created_by":"import","depends_on_id":"lab-tracker-d0e","issue_id":"lab-tracker-8pk","type":"discovered-from"}
 {"created_at":"2026-06-04T12:55:53Z","created_by":"import","depends_on_id":"lab-tracker-grb","issue_id":"lab-tracker-8q6","type":"discovered-from"}
@@ -580,6 +581,7 @@
 {"created_at":"2026-05-24T18:15:14Z","created_by":"bootstrap","depends_on_id":"lab-tracker-mf7","issue_id":"lab-tracker-e45","type":"discovered-from"}
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-rjg1.2","issue_id":"lab-tracker-e4gd","type":"discovered-from"}
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-jcng","issue_id":"lab-tracker-e8xm","type":"parent-child"}
+{"created_at":"2026-10-13T09:53:07Z","created_by":"SamuelBrudner","depends_on_id":"lab-tracker-u190","issue_id":"lab-tracker-epnl","type":"discovered-from"}
 {"created_at":"2026-06-04T12:55:53Z","created_by":"import","depends_on_id":"lab-tracker-ctz","issue_id":"lab-tracker-evr","type":"related"}
 {"created_at":"2026-06-04T12:55:53Z","created_by":"import","depends_on_id":"lab-tracker-m3l","issue_id":"lab-tracker-evr","type":"parent-child"}
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-2qg","issue_id":"lab-tracker-ewc","type":"blocks"}
