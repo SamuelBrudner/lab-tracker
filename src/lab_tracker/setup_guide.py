@@ -252,7 +252,7 @@ def setup_guide_markdown() -> str:
         "checkout; it needs only the standard library. Without a checkout,\n"
         "the Setup page's exact server-pinned `uv tool install` updates both\n"
         "commands, then `lt update` refreshes each repo and `lt update\n"
-        "--skills-only` refreshes the skills. An analysis repo updates by\n"
+        "--skills-only` refreshes both skills. An analysis repo updates by\n"
         "rerunning its pinned `uv add` (step 5), which neither `lt update` nor\n"
         "`lt maintain` changes.\n"
     )
@@ -331,7 +331,7 @@ _SKILL_CONVERSATION = """\
    back. For package upkeep, offer the server-pinned `lt maintain` preview
    above; after upgrading, restart and verify the app's registered `lt-mcp`.
    `lt update` refreshes repo files and `lt update --skills-only` refreshes
-   the skills without upgrading the package.
+   both skills without upgrading the package.
 
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.

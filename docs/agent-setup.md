@@ -216,8 +216,8 @@ The tool environment alone is not enough for analysis code that imports
 `lab_tracker_client`; the project environment needs its own dependency.
 
 Then, in the analysis repo, one command writes the repository files for Claude
-Code, Cursor and Gemini CLI (table below) and installs the Lab Tracker skills
-for both Claude and Codex. Codex and Claude Desktop chat register the MCP
+Code, Cursor and Gemini CLI (table below) and installs the generated setup
+skill for both Claude and Codex. Codex and Claude Desktop chat register the MCP
 server by hand; see [Choose your client](#choose-your-client).
 
 ```bash
@@ -233,11 +233,7 @@ ID and project membership with the project owner. A successful `lt health`
 checks connectivity, not authenticated project access. `--dry-run` previews the
 binding without writing `lt_ids.json`.
 
-The Lab Tracker skills are `lab-tracker` (research context and evidence),
-`lab-tracker-setup` (guided setup), and `scientific-visualization` (plot
-geometry for analysis figures: meaningful origins, directions, wrapping axes,
-and embeddings). Every directory under `skills/` ships in the package. The
-skills and their supporting references are machine-wide, not
+Both Lab Tracker skills and their supporting references are machine-wide, not
 per repo. When `lt setup status` reports missing or stale files,
 `lt update --skills-only` (`--dry-run` previews) refreshes the complete skill
 trees in the Claude and Codex homes and touches no file in the current
@@ -288,7 +284,7 @@ Registration is per client, and each client reads a different file.
 `lt setup init` writes the repository files in the table above, and the
 `.mcp.json` it writes carries no token. That covers Claude Code. Any run without
 `--dry-run` also records the repository in `~/.lab-tracker/applied-repos.json`,
-and `--install-skills` additionally writes the Lab Tracker skills and supporting references
+and `--install-skills` additionally writes both skills and supporting references
 into the user-level Claude and Codex skill homes (`~/.claude/skills` and
 `~/.agents/skills`). It never writes a client's own MCP registration file
 (`claude_desktop_config.json`, `~/.codex/config.toml`, or `~/.claude.json`), so

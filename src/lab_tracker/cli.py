@@ -162,7 +162,7 @@ def init_consumer_repo(
         _install_setup_skill(result=result, dry_run=dry_run)
     else:
         result.offers.append(
-            "The Lab Tracker skills and references can be installed for Claude/Codex "
+            "Both Lab Tracker skills and references can be installed for Claude/Codex "
             "agents with `--install-skills`."
         )
     if not dry_run:
@@ -218,7 +218,7 @@ def _skills_homes() -> tuple[tuple[str, Path], ...]:
 
     The explicit environment override predates Codex support and remains a
     single-target escape hatch for custom installs and isolated tests. Without
-    it, install every skill tree for both supported agent homes. A
+    it, install both skill trees for both supported agent homes. A
     relative override is taken as written and so resolves against the current
     directory; it should be an absolute path.
     """
@@ -253,7 +253,7 @@ def _setup_skill_path() -> Path:
 
 
 def _install_setup_skill(*, result: InitResult, dry_run: bool = False) -> None:
-    """Install every complete skill tree into each configured agent skill home.
+    """Install both complete skill trees into each configured agent skill home.
 
     Real file copies work on Windows. LF-only writes preserve the setup skill's
     generated hash, and upgrades refresh every bundled resource. A setup
@@ -320,10 +320,9 @@ def _install_setup_skill_at_path(
 def _uninstall_setup_skill(*, result: InitResult, dry_run: bool = False) -> None:
     from lab_tracker.skill_bundle import skill_resources
 
-    skill_names = sorted({path.split("/", 1)[0] for path in skill_resources()})
     for _name, home in _skills_homes():
         linked_skills: set[str] = set()
-        for skill_name in skill_names:
+        for skill_name in ("lab-tracker", "lab-tracker-setup"):
             root = home / skill_name
             if root.is_symlink():
                 # A development install links the folder to repository source.
@@ -338,7 +337,7 @@ def _uninstall_setup_skill(*, result: InitResult, dry_run: bool = False) -> None
                     home / relative_path, result=result, dry_run=dry_run
                 )
         if not dry_run:
-            for skill_name in skill_names:
+            for skill_name in ("lab-tracker", "lab-tracker-setup"):
                 with suppress(OSError):
                     (home / skill_name).rmdir()
 
@@ -575,7 +574,7 @@ def update_consumer_repo(
 
 
 def refresh_setup_skills(*, dry_run: bool = False) -> InitResult:
-    """Install or refresh every complete skill tree, machine-wide.
+    """Install or refresh complete research/setup skill trees, machine-wide.
 
     This is the skills half of ``update_consumer_repo(install_skills=True)`` on
     its own. It takes no target, so it cannot scaffold: it writes no repo file,
@@ -849,7 +848,7 @@ def main(argv: list[str] | None = None) -> None:
         "--install-skills",
         action="store_true",
         help=(
-            "Install the Lab Tracker skills and references into the Claude and Codex "
+            "Install both Lab Tracker skills and references into the Claude and Codex "
             "skill homes (with --uninstall: remove it)."
         ),
     )
@@ -879,7 +878,7 @@ def main(argv: list[str] | None = None) -> None:
         "--install-skills",
         action="store_true",
         help=(
-            "Refresh the Lab Tracker skills and references in the Claude and Codex "
+            "Refresh both Lab Tracker skills and references in the Claude and Codex "
             "homes, in addition to updating the repo (use --skills-only to leave "
             "the repo alone)."
         ),
@@ -888,7 +887,7 @@ def main(argv: list[str] | None = None) -> None:
         "--skills-only",
         action="store_true",
         help=(
-            "Install or refresh the Lab Tracker skills and references in the Claude and "
+            "Install or refresh both Lab Tracker skills and references in the Claude and "
             "Codex homes, machine-wide; implies --install-skills and touches no "
             "repo or file in the current directory, unless LAB_TRACKER_SKILLS_HOME "
             "is a relative path (use an absolute one). Cannot be combined with "

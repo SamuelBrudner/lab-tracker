@@ -557,7 +557,7 @@ def _suggestions(status: JsonObject) -> list[str]:
     if skills.get("all_resources_up_to_date") is False:
         suggestions.append(
             "Lab Tracker skill files or supporting references are missing or stale; "
-            f"`lt update --skills-only` refreshes every complete skill {_SKILLS_ONLY_SCOPE_NOTE}"
+            f"`lt update --skills-only` refreshes both complete skills {_SKILLS_ONLY_SCOPE_NOTE}"
         )
     suggestions.extend(agent_capture_suggestions(status.get("agent_hooks", {})))
     return suggestions

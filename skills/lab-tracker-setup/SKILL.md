@@ -250,7 +250,7 @@ If the installed CLI lacks `maintain`, run the same arguments through
 checkout; it needs only the standard library. Without a checkout,
 the Setup page's exact server-pinned `uv tool install` updates both
 commands, then `lt update` refreshes each repo and `lt update
---skills-only` refreshes the skills. An analysis repo updates by
+--skills-only` refreshes both skills. An analysis repo updates by
 rerunning its pinned `uv add` (step 5), which neither `lt update` nor
 `lt maintain` changes.
 <!-- END GENERATED SETUP GUIDE -->
@@ -269,9 +269,9 @@ rerunning its pinned `uv add` (step 5), which neither `lt update` nor
    back. For package upkeep, offer the server-pinned `lt maintain` preview
    above; after upgrading, restart and verify the app's registered `lt-mcp`.
    `lt update` refreshes repo files and `lt update --skills-only` refreshes
-   the skills without upgrading the package.
+   both skills without upgrading the package.
 
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.3.0 sha256=ff708e8e5ee4 -->
+<!-- lab-tracker-setup-guide version=0.3.0 sha256=61420e550cfa -->
