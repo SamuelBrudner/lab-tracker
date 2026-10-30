@@ -273,7 +273,7 @@ python3 scripts/maintain_lab_tracker.py --all --upgrade-client --revision <serve
 
 This bootstrap can update an older or broken client before running its checks.
 Without a checkout, use the Setup page's exact server-pinned `uv tool install`,
-then `lt update` in each repo and `lt update --skills-only` for both skills.
+then `lt update` in each repo and `lt update --skills-only` for the skills.
 Restart and verify the MCP host as above.
 In a dry run that finds a pending client upgrade, repo previews use the current
 install and the report says so. The apply run upgrades first, then makes new

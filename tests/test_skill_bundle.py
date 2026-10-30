@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import shutil
+from pathlib import Path
 
 import pytest
 
@@ -11,6 +12,13 @@ from lab_tracker.cli import init_consumer_repo, refresh_setup_skills
 from lab_tracker.skill_bundle import skill_resources
 from lab_tracker_client.setup import _skills_status
 from scripts.generate_lab_tracker_skill_reference import main as generate
+
+
+def test_bundle_ships_every_repo_skill_tree():
+    skills = Path("skills")
+    authored = [*skills.glob("*/SKILL.md"), *skills.glob("*/references/*.md")]
+    assert set(skill_resources()) == {path.relative_to(skills).as_posix() for path in authored}
+    assert "scientific-visualization/references/idioms.md" in skill_resources()
 
 
 def test_installed_research_skill_references_are_resolvable(tmp_path, monkeypatch):
@@ -60,6 +68,7 @@ def test_uninstall_removes_managed_references_and_preserves_user_files(tmp_path,
     assert user_file.read_text() == "user resource"
     assert all(not (home / p).exists() for p in skill_resources())
     assert not (home / "lab-tracker-setup").exists()
+    assert not (home / "scientific-visualization").exists()
 
 
 @pytest.mark.parametrize("broken_link", [False, True])
@@ -74,7 +83,8 @@ def test_uninstall_removes_folder_links_without_deleting_source(
         path = source / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
-    for name in ("lab-tracker", "lab-tracker-setup"):
+    names = sorted({relative_path.split("/", 1)[0] for relative_path in expected})
+    for name in names:
         try:
             (home / name).symlink_to(source / name, target_is_directory=True)
         except OSError:
@@ -87,8 +97,8 @@ def test_uninstall_removes_folder_links_without_deleting_source(
     preview = init_consumer_repo(
         tmp_path / "consumer", uninstall=True, install_skills=True, dry_run=True
     )
-    assert {home / "lab-tracker", home / "lab-tracker-setup"} <= set(preview.stripped)
-    assert all((home / name).is_symlink() for name in ("lab-tracker", "lab-tracker-setup"))
+    assert {home / name for name in names} <= set(preview.stripped)
+    assert all((home / name).is_symlink() for name in names)
     init_consumer_repo(tmp_path / "consumer", uninstall=True, install_skills=True)
     assert list(home.iterdir()) == []
     assert {
@@ -111,6 +121,13 @@ def test_generator_check_covers_source_and_packaged_reference_drift(tmp_path, mo
     assert generate(args) == 0
     assert not obsolete.exists()
     assert generate([*args, "--check"]) == 0
+    retired = package / "retired-skill/references/guide.md"
+    retired.parent.mkdir(parents=True)
+    retired.write_text("a skill removed from skills/")
+    assert generate([*args, "--check"]) == 1
+    assert generate(args) == 0
+    assert not (package / "retired-skill").exists()
+    assert (package / "scientific-visualization/SKILL.md").is_file()
     source = root / "lab-tracker/references/api.md"
     source.write_text(source.read_text().replace("`text` (required)", "`text` (optional)"))
     assert generate([*args, "--check"]) == 1

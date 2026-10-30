@@ -331,7 +331,7 @@ def test_lt_update_docs_say_only_install_skills_refreshes_the_skill_with_the_rep
     assert "Bare `lt update` refreshes the repo's files only" in text
     assert any(
         f"`lt update --install-skills` refreshes {skills} in addition to the repo" in text
-        for skills in ("the skill", "both skills")
+        for skills in ("the skill", "the skills")
     )
 
 
@@ -734,7 +734,8 @@ _SHARED_GUIDANCE_HEADING = "All clients"
 _INIT_USER_LEVEL_SENTENCE = (
     "Any run without `--dry-run` also records the repository in "
     "`~/.lab-tracker/applied-repos.json`, and `--install-skills` additionally writes "
-    "both skills and supporting references into the user-level Claude and Codex skill homes "
+    "the Lab Tracker skills and supporting references into the user-level Claude and Codex "
+    "skill homes "
     "(`~/.claude/skills` and `~/.agents/skills`)."
 )
 _CLAUDE_DESKTOP_SUPPORT_STATUS = (

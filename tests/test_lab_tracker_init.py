@@ -628,7 +628,7 @@ def test_update_skills_only_spellings_are_identical(
     assert set(payload["created"]) == {str(skill_home / p) for p in skill_resources()}
     assert skill_path.read_text(encoding="utf-8") == setup_skill_markdown()
     assert sorted(item.name for item in skill_home.iterdir()) == [
-        "lab-tracker", "lab-tracker-setup"
+        "lab-tracker", "lab-tracker-setup", "scientific-visualization"
     ]
     assert list(scratch_cwd.iterdir()) == []
 

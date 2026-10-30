@@ -113,20 +113,22 @@ def main(argv: list[str] | None = None) -> int:
     updates[setup_path] = setup_skill_markdown()
     package_dir = Path(args.package_dir)
     package_paths: set[Path] = set()
-    for skill_dir in (skill_path.parent, setup_path.parent):
+    # Every skill directory beside the research skill ships, not only the two
+    # Lab Tracker skills; a packaged tree with no source skill is obsolete.
+    for skill_dir in sorted(p.parent for p in skill_path.parent.parent.glob("*/SKILL.md")):
         for path in sorted(skill_dir.rglob("*.md")):
             target = package_dir / skill_dir.name / path.relative_to(skill_dir)
             package_paths.add(target)
             updates[target] = updates.get(path, path.read_text(encoding="utf-8"))
     stale = []
-    for skill_name in (skill_path.parent.name, setup_path.parent.name):
-        for path in sorted((package_dir / skill_name).rglob("*.md")):
-            if path not in package_paths:
-                stale.append(path)
-                if args.check:
-                    print(f"{path} is an obsolete packaged resource.")
-                else:
-                    path.unlink()
+    for path in sorted(package_dir.rglob("*.md")):
+        if path not in package_paths:
+            stale.append(path)
+            if args.check:
+                print(f"{path} is an obsolete packaged resource.")
+            else:
+                path.unlink()
+                _prune_empty_parents(path.parent, package_dir)
     for path, content in updates.items():
         if not path.exists() or path.read_text(encoding="utf-8") != content:
             stale.append(path)
@@ -136,6 +138,17 @@ def main(argv: list[str] | None = None) -> int:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(content, encoding="utf-8", newline="\n")
     return int(bool(stale) and args.check)
+
+
+def _prune_empty_parents(directory: Path, stop: Path) -> None:
+    """Remove directories emptied by deleting an obsolete resource, up to ``stop``.
+
+    The bundle reads every packaged skill directory, so an empty leftover
+    directory would make it fail rather than be skipped.
+    """
+    while directory != stop and not any(directory.iterdir()):
+        directory.rmdir()
+        directory = directory.parent
 
 
 def build_openapi_schema() -> dict[str, Any]:

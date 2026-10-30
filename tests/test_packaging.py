@@ -257,6 +257,7 @@ for path, expected in resources.items():
     assert (home / path).read_text(encoding="utf-8") == expected
 assert (home / "lab-tracker/references/api.md").is_file()
 assert (home / "lab-tracker-setup/SKILL.md").is_file()
+assert (home / "scientific-visualization/references/idioms.md").is_file()
 """
     subprocess.run(
         [sys.executable, "-c", script],
