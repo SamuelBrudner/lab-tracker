@@ -296,6 +296,7 @@ MCP, and verification.
   [supported v1 surface](docs/retained-v1-surface.md)
 - **Operate AI drafting:** [agent setup](docs/agent-setup.md) ·
   [scheduled review](docs/scheduled-daily-review.md)
+- **Assess future AI work:** [OpenAI developer tools review (October 2026)](docs/reviews/2026-10-23-openai-developer-tools-review.md)
 - **Maintain and release:** [versioning and releases](docs/versioning.md)
 
 ## Caveats
