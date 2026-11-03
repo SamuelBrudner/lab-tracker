@@ -458,14 +458,22 @@ LAN serving, firewall rules, and phone capture are documented in full in
 ## Frontend build
 
 The frontend bundle is committed to the repo and served from
-`src/lab_tracker/frontend/app.js`. **You only need to rebuild it when you change
-the frontend source** in `src/lab_tracker/frontend_src`:
+`src/lab_tracker/frontend/app.js`. Rebuild it when you change the frontend source
+in `src/lab_tracker/frontend_src` or bundled dependencies such as React:
 
 ```bash
 npm install
 npm run lint:frontend
 npm run build
 ```
+
+The scoped npm override under `eslint` uses minimatch 11.0.4 or a compatible
+patch to fix [GHSA-g3hv-75wg-m249](https://github.com/advisories/GHSA-g3hv-75wg-m249).
+ESLint 10.14 and its config-array dependency still request minimatch 10; their
+used `Minimatch` API and supported Node versions work with the patched version.
+The override applies to the ESLint tooling subtree. Lint, frontend tests and
+the build validate this compatibility; remove it once upstream ranges admit a
+patched minimatch. Do not use `npm audit fix --force` to downgrade ESLint.
 
 The committed frontend bundle ships without a source map by default.
 
