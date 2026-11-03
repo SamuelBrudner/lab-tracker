@@ -23,6 +23,17 @@ _ORDINARY_MOUNT_ENV = "LAB_TRACKER_TEST_ORDINARY_MOUNT_ROOT"
 _BIND_MOUNT_ENV = "LAB_TRACKER_TEST_BIND_MOUNT_ROOT"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_helper_syscalls(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The helper runs in its own subprocess in production. Keep syscall fakes
+    # local to that module in in-process tests too: pytest 9.2 itself uses stat,
+    # fstat and access while reporting, and must never see fake descriptors or
+    # incomplete stat results from these tests.
+    isolated_os = SimpleNamespace(**vars(os))
+    isolated_os.path = SimpleNamespace(**vars(os.path))
+    monkeypatch.setattr(helper, "os", isolated_os)
+
+
 def _payload(candidate: str, roots: list[str]) -> str:
     return json.dumps(
         {

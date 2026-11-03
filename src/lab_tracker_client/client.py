@@ -138,7 +138,7 @@ def connection_profile_path() -> Path:
     return root / "config.json"
 
 
-def load_connection_profile() -> dict[str, str]:
+def load_connection_profile(path: Path | None = None) -> dict[str, str]:
     """Read the persisted connection profile; fail-soft to an empty mapping.
 
     Environment variables always win in ``from_env``; the profile only fills
@@ -148,7 +148,7 @@ def load_connection_profile() -> dict[str, str]:
     """
 
     with suppress(Exception):
-        payload = json.loads(connection_profile_path().read_text(encoding="utf-8"))
+        payload = json.loads((path or connection_profile_path()).read_text(encoding="utf-8"))
         if isinstance(payload, dict):
             return {
                 str(key): value.strip()

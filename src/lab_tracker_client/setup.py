@@ -131,6 +131,7 @@ def save_connection_profile(
     default_project_id: str | None = None,
     access_token: str | None = None,
     dry_run: bool = False,
+    profile_path: Path | None = None,
 ) -> JsonObject:
     """Merge the provided values into the profile file and harden permissions.
 
@@ -138,9 +139,9 @@ def save_connection_profile(
     when passed (the CLI requires the separate ``--save-token`` consent for it).
     """
 
-    path = connection_profile_path()
+    path = profile_path or connection_profile_path()
     existing_text = path.read_text(encoding="utf-8") if path.exists() else ""
-    profile = load_connection_profile()
+    profile = load_connection_profile(path) if profile_path else load_connection_profile()
     updates = {
         "base_url": (
             normalize_instance_base_url(

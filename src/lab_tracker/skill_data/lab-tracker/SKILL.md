@@ -70,6 +70,21 @@ reasoning layer; concrete execution tasks stay in the repository's issue tracker
 
 ## Capture Surfaces
 
+For rejected MCP credentials, offer `lt auth repair` for the person to run in a
+terminal. `--diagnose` is read-only; `--host codex` or `--host claude-desktop`
+selects an audited registration. Environment credentials override the protected
+profile. The command links the instance's Agents page and offers consented hidden
+token entry; a signed-in human mints the token and never relays it through an
+agent or saves it in desktop settings. Prefer override/restart checks when the
+profile works; review permissions/scope on 403. Fully quit and reopen the failing
+host and retry the blocked authenticated operation to verify its live connection.
+
+A CLI sandbox and the MCP host can have different network access. Compare their
+effective URLs, environment/profile and host overrides, and available
+`lab_tracker_health` before declaring an outage. Read-only probes outside the
+sandbox still require normal approval; never bypass restrictions or disable TLS.
+Health proves connectivity, not credential validity.
+
 `lt doctor` and `lt setup status` explain missing optional Claude Code session
 capture and show `lt setup agent-hooks --dry-run` followed by the person's choice
 of `lt setup agent-hooks --yes`. Offer that preview when capture is wanted;

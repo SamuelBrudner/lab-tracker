@@ -153,6 +153,7 @@ files = [
   "src/lab_tracker/_version.py",
   "src/lab_tracker_client/_version.py",
   "src/lab_tracker_client/hook_context.py",
+  "src/lab_tracker_client/auth_repair.py",
   "src/lab_tracker_client/maintenance.py",
   "src/lab_tracker_client/capture_project.py",
   "src/lab_tracker_client/pipeline_capture.py",

@@ -60,6 +60,24 @@ AGENT_SESSION_CAPTURE_DISCOVERY_POLICY = (
     "Missing optional hooks are advisory, and diagnostics never install them."
 )
 
+CONNECTION_RECOVERY_POLICY = (
+    "A CLI network failure describes that process's context, not necessarily the "
+    "MCP host or server. Compare the effective instance URLs, environment/profile "
+    "and host overrides, and an available lab_tracker_health result before declaring "
+    "an outage. Read-only diagnostics outside a workspace sandbox still require its "
+    "normal approval; never bypass the sandbox or disable TLS verification. Health "
+    "does not verify credentials. For MCP authentication failures, offer `lt auth "
+    "repair` for the person to run in a terminal (`--diagnose` is read-only; "
+    "`--host codex` or `--host claude-desktop` selects an audited registration). "
+    "It checks environment-over-profile precedence, links the instance's Agents "
+    "page and offers consented hidden entry into the protected profile. Tokens "
+    "are minted by the signed-in human, never relayed through an agent or saved "
+    "in desktop settings. A valid saved token calls for host override/restart "
+    "checks before rotation; HTTP 403 calls for permission/scope review. Fully quit "
+    "and reopen the failing host and retry the blocked authenticated MCP operation; "
+    "terminal verification cannot verify an already-running host."
+)
+
 CLIENT_MAINTENANCE_POLICY = (
     "For client upkeep, read-only `lt doctor` and `lt setup status` report release and "
     "integration drift. When they recommend an update, preview "
@@ -132,6 +150,7 @@ MCP_SERVER_INSTRUCTIONS = " ".join(
         EMPTY_PROJECT_ORIENTATION_POLICY,
         AGENT_SESSION_CAPTURE_DISCOVERY_POLICY,
         CLIENT_MAINTENANCE_POLICY,
+        CONNECTION_RECOVERY_POLICY,
     )
 )
 
@@ -201,6 +220,8 @@ def managed_agent_activation_block() -> str:
             AGENT_SESSION_CAPTURE_DISCOVERY_POLICY,
             "",
             CLIENT_MAINTENANCE_POLICY,
+            "",
+            CONNECTION_RECOVERY_POLICY,
             CLAUDE_BLOCK_END,
             "",
         ]
@@ -270,6 +291,8 @@ def code_facing_idioms(*, symbols: Iterable[str] | None = None) -> str:
         AGENT_SESSION_CAPTURE_DISCOVERY_POLICY,
         "",
         CLIENT_MAINTENANCE_POLICY,
+        "",
+        CONNECTION_RECOVERY_POLICY,
     ]
     if {"savefig", "capture_figures"}.issubset(symbol_set):
         sections.extend(

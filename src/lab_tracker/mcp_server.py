@@ -592,8 +592,10 @@ def _warn_startup_auth_probe_failed(
     print(
         f"WARNING: Lab Tracker MCP startup auth probe failed (HTTP {status}) against "
         f"{settings.base_url} using {auth_mode}. The server is starting anyway, but "
-        "every authenticated tool will fail until this is fixed — check "
-        "LAB_TRACKER_MCP_API_KEY / credentials, then relaunch the MCP server.",
+        "authenticated tools may fail until this is fixed. Run `lt auth repair` "
+        "in your terminal to diagnose the credential and protected profile. For "
+        "HTTP 403, review permission/scope rather than rotating a valid token. "
+        "Fully quit and reopen this MCP host, then retry the blocked operation.",
         file=sys.stderr,
         flush=True,
     )

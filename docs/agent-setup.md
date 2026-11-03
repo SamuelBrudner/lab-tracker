@@ -660,7 +660,79 @@ orientation** and needs edit access first. Earlier history is not imported, and
 the person writes the checkpoint
 ([member-onboarding.md](member-onboarding.md#with-the-lt-cli)).
 
+## Recover a rejected MCP credential
+
+Run this in your own terminal:
+
+```bash
+lt auth repair
+```
+
+It reports the effective instance, protected profile path and credential source
+without showing secrets. MCP uses `LAB_TRACKER_MCP_API_KEY`, then
+`LAB_TRACKER_MCP_TOKEN`, then the saved profile. An explicit username disables
+the profile token fallback. `lt` uses `LAB_TRACKER_ACCESS_TOKEN` instead of the
+MCP token variables. For both, `LAB_TRACKER_BASE_URL` takes precedence over
+`LAB_TRACKER_MCP_BASE_URL`; a profile credential never follows an override to
+another instance. `LAB_TRACKER_CONFIG_DIR` selects the profile directory.
+
+The command audits saved host registrations too. If they override connection
+settings, select the failing registration, for example `lt auth repair --host
+codex` or `lt auth repair --host claude-desktop`. It reports the registration's
+URL, source and profile, and verifies that saved configuration; the live host's
+inherited environment remains unobservable. `--diagnose` performs read-only
+checks and never prompts or saves anything. Noninteractive invocations also
+perform diagnosis only. `lt auth doctor` remains a registration-only audit.
+
+The authenticated check uses a bounded project-list read, after confirming the
+same endpoint rejects an anonymous request. Health alone cannot establish token
+validity. A 401 means a missing/rejected credential; a 403 needs access or scope
+review, not automatic rotation. When the saved token works but an environment
+or host override fails, remove that override so the profile can be used before
+considering a new token. Diagnostic network failures do not prompt rotation.
+
+If renewal is needed, the command links the selected instance's **Agents** page
+(`/app/agents`). Sign in there and create a token with only the needed access.
+The signed-in person creates it; an agent never mints or relays it. In the
+interactive terminal, explicitly approve saving only to the displayed protected
+profile, then paste into the hidden prompt. There is no token command-line
+argument or unattended consent flag. The replacement must pass the read check
+before the existing permission-hardened, atomic writer saves it. Cancellation,
+failed verification and conflicting profile edits leave the profile untouched.
+Project bindings, desktop settings and research records are not changed.
+
+After a valid check or replacement, fully quit and reopen the named failing
+host (Cmd/Ctrl+Q for desktop apps; restart the MCP session for CLI hosts).
+This command cannot reload those hosts. `ok: true` means the selected credential
+passed the terminal's authenticated read; `live_mcp_verified` and
+`recovery_complete` remain false. Retry the originally blocked MCP operation in
+the host to verify recovery. Do not paste tokens into chat, shell commands,
+process arguments, logs, or desktop MCP settings.
+
 ## Diagnose an unavailable connection
+
+A failed CLI probe describes the network context of that process. A coding
+agent's workspace sandbox can deny DNS or outbound access while its MCP host
+can still reach Lab Tracker. Before declaring the server unavailable:
+
+1. Compare the effective instance URLs and credential/configuration sources with
+   `lt auth repair --diagnose` and, for the failing app, `--host codex` or
+   `--host claude-desktop`. Environment values override the protected profile;
+   a host registration can override both the URL and profile directory. A running
+   host's inherited environment is not observable from the terminal.
+2. If available, call `lab_tracker_health` through that MCP connection and compare
+   it with `lt setup status`. A successful MCP read with a failed CLI probe is
+   evidence of differing contexts, not a server outage. Health alone does not
+   verify authentication or project access.
+3. If needed, request the environment's normal approval for a bounded read-only
+   diagnostic outside the sandbox against the same URL. Do not bypass sandbox
+   restrictions, disable TLS verification, or change server configuration just
+   because a sandbox probe failed.
+
+Report conflicting observations explicitly, for example: “CLI DNS failed inside
+the workspace sandbox; MCP health succeeded for the same instance. Server
+availability from the CLI remains unverified outside that sandbox.” If MCP is
+also unavailable, say what each context observed and what remains uncertain.
 
 Run `lt setup status` to inspect `server.reachable`. Failed probes also return
 `diagnosis`, `detail`, and `next_step`. `lt setup connect --base-url <url>`
