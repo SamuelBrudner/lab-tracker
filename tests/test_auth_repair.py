@@ -296,6 +296,17 @@ def test_structured_auth_error_points_to_supported_command():
     assert "lt auth repair" in error["next_action"]["reason"]
 
 
+def test_help_explains_human_consent_and_live_host_verification(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["auth", "repair", "--help"])
+    assert exc.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "Agents page" in help_text
+    assert "hidden prompt" in help_text and "displayed profile" in help_text
+    assert "Noninteractive runs only diagnose" in help_text
+    assert "live host remains unverified" in help_text
+
+
 def test_default_diagnosis_identifies_host_overrides_before_rotation(profile):
     home = profile.parent.parent / "home"
     config = home / ".codex/config.toml"

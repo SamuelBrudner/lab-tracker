@@ -1147,6 +1147,19 @@ def _add_auth_parsers(subcommands: argparse._SubParsersAction) -> None:
     repair_parser = auth_commands.add_parser(
         "repair",
         help="Diagnose MCP credentials; guide a person through protected-profile recovery.",
+        description=(
+            "Check MCP environment credentials before the matching protected profile, "
+            "including saved host overrides. If renewal is needed, sign in to the "
+            "instance's Agents page and approve a hidden prompt to save a replacement "
+            "only in the displayed profile. Tokens never pass through an agent or "
+            "into desktop MCP settings. Verification uses an authenticated read."
+        ),
+        epilog=(
+            "A valid profile needs override/restart checks before rotation; HTTP 403 "
+            "needs access/scope review. Fully quit and reopen the failing MCP host, "
+            "then retry the blocked operation. The live host remains unverified by "
+            "this terminal check. Noninteractive runs only diagnose."
+        ),
     )
     repair_parser.add_argument(
         "--target", default=".", help="Repo whose MCP registrations to inspect."
