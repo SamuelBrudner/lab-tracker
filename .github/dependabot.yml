@@ -4,16 +4,28 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      actions-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      npm-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
   # The uv ecosystem updates pyproject.toml and regenerates uv.lock in the same
   # PR; the pip ecosystem only edited pyproject.toml and left the lock stale.
   - package-ecosystem: "uv"
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      python-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
     ignore:
       # mcp 2.x removed `mcp.server.fastmcp` (FastMCP became MCPServer), which
       # lab_tracker.mcp_server and its tests import. Keep mcp<2 until the server
