@@ -504,7 +504,7 @@ def test_notes_made_by_hand_or_import_carry_no_release_or_install_id(tmp_path: P
 
 
 # L24/L25: examples must use the sanctioned LPAT, never deprecated login.
-@pytest.mark.parametrize("doc", [_DEVELOPMENT_REFERENCE_PATH, _MCP_SKILLS_DOC])
+@pytest.mark.parametrize("doc", [_MCP_SKILLS_DOC])
 def test_mcp_environment_examples_use_an_lpat_not_username_password(doc: Path) -> None:
     blocks = [
         block for block in _fenced_blocks(_read(doc), "bash") if "LAB_TRACKER_BASE_URL=" in block
@@ -1402,3 +1402,15 @@ def test_orient_checkpoint_pointers_name_a_real_button_and_route() -> None:
     assert _ORIENT_ROUTE.search(_without_js_comments(_read(_ROUTING))), (
         f"routing.jsx no longer serves the member-onboarding page at {_ORIENT_PATH}"
     )
+
+
+def test_development_reference_uses_human_operated_profile_recovery() -> None:
+    text = _read(_DEVELOPMENT_REFERENCE_PATH)
+    assert "lt auth repair" in text
+    assert "protected" in text and "profile" in text
+    assert "hidden entry" in text
+    assert "signed-in" in text
+    assert "Tokens never pass through an agent or into desktop MCP settings" in text
+    assert "verify the live host" in text
+    blocks = _fenced_blocks(text, "bash")
+    assert not any("LAB_TRACKER_MCP_API_KEY=" in block for block in blocks)

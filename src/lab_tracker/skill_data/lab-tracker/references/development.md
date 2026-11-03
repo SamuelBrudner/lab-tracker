@@ -21,17 +21,27 @@ The local MCP entry point is `lt-mcp`; `python -m lab_tracker.mcp_server`
 also works in a source checkout. It calls the running API rather than writing
 directly to the database.
 
-```bash
-LAB_TRACKER_BASE_URL=http://127.0.0.1:8000
-LAB_TRACKER_MCP_API_KEY=<lpat-personal-access-token>
-```
+Save the intended instance with `lt setup connect --base-url <origin> --yes`;
+on another machine use the deployment's reachable HTTPS origin. For missing or
+rejected credentials, a person runs `lt auth repair` in their own terminal.
+It links that instance's **Agents** page (`/app/agents`), where the signed-in
+person mints a token, and offers consented hidden entry into the protected
+profile. Tokens never pass through an agent or into desktop MCP settings.
 
-On another machine, use the deployment's reachable HTTPS origin instead of
-localhost. `LAB_TRACKER_MCP_API_KEY` holds a Lab Tracker personal access token
-(LPAT), minted by the person on **Agents** (`/app/agents`) or through
-`POST /auth/tokens`. The old `LAB_TRACKER_MCP_USERNAME` /
-`LAB_TRACKER_MCP_PASSWORD` login is deprecated; `lt auth doctor` detects MCP
-configs still using it. Auth-disabled local testing can omit the token.
+`--diagnose` is read-only; `--host codex` or `--host claude-desktop` selects a
+saved registration. MCP environment credentials override the profile; CLI uses
+`LAB_TRACKER_ACCESS_TOKEN` instead. Prefer override/restart checks when the
+profile works; 403 requires permission/scope review. Fully quit and reopen the
+failing host, then retry its blocked authenticated operation. A terminal check
+cannot verify the live host. `lt auth doctor` remains a registration-only audit
+and detects deprecated username/password configs. Auth-disabled local testing
+can omit the token.
+
+CLI sandboxes and MCP hosts can have different network access. Compare their
+effective URLs, environment/profile and host overrides, and available MCP
+health before declaring an outage. Probes outside a sandbox require normal
+approval; never bypass restrictions or disable TLS. Health alone does not
+verify credentials.
 
 ## Reporting Friction and Failures
 
