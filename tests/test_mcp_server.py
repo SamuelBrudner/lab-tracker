@@ -635,7 +635,7 @@ def test_static_api_key_401_error_is_self_describing_and_actionable() -> None:
     assert "LAB_TRACKER_MCP_API_KEY" in message
     assert "lpat_secret" not in message
     assert "relaunch" in message.lower()
-    assert "lt setup status" in message
+    assert "lt auth repair" in message
     assert excinfo.value.status_code == 401
 
 
@@ -663,7 +663,8 @@ def test_username_password_login_401_steers_to_lpat_and_names_user() -> None:
     message = str(excinfo.value)
     assert "home-test-admin" in message  # names the failing user (GH #79)
     assert "deprecated" in message.lower()
-    assert "LAB_TRACKER_MCP_API_KEY" in message  # migrate to LPAT (GH #81)
+    assert "lt auth repair" in message
+    assert "protected profile" in message
     assert "stale-pass" not in message
 
 
@@ -683,7 +684,8 @@ def test_no_credentials_error_recommends_lpat_first() -> None:
         client.close()
 
     message = str(excinfo.value)
-    assert "LAB_TRACKER_MCP_API_KEY" in message
+    assert "lt auth repair" in message
+    assert "protected profile" in message
     assert "deprecated" in message.lower()
 
 
@@ -2689,7 +2691,7 @@ def test_authenticated_tool_requires_service_credentials_when_api_requires_auth(
         ),
     )
 
-    with pytest.raises(mcp_server.LabTrackerAPIError, match="LAB_TRACKER_MCP_USERNAME"):
+    with pytest.raises(mcp_server.LabTrackerAPIError, match="lt auth repair"):
         client.list_projects()
 
     client.close()

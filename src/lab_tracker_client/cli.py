@@ -1144,6 +1144,23 @@ def _add_auth_parsers(subcommands: argparse._SubParsersAction) -> None:
     )
     doctor_parser.set_defaults(func=_cmd_auth_doctor, needs_client=False)
 
+    repair_parser = auth_commands.add_parser(
+        "repair",
+        help="Diagnose MCP credentials; guide a person through protected-profile recovery.",
+    )
+    repair_parser.add_argument(
+        "--target", default=".", help="Repo whose MCP registrations to inspect."
+    )
+    repair_parser.add_argument(
+        "--host",
+        help="Select an audited host, e.g. codex or claude-desktop; defaults to this process.",
+    )
+    repair_parser.add_argument(
+        "--diagnose", action="store_true",
+        help="Read-only checks only; never prompt or save a token.",
+    )
+    repair_parser.set_defaults(func=_cmd_auth_repair, needs_client=False)
+
 
 def _add_hpc_parsers(subcommands: argparse._SubParsersAction) -> None:
     hpc_parser = subcommands.add_parser(
@@ -2125,6 +2142,12 @@ def _cmd_auth_doctor(args: argparse.Namespace) -> Any:
     return payload
 
 
+def _cmd_auth_repair(args: argparse.Namespace) -> Any:
+    from lab_tracker_client.auth_repair import repair
+
+    return repair(args.target, host=args.host, diagnose=args.diagnose)
+
+
 @dataclass(frozen=True)
 class _AdapterOutbox:
     """One adapter's outbox for a repository, with its status and drain functions."""
@@ -2696,6 +2719,8 @@ def _jsonable(value: Any) -> Any:
 
 
 def _payload_exit_code(payload: Any) -> int:
+    if isinstance(payload, dict) and payload.get("command") == "auth-repair":
+        return 0 if payload.get("ok") is True else 1
     if isinstance(payload, dict) and payload.get("command") == "maintain":
         return 0 if payload.get("ok") is True else 1
     if (

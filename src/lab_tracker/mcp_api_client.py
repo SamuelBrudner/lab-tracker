@@ -6,7 +6,7 @@ import mimetypes
 import os
 import re
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -137,15 +137,15 @@ def suppress_unverified_artifact_content(payload: JsonObject) -> JsonObject:
 # credentials" (GH #74, #79). Desktop MCP hosts only re-read env on a full
 # relaunch, so a corrected config is inert until the server is restarted.
 _LPAT_REMEDIATION = (
-    "Re-mint an LPAT via POST /auth/tokens, verify it with `lt setup status`, then "
-    "relaunch the Lab Tracker MCP server/host so it re-reads the credential (desktop "
-    "apps only re-read env on a full quit-and-reopen, not a window reload)."
+    "Run `lt auth repair` in a terminal. It checks the effective credential, links "
+    "the instance's Agents page if renewal is needed, and offers a hidden prompt "
+    "to save a replacement in the protected profile with your consent. Never put "
+    "tokens in chat or desktop MCP settings. Fully quit and reopen the failing "
+    "MCP host afterward, then retry the blocked operation to verify the live connection."
 )
 _NO_CREDENTIALS_MESSAGE = (
     "No Lab Tracker MCP credentials are configured, but the API requires "
-    "authentication. Set LAB_TRACKER_MCP_API_KEY to an LPAT (mint via POST "
-    "/auth/tokens) — the sanctioned auth method. LAB_TRACKER_MCP_USERNAME / "
-    "LAB_TRACKER_MCP_PASSWORD login is deprecated."
+    "authentication. " + _LPAT_REMEDIATION + " Username/password login is deprecated."
 )
 
 
@@ -213,9 +213,15 @@ class MCPSettings:
         explicit username/password login.
         """
 
-        profile = load_connection_profile()
-        canonical_env_url = os.getenv(BASE_URL_ENV)
-        legacy_env_url = os.getenv(LEGACY_MCP_BASE_URL_ENV)
+        return cls.from_sources(os.environ, load_connection_profile())
+
+    @classmethod
+    def from_sources(
+        cls, environment: Mapping[str, str], profile: Mapping[str, str]
+    ) -> MCPSettings:
+        """Resolve the same precedence for an explicitly selected host registration."""
+        canonical_env_url = environment.get(BASE_URL_ENV)
+        legacy_env_url = environment.get(LEGACY_MCP_BASE_URL_ENV)
         env_base_url = None
         if canonical_env_url or legacy_env_url:
             env_base_url = resolve_instance_base_url(
@@ -224,7 +230,7 @@ class MCPSettings:
                     (LEGACY_MCP_BASE_URL_ENV, legacy_env_url),
                 )
             )
-        env_username = os.getenv("LAB_TRACKER_MCP_USERNAME")
+        env_username = environment.get("LAB_TRACKER_MCP_USERNAME")
         profile_token = profile.get("access_token")
         try:
             profile_base_url = normalize_instance_base_url(
@@ -239,12 +245,12 @@ class MCPSettings:
         return cls(
             base_url=env_base_url or profile_base_url,
             username=env_username,
-            password=os.getenv("LAB_TRACKER_MCP_PASSWORD"),
-            api_key=os.getenv("LAB_TRACKER_MCP_API_KEY")
-            or os.getenv("LAB_TRACKER_MCP_TOKEN")
+            password=environment.get("LAB_TRACKER_MCP_PASSWORD"),
+            api_key=environment.get("LAB_TRACKER_MCP_API_KEY")
+            or environment.get("LAB_TRACKER_MCP_TOKEN")
             or profile_token,
             timeout_seconds=float(
-                os.getenv("LAB_TRACKER_MCP_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS))
+                environment.get("LAB_TRACKER_MCP_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS))
             ),
         )
 
@@ -1790,6 +1796,14 @@ def lab_tracker_api_error(operation: str, exc: LabTrackerAPIError) -> JsonObject
                 "replace or refresh the credential."
             ),
         }
+    elif isinstance(exc, LabTrackerAPIAuthError):
+        next_action = {
+            "action": "repair_credentials",
+            "tool": None,
+            "arguments": {},
+            "command": "lt auth repair",
+            "reason": _LPAT_REMEDIATION,
+        }
     else:
         next_action = {
             "action": "revise_request_or_credentials",
@@ -1920,8 +1934,7 @@ def _login_rejected_error(
     message = (
         f"Lab Tracker rejected the LAB_TRACKER_MCP_USERNAME/PASSWORD login{who} with "
         f"HTTP {response.status_code} at {base_url}: {server_message}. Username/password "
-        "auth is deprecated — migrate to an LPAT: set LAB_TRACKER_MCP_API_KEY and remove "
-        f"LAB_TRACKER_MCP_USERNAME / LAB_TRACKER_MCP_PASSWORD. {_LPAT_REMEDIATION}"
+        f"auth is deprecated. {_LPAT_REMEDIATION}"
     )
     return LabTrackerAPIAuthError(
         message,

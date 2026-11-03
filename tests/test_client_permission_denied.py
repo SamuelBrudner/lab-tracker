@@ -136,7 +136,8 @@ def test_mcp_401_remains_auth_error() -> None:
 
     assert excinfo.value.status_code == 401
     envelope = mcp_api_client.lab_tracker_api_error("lab_tracker_list_projects", excinfo.value)
-    assert envelope["next_action"]["action"] == "revise_request_or_credentials"
+    assert envelope["next_action"]["action"] == "repair_credentials"
+    assert envelope["next_action"]["command"] == "lt auth repair"
 
 
 @pytest.mark.parametrize(

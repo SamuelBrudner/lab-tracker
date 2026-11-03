@@ -56,9 +56,23 @@ short, consent-gated sequence on the `lt` CLI.
    connection profile, repo scaffolding, project binding, watch
    folders, and commit-hook enrollment in one JSON payload, with
    suggestions for whatever is missing.
-3. **Connectivity** — when no server is reachable, `lab-tracker serve`
-   starts a local instance; a lab usually shares one instance and its
-   URL comes from whoever operates it.
+3. **Connectivity** — a CLI sandbox and MCP host may have different
+   network access. Before declaring an outage, compare their effective
+   instance URLs, environment/profile and host overrides, and an
+   available `lab_tracker_health` result. Read-only probes outside a
+   sandbox still require normal approval; never bypass restrictions or
+   disable TLS verification. Health does not verify credentials. A lab
+   usually shares one instance; its operator supplies the URL. Only
+   when a local instance is intended does `lab-tracker serve` start it.
+   For authentication failures, a person runs `lt auth repair` in a
+   terminal (`--diagnose` is read-only; `--host codex` or
+   `--host claude-desktop` selects an audited registration). It checks
+   credential precedence, links the instance's Agents page if needed,
+   and offers consented hidden token entry into the protected profile.
+   A valid profile needs override/restart checks before rotation; 403
+   needs access/scope review. Fully quit and reopen the failing host,
+   then retry the blocked authenticated MCP operation. The terminal
+   check cannot verify an already-running MCP host.
 4. **Connection profile** — `lt setup connect --base-url <url>
    --project <project-id> --yes` persists the server URL and exact
    default project in
@@ -274,4 +288,4 @@ rerunning its pinned `uv add` (step 5), which neither `lt update` nor
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.3.0 sha256=61420e550cfa -->
+<!-- lab-tracker-setup-guide version=0.3.0 sha256=39c6dc0a271e -->

@@ -43,6 +43,7 @@ from lab_tracker.decision_context_constants import (
     CODE_CONVENTIONS_BLOCK_BEGIN,
     CODE_CONVENTIONS_BLOCK_END,
     COMMIT_CAPTURE_RECOVERY_POLICY,
+    CONNECTION_RECOVERY_POLICY,
     EMPTY_PROJECT_ORIENTATION_POLICY,
     code_conventions_version_line,
     code_facing_idioms,
@@ -1998,6 +1999,8 @@ def _agents_fragment() -> str:
         {AGENT_SESSION_CAPTURE_DISCOVERY_POLICY}
 
         {CLIENT_MAINTENANCE_POLICY}
+
+        {CONNECTION_RECOVERY_POLICY}
 
         Capture that needs no code changes, once this checkout is bound to a
         project: `lt setup autotrack` captures figures notebooks save or

@@ -27,6 +27,14 @@ read-only and lists what is and is not set up on this machine and repository.
 A coding agent with the `lab-tracker-setup` skill can walk you through the
 rest one approved command at a time.
 
+For a rejected MCP credential, a person runs `lt auth repair` in a terminal.
+It checks the effective source and offers consented hidden replacement in the
+protected profile; tokens are created on the instance's Agents page, never
+relayed through an agent. `--diagnose` is read-only. Fully restart the failing
+host and retry its authenticated operation afterward. CLI sandboxes and MCP
+hosts may have different network access; compare their URLs and health results
+before declaring an outage. See [credential recovery and connection diagnostics](agent-setup.md#recover-a-rejected-mcp-credential).
+
 `lt doctor` also explains optional Claude Code session capture when it is missing
 or only partly installed, with preview and personal installation commands.
 The same guidance appears in `lt setup status` and in each repository checked by
