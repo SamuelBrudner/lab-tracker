@@ -107,6 +107,7 @@
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-d4m4","issue_id":"lab-tracker-215k","type":"discovered-from"}
 {"created_at":"2026-05-24T18:15:14Z","created_by":"bootstrap","depends_on_id":"lab-tracker-641","issue_id":"lab-tracker-249","type":"blocks"}
 {"created_at":"2026-05-24T18:15:14Z","created_by":"bootstrap","depends_on_id":"lab-tracker-8ay","issue_id":"lab-tracker-249","type":"blocks"}
+{"created_at":"2026-11-02T21:16:46Z","created_by":"SamuelBrudner","depends_on_id":"lab-tracker-7849","issue_id":"lab-tracker-25bs","type":"discovered-from"}
 {"created_at":"2026-05-24T18:15:14Z","created_by":"bootstrap","depends_on_id":"lab-tracker-249","issue_id":"lab-tracker-283","type":"blocks"}
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-28dz","issue_id":"lab-tracker-28dz.1","type":"parent-child"}
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-28dz","issue_id":"lab-tracker-28dz.2","type":"parent-child"}
@@ -722,6 +723,7 @@
 {"created_at":"2026-05-24T18:15:14Z","created_by":"bootstrap","depends_on_id":"lab-tracker-j75","issue_id":"lab-tracker-j75.4","type":"parent-child"}
 {"created_at":"2026-05-24T18:15:14Z","created_by":"bootstrap","depends_on_id":"lab-tracker-j75.2","issue_id":"lab-tracker-j75.4","type":"blocks"}
 {"created_at":"2026-10-26T21:07:19Z","created_by":"SamuelBrudner","depends_on_id":"lab-tracker-qjnf","issue_id":"lab-tracker-ja73","type":"discovered-from"}
+{"created_at":"2026-11-02T21:15:07Z","created_by":"SamuelBrudner","depends_on_id":"lab-tracker-7849","issue_id":"lab-tracker-jd5l","type":"discovered-from"}
 {"created_at":"2026-07-06T18:17:37Z","created_by":"import","depends_on_id":"lab-tracker-udv1.10","issue_id":"lab-tracker-jptw","type":"relates-to"}
 {"created_at":"2026-06-04T12:55:53Z","created_by":"import","depends_on_id":"lab-tracker-99q","issue_id":"lab-tracker-jxb","type":"discovered-from"}
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-7x77","issue_id":"lab-tracker-k32m","type":"blocks"}
@@ -852,6 +854,7 @@
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-rjg1","issue_id":"lab-tracker-rjg1.7","type":"parent-child"}
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-rjg1","issue_id":"lab-tracker-rjg1.8","type":"parent-child"}
 {"created_at":"2026-07-05T20:44:50Z","created_by":"import","depends_on_id":"lab-tracker-rjg1","issue_id":"lab-tracker-rjg1.9","type":"parent-child"}
+{"created_at":"2026-11-02T21:15:07Z","created_by":"SamuelBrudner","depends_on_id":"lab-tracker-7849","issue_id":"lab-tracker-ry8l","type":"discovered-from"}
 {"created_at":"2026-07-25T13:24:14Z","created_by":"SamuelBrudner","depends_on_id":"lab-tracker-1igm","issue_id":"lab-tracker-s95l","type":"discovered-from"}
 {"created_at":"2026-07-16T20:29:08Z","created_by":"import","depends_on_id":"lab-tracker-stkn","issue_id":"lab-tracker-sazi","type":"discovered-from"}
 {"created_at":"2026-06-04T12:55:53Z","created_by":"import","depends_on_id":"lab-tracker-0if.8","issue_id":"lab-tracker-sbo","type":"discovered-from"}
