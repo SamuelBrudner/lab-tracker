@@ -117,7 +117,7 @@ def build_integrations_router(api: LabTrackerAPI) -> APIRouter:
             )
         ensure_project_contributor(request, project_id)
         config = EmailCaptureConfig.from_settings(request.app.state.settings)
-        if config is None:
+        if config is None or config.address is None:
             raise NotFoundError("Email capture is not configured on this server.")
         user = request.app.state.auth_service.get_user_by_id(actor.user_id)
         senders = emails_for_user(user, config.email_directory) if user is not None else ()

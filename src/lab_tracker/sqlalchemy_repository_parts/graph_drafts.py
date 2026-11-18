@@ -398,6 +398,7 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
             self._session.scalars(
                 select(GraphChangeOperationModel)
                 .where(GraphChangeOperationModel.change_set_id.in_(change_set_ids))
+                .execution_options(populate_existing=True)
                 .order_by(
                     GraphChangeOperationModel.change_set_id,
                     GraphChangeOperationModel.sequence,
@@ -548,6 +549,15 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
 
     def get_for_update(self, entity_id: UUID) -> GraphChangeSet | None:
         self._session.flush()
+        if self._session.get_bind().dialect.name == "sqlite":
+            # SQLite ignores FOR UPDATE. Reserve its writer before reading the
+            # operation snapshot, including when a reply runs inside a savepoint.
+            self._session.execute(
+                update(GraphChangeSetModel)
+                .where(GraphChangeSetModel.change_set_id == str(entity_id))
+                .values(updated_at=GraphChangeSetModel.updated_at)
+                .execution_options(synchronize_session=False)
+            )
         row = self._session.scalar(
             select(GraphChangeSetModel)
             .where(GraphChangeSetModel.change_set_id == str(entity_id))

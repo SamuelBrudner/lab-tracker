@@ -222,6 +222,8 @@ class Settings(BaseSettings):
     slack_channel_projects: str = ""
     slack_users: str = Field(default="", repr=False)
     email_capture_address: str = ""
+    review_email_reply_address: str = ""
+    review_email_authserv_id: str = ""
     email_capture_imap_host: str = ""
     email_capture_imap_port: int = 993
     email_capture_imap_username: str = Field(default="", repr=False)

@@ -33,6 +33,7 @@ from collections.abc import Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import timezone
+from email.headerregistry import Address
 from email.message import EmailMessage
 from email.utils import getaddresses, parsedate_to_datetime
 from functools import cached_property
@@ -124,7 +125,9 @@ def capture_token(secret: str, user_id: UUID, project_id: UUID) -> str:
 class EmailCaptureConfig:
     """Parsed email-capture configuration (see ``Settings.email_capture_*``)."""
 
-    address: CaptureAddress
+    address: CaptureAddress | None
+    reply_address: CaptureAddress | None
+    authserv_id: str
     host: str
     port: int
     username: str
@@ -142,10 +145,16 @@ class EmailCaptureConfig:
         address = parse_capture_address(
             settings.email_capture_address or "", variable="LAB_TRACKER_EMAIL_CAPTURE_ADDRESS"
         )
-        if address is None:
+        reply_address = parse_capture_address(
+            settings.review_email_reply_address or "",
+            variable="LAB_TRACKER_REVIEW_EMAIL_REPLY_ADDRESS",
+        )
+        if address is None and reply_address is None:
             return None
         return cls(
             address=address,
+            reply_address=reply_address,
+            authserv_id=settings.review_email_authserv_id.strip().lower(),
             host=str(settings.email_capture_imap_host).strip(),
             port=int(settings.email_capture_imap_port),
             username=str(settings.email_capture_imap_username).strip(),
@@ -165,6 +174,8 @@ class EmailCaptureConfig:
         return read_password_file(self._password_file) if self._password_file else self._password
 
     def address_for(self, user_id: UUID, project_id: UUID) -> str:
+        if self.address is None:
+            raise ValueError("Email capture is not configured.")
         return self.address.with_token(capture_token(self.secret, user_id, project_id))
 
 
@@ -201,24 +212,20 @@ class ParsedEmail:
     recipients: tuple[str, ...]
     subject: str
     sent_at: str | None
-    _message: EmailMessage | None = field(default=None, repr=False)
+    message: EmailMessage = field(repr=False)
 
     @cached_property
     def body(self) -> str:
-        if self._message is None:
-            return ""
         try:
-            return _message_text(self._message)
+            return _message_text(self.message)
         except Exception:  # a malformed body must not wedge the mailbox
             _logger.warning("Email capture could not read a message body.")
             return ""
 
     @cached_property
     def attachments(self) -> tuple[Attachment, ...]:
-        if self._message is None:
-            return ()
         try:
-            return tuple(_attachments(self._message))
+            return tuple(_attachments(self.message))
         except Exception:
             _logger.warning("Email capture could not read a message's attachments.")
             return ()
@@ -230,18 +237,19 @@ def parse_email(raw: bytes) -> ParsedEmail:
     message = email.message_from_bytes(raw, policy=email.policy.default)
     assert isinstance(message, EmailMessage)
     message_id = _header(message, "Message-ID")
+    sender = single_sender_address(message)
     return ParsedEmail(
         message_key=bound_value(message_id, limit=300) if message_id else sha256_hex(raw),
         message_id=bound_value(message_id, limit=300) if message_id else None,
-        sender=_single_sender(message),
-        recipients=_recipients(message),
+        sender=normalize_email_address(sender.addr_spec) if sender else None,
+        recipients=recipient_addresses(message),
         subject=bound_value(_header(message, "Subject") or "", limit=MAX_TITLE_CHARS),
         sent_at=_sent_at(message),
-        _message=message,
+        message=message,
     )
 
 
-def _single_sender(message: EmailMessage) -> str | None:
+def single_sender_address(message: EmailMessage) -> Address | None:
     """The one ``From`` address, or ``None`` when absent, repeated, or malformed.
 
     A ``From`` header with parse defects is refused outright: an input such as
@@ -259,12 +267,17 @@ def _single_sender(message: EmailMessage) -> str | None:
     addresses = getattr(header, "addresses", None)
     if getattr(header, "defects", ()) or not addresses or len(addresses) != 1:
         return None
-    return normalize_email_address(str(addresses[0].addr_spec))
+    address = addresses[0]
+    return address if isinstance(address, Address) else None
 
 
-def _recipients(message: EmailMessage) -> tuple[str, ...]:
+def recipient_addresses(
+    message: EmailMessage, headers: Iterable[str] = _RECIPIENT_HEADERS
+) -> tuple[str, ...]:
+    """Read addressing and delivery headers, retaining malformed alias extensions for routing."""
+
     found: list[str] = []
-    for name in _RECIPIENT_HEADERS:
+    for name in headers:
         try:
             values = message.get_all(name) or []
         except (IndexError, ValueError, TypeError):
@@ -276,11 +289,7 @@ def _recipients(message: EmailMessage) -> tuple[str, ...]:
                 if addresses is not None
                 else [addr for _name, addr in getaddresses([str(value)])]
             )
-            found.extend(
-                normalized
-                for candidate in candidates
-                if (normalized := normalize_email_address(candidate)) is not None
-            )
+            found.extend(candidate.strip().lower() for candidate in candidates if candidate)
     return tuple(found)
 
 
@@ -481,13 +490,20 @@ class CaptureApi(Protocol):
 class MessageOutcome:
     """What happened to one message; ``processed`` messages are flagged in IMAP."""
 
-    status: str  # stored | duplicate | rejected | failed
+    status: str
     reason: str = ""
     notes_created: int = 0
 
     @property
     def processed(self) -> bool:
-        return self.status in {"stored", "duplicate", "rejected"}
+        return self.status in {
+            "stored",
+            "duplicate",
+            "rejected",
+            "approved",
+            "corrected",
+            "correction_requested",
+        }
 
 
 def stage_email(
@@ -500,6 +516,8 @@ def stage_email(
 ) -> MessageOutcome:
     """Verify one parsed message and stage it for its (user, project) pairs."""
 
+    if config.address is None:
+        return MessageOutcome("rejected", "no_capture_address")
     if parsed.sender is None:
         return MessageOutcome("rejected", "sender_missing_or_ambiguous")
     user_ref = config.email_directory.get(parsed.sender)
@@ -696,6 +714,7 @@ class EmailPollResult:
     notes_created: int = 0
     left_for_next_poll: int = 0
     rejection_reasons: dict[str, int] = field(default_factory=dict)
+    reviews: dict[str, int] = field(default_factory=dict)
 
 
 def poll_mailbox(
@@ -799,6 +818,8 @@ def _tally(result: EmailPollResult, outcome: MessageOutcome) -> None:
         result.rejected += 1
         reasons = result.rejection_reasons
         reasons[outcome.reason] = reasons.get(outcome.reason, 0) + 1
+    elif outcome.status in {"approved", "corrected", "correction_requested"}:
+        result.reviews[outcome.status] = result.reviews.get(outcome.status, 0) + 1
     else:
         result.failed += 1
     result.notes_created += outcome.notes_created

@@ -6,10 +6,12 @@ import logging
 from datetime import datetime, timedelta
 from email.headerregistry import Address
 from email.utils import quote
+from typing import Literal
 from uuid import UUID, uuid4
 
 from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.models import (
+    GraphChangeOperation,
     GraphChangeOperationStatus,
     GraphChangeSet,
     GraphChangeSetStatus,
@@ -81,7 +83,7 @@ class ReviewEmailService(BaseService):
         self,
         change_set: GraphChangeSet,
     ) -> ReviewEmailDelivery | None:
-        """Queue one opted-in assigned batch review without performing I/O."""
+        """Queue the assigned batch reviewer’s enabled email notifications."""
 
         if (
             not self.delivery_enabled
@@ -94,6 +96,21 @@ class ReviewEmailService(BaseService):
             )
         ):
             return None
+        config = self._context.active_settings()
+        if config.review_email_reply_address and config.review_email_transport == "smtp":
+            mailbox = self.repository.review_email_outbox.verified_review_mailbox(
+                change_set.review_assignee_user_id
+            )
+            if mailbox is not None:
+                # Account enrollment covers assigned proposals. The separate
+                # project notification address is only for content-free cues.
+                deliveries = [
+                    self.enqueue_proposal(change_set, operation, mailbox)
+                    for operation in change_set.operations
+                    if operation.status == GraphChangeOperationStatus.PROPOSED
+                    and operation.deferred_at is None
+                ]
+                return deliveries[0] if deliveries else None
         settings = self.repository.get_graph_draft_batch_settings_by_project(
             change_set.project_id,
             user_id=change_set.review_assignee_user_id,
@@ -130,6 +147,64 @@ class ReviewEmailService(BaseService):
         )
         self.repository.review_email_outbox.save(delivery)
         return delivery
+
+    def enqueue_proposal(
+        self,
+        change_set: GraphChangeSet,
+        operation: GraphChangeOperation,
+        mailbox: str,
+        *,
+        previous_delivery_id: UUID | None = None,
+    ) -> ReviewEmailDelivery:
+        """Queue this specific revision within the caller's review transaction."""
+        from lab_tracker.services.proposal_email_decisions import operation_fingerprint
+
+        revision = operation_fingerprint(operation)
+        key = f"proposal:{change_set.review_assignee_user_id}:{operation.operation_id}:{revision}"
+        outbox = self.repository.review_email_outbox
+        existing = outbox.get_by_idempotency_key(key)
+        if existing is not None:
+            return existing
+        now = utc_now()
+        delivery = ReviewEmailDelivery(
+            delivery_id=uuid4(),
+            change_set_id=change_set.change_set_id,
+            recipient_user_id=change_set.review_assignee_user_id,
+            operation_id=operation.operation_id,
+            operation_revision=revision,
+            parent_delivery_id=previous_delivery_id,
+            reply_expires_at=now + timedelta(
+                minutes=self._context.active_settings().review_email_link_ttl_minutes
+            ),
+            event_type="proposal",
+            destination_email=mailbox,
+            idempotency_key=key,
+            next_attempt_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+        outbox.save(delivery)
+        return delivery
+
+    def enqueue_response(
+        self, original: ReviewEmailDelivery, kind: Literal["reply_ack", "reply_help"]
+    ) -> None:
+        """Enqueue one threaded acknowledgement or syntax hint for this delivery."""
+        outbox = self.repository.review_email_outbox
+        key = f"{kind}:{original.delivery_id}"
+        if outbox.get_by_idempotency_key(key) is None:
+            outbox.save(
+                ReviewEmailDelivery(
+                    delivery_id=uuid4(),
+                    change_set_id=original.change_set_id,
+                    parent_delivery_id=original.delivery_id,
+                    recipient_user_id=original.recipient_user_id,
+                    event_type=kind,
+                    destination_email=original.destination_email,
+                    idempotency_key=key,
+                )
+            )
+
 
     def enqueue_test(
         self,
@@ -199,6 +274,15 @@ class ReviewEmailService(BaseService):
                 )
             if delivery is None:
                 return None
+            if delivery.event_type in {"proposal", "reply_ack", "reply_help"} and not (
+                self._context.active_settings().review_email_reply_address
+                and self._context.active_settings().review_email_transport == "smtp"
+            ):
+                self.cancel(
+                    delivery.delivery_id, claim_token=claim_token,
+                    reason="Reply-by-email delivery is disabled.",
+                )
+                continue
             if delivery.event_type != REVIEW_READY_EVENT:
                 return delivery
             if not self._draft_still_waiting(delivery):

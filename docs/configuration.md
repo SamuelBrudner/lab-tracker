@@ -902,12 +902,12 @@ expanding to millions of transcript characters.
 
 ### Daily-review email alerts
 
-Email alerts are per-user and opt-in. They are queued only when an assigned
-batch review reaches `ready`; generic graph changes, failed drafts, unassigned
-batches, and empty proposals do not send mail. The message deliberately omits
-the project name, note text, proposal summary, operation count, and all other
-research content. Its signed short-lived link remains a pointer, not an
-authorization grant: normal sign-in and project access are still required.
+An assigned daily batch reaching `ready` can trigger two kinds of mail. The
+per-project notification preference sends a short cue with a sign-in link. With
+SMTP and an inbound review mailbox, scientists can verify their login email and
+opt in to one actionable message per proposal. Messages then include the proposed
+change and accept replies from its verified reviewer.
+[Scientist setup and reply examples](daily-review-email-alerts.md)
 
 - `LAB_TRACKER_REVIEW_EMAIL_ENABLED`: enable delivery processing (default:
   `false`)
@@ -919,7 +919,7 @@ authorization grant: normal sign-in and project access are still required.
   delivery worker's lease can be recovered (default: `300`)
 - `LAB_TRACKER_REVIEW_EMAIL_MAX_ATTEMPTS`: provider attempts before a delivery
   becomes terminally failed (default: `8`)
-- `LAB_TRACKER_REVIEW_EMAIL_LINK_TTL_MINUTES`: signed review-link lifetime
+- `LAB_TRACKER_REVIEW_EMAIL_LINK_TTL_MINUTES`: signed review-link and proposal reply lifetime
   (default: `1440`)
 - `LAB_TRACKER_REVIEW_EMAIL_SMTP_HOST`: SMTP server hostname
 - `LAB_TRACKER_REVIEW_EMAIL_SMTP_PORT`: SMTP server port (default: `587`)
@@ -1003,6 +1003,20 @@ stopping the others or the daily-review batch dispatch.
   secret and the IMAP settings below
 - `LAB_TRACKER_EMAIL_CAPTURE_IMAP_HOST`: IMAP server hostname (implicit TLS
   with certificate verification)
+- `LAB_TRACKER_REVIEW_EMAIL_REPLY_ADDRESS` enables proposal review by email
+  with the SMTP review transport. Set a distinct plus-addressable alias such
+  as `review@lab.example.org` and deliver it to the IMAP folder below. The
+  alias's local part can contain up to 11 characters to leave room for the
+  proposal token. Capture email is optional and can share this inbox.
+- `LAB_TRACKER_REVIEW_EMAIL_AUTHSERV_ID` identifies the receiving mail server
+  that checks DMARC, e.g. `mx.lab.example.org`. Configure it to strip incoming
+  authentication results claiming its identity and prepend its own
+  `Authentication-Results` header with `dmarc=pass` and the matching
+  `header.from` domain on successful checks. Lab Tracker trusts the topmost
+  result from this server. The gateway configuration is part of the
+  authentication boundary. See [RFC 8601 §5](https://www.rfc-editor.org/rfc/rfc8601.html#section-5).
+  Enable `LAB_TRACKER_INTEGRATIONS_POLLER_ENABLED` or schedule
+  `lab-tracker integrations poll --only email` to collect replies.
 - `LAB_TRACKER_EMAIL_CAPTURE_IMAP_PORT`: IMAP port (default: `993`)
 - `LAB_TRACKER_EMAIL_CAPTURE_IMAP_USERNAME`: mailbox login
 - `LAB_TRACKER_EMAIL_CAPTURE_IMAP_PASSWORD` / `LAB_TRACKER_EMAIL_CAPTURE_IMAP_PASSWORD_FILE`:

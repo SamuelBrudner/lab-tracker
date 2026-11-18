@@ -212,6 +212,12 @@ describe("OnboardingPage", () => {
     let settingsBody = null;
     const fetchMock = installFetchMock([
       {
+        match: "/auth/review-mailbox",
+        response: apiResponse({
+          available: true, enabled: false, login_email: USER.username, pending_email: null,
+        }),
+      },
+      {
         match: "/auth/setup-readiness",
         response: apiResponse(READY_RUNTIME),
       },
@@ -248,6 +254,8 @@ describe("OnboardingPage", () => {
       selectedProjectId: "project-1",
     });
 
+    fireEvent.click(await screen.findByRole("button", { name: "Review proposals by email" }));
+    expect(screen.getByText("Login email: " + USER.username)).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.getByLabelText("Cadence")).toHaveValue("1440");
       expect(screen.getByLabelText("Local run time")).toHaveValue("18:00");

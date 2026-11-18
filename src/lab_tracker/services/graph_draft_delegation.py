@@ -35,6 +35,7 @@ from lab_tracker.auth import (
 from lab_tracker.errors import AuthError, PermissionDeniedError, ValidationError
 from lab_tracker.models import (
     DEFERRED_AT_KEY,
+    EDITED_AT_KEY,
     AcceptanceMode,
     DelegatedCurationPolicy,
     GraphChangeOperation,
@@ -392,7 +393,7 @@ class DelegationCommit(Protocol):
 
 
 class DelegationRecords(Protocol):
-    def get_graph_change_set(self, change_set_id: UUID) -> GraphChangeSet: ...
+    def get_graph_change_set_for_update(self, change_set_id: UUID) -> GraphChangeSet: ...
 
     def save_graph_change_set(self, change_set: GraphChangeSet) -> None: ...
 
@@ -440,6 +441,12 @@ class DelegatedCurationCoordinator(BaseService):
             # background worker; the savepoint inside isolates a failed pass
             # so its accepts never outlive the commit they were made for.
             with self.application_transaction(), self.recoverable_unit_of_work():
+                # A fully admitted pass may commit. Use the same lock order
+                # as the commit path before reading the current operations.
+                self.repository.lock_project_deletion_guard(change_set.project_id)
+                current = self.records.get_graph_change_set_for_update(change_set.change_set_id)
+                if not is_fresh_draft(current):
+                    return current
                 return self._apply_under_grant(change_set.change_set_id, grant, actor)
         except Exception as exc:
             # The draft outlives its pass: the reason is stamped on the change
@@ -503,24 +510,25 @@ class DelegatedCurationCoordinator(BaseService):
         grant: DelegatedCurationGrant,
         message: str,
     ) -> GraphChangeSet:
-        change_set = self.records.get_graph_change_set(change_set_id)
-        change_set.error_metadata = {
-            **change_set.error_metadata,
-            DELEGATED_CURATION_ERROR_KEY: {
-                **grant.as_packet(),
-                "message": message,
-                "failed_at": utc_now().isoformat(),
-            },
-        }
-        self.records.save_graph_change_set(change_set)
-        return change_set
+        with self.application_transaction():
+            change_set = self.records.get_graph_change_set_for_update(change_set_id)
+            change_set.error_metadata = {
+                **change_set.error_metadata,
+                DELEGATED_CURATION_ERROR_KEY: {
+                    **grant.as_packet(),
+                    "message": message,
+                    "failed_at": utc_now().isoformat(),
+                },
+            }
+            self.records.save_graph_change_set(change_set)
+            return change_set
 
 
 def is_fresh_draft(change_set: GraphChangeSet) -> bool:
     """Whether the pass may run: a ready, untouched draft it has not seen.
 
     A draft a person has already started deciding (any operation accepted,
-    rejected, or deferred), one the pass already ran on, or a member-onboarding
+    rejected, edited, or deferred), one the pass already ran on, or a member-onboarding
     draft is never touched, so re-requesting a draft never re-runs the pass
     over someone's review.
     """
@@ -536,6 +544,7 @@ def is_fresh_draft(change_set: GraphChangeSet) -> bool:
     return all(
         operation.status == GraphChangeOperationStatus.PROPOSED
         and DEFERRED_AT_KEY not in operation.error_metadata
+        and EDITED_AT_KEY not in operation.error_metadata
         for operation in change_set.operations
     )
 

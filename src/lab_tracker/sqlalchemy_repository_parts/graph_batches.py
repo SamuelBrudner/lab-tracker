@@ -247,6 +247,10 @@ def email_delivery_to_model(delivery: ReviewEmailDelivery) -> ReviewEmailOutboxM
         change_set_id=_uuid_str(delivery.change_set_id),
         recipient_user_id=_uuid_str(delivery.recipient_user_id),
         event_type=delivery.event_type,
+        operation_id=delivery.operation_id,
+        operation_revision=delivery.operation_revision,
+        parent_delivery_id=delivery.parent_delivery_id,
+        reply_expires_at=delivery.reply_expires_at,
         destination_email=delivery.destination_email,
         idempotency_key=delivery.idempotency_key,
         status=delivery.status,
@@ -291,6 +295,12 @@ def email_delivery_from_model(row: ReviewEmailOutboxModel) -> ReviewEmailDeliver
         change_set_id=_uuid(row.change_set_id),
         recipient_user_id=_uuid(row.recipient_user_id),
         event_type=row.event_type,
+        operation_id=row.operation_id,
+        operation_revision=row.operation_revision,
+        parent_delivery_id=row.parent_delivery_id,
+        reply_expires_at=row.reply_expires_at,
+        replied_at=row.replied_at,
+        reply_outcome=row.reply_outcome,
         destination_email=row.destination_email,
         idempotency_key=row.idempotency_key,
         status=ReviewEmailDeliveryStatus(row.status),
@@ -433,6 +443,11 @@ class SQLAlchemyReviewEmailOutboxRepository(ReviewEmailOutboxRepository):
 
     def __init__(self, session: OrmSession) -> None:
         self._session = session
+
+    def verified_review_mailbox(self, user_id: UUID) -> str | None:
+        from lab_tracker.review_mailbox import get_verified_review_mailbox
+
+        return get_verified_review_mailbox(self._session, user_id)
 
     def get(self, entity_id: UUID) -> ReviewEmailDelivery | None:
         self._session.flush()

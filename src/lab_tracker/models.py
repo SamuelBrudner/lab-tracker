@@ -983,13 +983,22 @@ class GraphDraftBatchSettings(_DomainModel):
     updated_by: str | None = None
 
 
+ReviewEmailEventType = Literal["review_ready", "test", "proposal", "reply_ack", "reply_help"]
+
+
 class ReviewEmailDelivery(_DomainModel):
     """One durable, recipient-scoped review-email delivery."""
 
     delivery_id: UUID
     change_set_id: UUID | None = None
     recipient_user_id: UUID | None = None
-    event_type: Literal["review_ready", "test"] = "review_ready"
+    event_type: ReviewEmailEventType = "review_ready"
+    operation_id: UUID | None = None
+    parent_delivery_id: UUID | None = None
+    operation_revision: str | None = Field(default=None, exclude=True)
+    reply_expires_at: datetime | None = None
+    replied_at: datetime | None = None
+    reply_outcome: str | None = None
     destination_email: str
     idempotency_key: str
     status: ReviewEmailDeliveryStatus = ReviewEmailDeliveryStatus.PENDING

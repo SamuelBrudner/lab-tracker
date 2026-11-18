@@ -244,7 +244,7 @@ class GraphDraftReviewCoordinator(BaseService):
         acceptance_mode: AcceptanceMode,
         actor: AuthContext | None,
     ) -> GraphChangeSet:
-        change_set = self._change_set_for_serialized_onboarding_mutation(change_set_id)
+        change_set = self.records.get_graph_change_set_for_update(change_set_id)
         self._ensure_graph_change_set_editable(change_set, actor=actor)
         operation = self._find_graph_operation(change_set, operation_id)
         provided = (payload, status, review_note, deferred, reject_reason)
@@ -365,7 +365,15 @@ class GraphDraftReviewCoordinator(BaseService):
         *,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
-        change_set = self.records.get_graph_change_set(change_set_id)
+        with self.application_transaction():
+            change_set = self.records.get_graph_change_set_for_update(change_set_id)
+            return self._bulk_accept_locked(change_set, actor)
+
+    def _bulk_accept_locked(
+        self,
+        change_set: GraphChangeSet,
+        actor: AuthContext | None,
+    ) -> GraphChangeSet:
         if change_set.purpose == GraphDraftPurpose.MEMBER_CHECKPOINT_ALIGNMENT:
             raise ValidationError(
                 "Member onboarding proposals require individual review; bulk accept is disabled."
@@ -467,7 +475,7 @@ class GraphDraftReviewCoordinator(BaseService):
         review_note: str | None,
         actor: AuthContext | None,
     ) -> GraphChangeSet:
-        change_set = self._change_set_for_serialized_onboarding_mutation(change_set_id)
+        change_set = self.records.get_graph_change_set_for_update(change_set_id)
         self.authorization.require_contributor(change_set.project_id, actor=actor)
         is_member_onboarding = change_set.purpose == GraphDraftPurpose.MEMBER_CHECKPOINT_ALIGNMENT
         if is_member_onboarding:
@@ -582,7 +590,7 @@ class GraphDraftReviewCoordinator(BaseService):
         note: str | None,
         actor: AuthContext | None,
     ) -> GraphChangeSet:
-        change_set = self._change_set_for_serialized_onboarding_mutation(change_set_id)
+        change_set = self.records.get_graph_change_set_for_update(change_set_id)
         self.authorization.require_owner(change_set.project_id, actor=actor)
         if change_set.purpose == GraphDraftPurpose.MEMBER_CHECKPOINT_ALIGNMENT:
             self.authorization.require_interactive(
@@ -603,15 +611,6 @@ class GraphDraftReviewCoordinator(BaseService):
         change_set.updated_at = change_set.reviewed_at
         self.records.save_graph_change_set(change_set)
         return change_set
-
-    def _change_set_for_serialized_onboarding_mutation(
-        self,
-        change_set_id: UUID,
-    ) -> GraphChangeSet:
-        change_set = self.records.get_graph_change_set(change_set_id)
-        if change_set.purpose != GraphDraftPurpose.MEMBER_CHECKPOINT_ALIGNMENT:
-            return change_set
-        return self.records.get_graph_change_set_for_update(change_set_id)
 
     def revise_graph_change_set(
         self,

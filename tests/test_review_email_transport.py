@@ -396,3 +396,16 @@ def test_delivery_input_rejects_header_injection_and_credentialed_url() -> None:
             review_url="https://user:password@lab-tracker.example.test/review",
             idempotency_key="delivery-key",
         )
+
+
+def test_smtp_verification_code_is_delivered_only_to_the_login_mailbox(monkeypatch):
+    monkeypatch.setattr(smtplib, "SMTP", _FakeSMTP)
+    provider = SMTPReviewEmailProvider(
+        SMTPSettings(host="smtp.example", port=25, sender_email="lab@example.edu")
+    )
+    provider.send_verification_code("scientist@example.edu", "mailbox-proof")
+    smtp = _FakeSMTP.instances[0]
+    assert ("send_message", ("lab@example.edu", ["scientist@example.edu"])) in smtp.calls
+    assert smtp.sent_message["Subject"] == "Verify your Lab Tracker login email"
+    assert smtp.sent_message["To"] == "scientist@example.edu"
+    assert "mailbox-proof" in smtp.sent_message.get_content()

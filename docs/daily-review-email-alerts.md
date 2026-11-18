@@ -1,16 +1,56 @@
-# Daily-review email alerts
+# Daily review by email
 
-Lab Tracker can send a short cue when an assigned daily review is ready. The
-alert is deliberately contentless:
+A scientist can review an assigned daily proposal by replying from their verified
+login email. Each message shows one proposed change, the project, the reason for
+the change when available, and the deadline for replying.
+
+## Enable review in your inbox
+
+Open **Review proposals by email** in first-run setup or on the **Batches** page.
+Ask for a verification code and enter it within 15 minutes. This opts you in to
+receiving the contents of assigned proposals across your projects. If you signed
+in with a legacy username, you can enter an email address here. After you prove
+you own it, that address becomes your login and your current password still works.
+You can turn email review off from the same control. Outstanding reply addresses
+expire when you opt out.
+
+## Reply to a proposal
+
+Use **Reply** from your verified address and put one line above the quoted email.
+These examples show how to review a proposed research question.
+
+| Reply | What Lab Tracker does |
+| --- | --- |
+| `Approve` | Records your approval for this version of the proposal and sends a confirmation. The usual draft submission and commit permissions still apply. |
+| `Correct text: Does the response change after the odor is removed?` | Replaces the proposed wording and emails the edited version for review. The message lists the fields you can edit. |
+| `Correct: Link this recording to the question about recovery.` | Records your feedback, sets the proposal aside for revision, and sends a confirmation. |
+
+Each reply address belongs to one version and accepts one decision. A reply to an
+older copy cannot approve a newer edit. Use the review link to inspect the full
+draft if its assignment, version, or deadline has changed.
+
+## Server setup
+
+Use the SMTP transport and configure a distinct plus-addressed reply mailbox.
+Point the IMAP poller at that inbox and enable the in-process ticker or schedule
+the integrations poll. The receiving mail server must authenticate senders and
+strip untrusted copies of its own authentication headers. Set its identifier in
+`LAB_TRACKER_REVIEW_EMAIL_AUTHSERV_ID`. The reply lifetime is set by
+`LAB_TRACKER_REVIEW_EMAIL_LINK_TTL_MINUTES` and defaults to 24 hours. See the
+[mail settings](configuration.md#daily-review-email-alerts) and
+[inbound mailbox settings](configuration.md#server-capture-channels).
+
+## Content-free alerts
+
+A scientist can also enable a short cue when an assigned daily review is ready:
 
 > A Lab Tracker review is ready.
 >
 > Open Lab Tracker to review it: `<signed link>`
->
-> Sign-in is required. This email contains no research details.
 
-No project name, note text, proposal summary, count, attachment, or scientific
-metadata leaves the application in email.
+This per-project alert contains only a link and a delivery reference. It is
+available with SMTP or the external worker. Account-level proposal emails take
+precedence for enrolled scientists when the reply channel is enabled.
 
 ## Delivery guarantees
 

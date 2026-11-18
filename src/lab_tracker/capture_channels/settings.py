@@ -419,14 +419,36 @@ def validate_capture_channel_settings(
     address = parse_capture_address(
         value("email_capture_address"), variable="LAB_TRACKER_EMAIL_CAPTURE_ADDRESS"
     )
+    reply_address = parse_capture_address(
+        value("review_email_reply_address"), variable="LAB_TRACKER_REVIEW_EMAIL_REPLY_ADDRESS"
+    )
+    authserv_id = value("review_email_authserv_id").strip().lower()
+    if reply_address is not None:
+        if not settings.review_email_enabled or settings.review_email_transport != "smtp":
+            raise CaptureConfigError(
+                "LAB_TRACKER_REVIEW_EMAIL_REPLY_ADDRESS requires enabled review email with SMTP."
+            )
+        if len(reply_address.local) > 11 or reply_address == address:
+            raise CaptureConfigError(
+                "LAB_TRACKER_REVIEW_EMAIL_REPLY_ADDRESS needs a distinct mailbox alias "
+                "with a local part of 1 to 11 characters."
+            )
+        if not _EMAIL_DOMAIN_RE.fullmatch(authserv_id):
+            raise CaptureConfigError(
+                "LAB_TRACKER_REVIEW_EMAIL_AUTHSERV_ID must name the receiving mail server "
+                "that authenticates senders."
+            )
+    elif authserv_id:
+        raise CaptureConfigError(
+            "LAB_TRACKER_REVIEW_EMAIL_AUTHSERV_ID requires LAB_TRACKER_REVIEW_EMAIL_REPLY_ADDRESS."
+        )
     imap_host = value("email_capture_imap_host").strip()
-    if address is not None or imap_host:
-        _validate_email_capture(settings, address=address, imap_host=imap_host)
+    if address is not None or reply_address is not None or imap_host:
+        _validate_email_capture(settings, address=address or reply_address, imap_host=imap_host)
         if auth_secret_is_placeholder:
             raise CaptureConfigError(
-                "Email capture signs each capture address with LAB_TRACKER_AUTH_SECRET_KEY; "
-                "set a strong non-placeholder secret before enabling "
-                "LAB_TRACKER_EMAIL_CAPTURE_ADDRESS."
+                "Set LAB_TRACKER_AUTH_SECRET_KEY to a non-placeholder secret before enabling "
+                "LAB_TRACKER_EMAIL_CAPTURE_ADDRESS or LAB_TRACKER_REVIEW_EMAIL_REPLY_ADDRESS."
             )
 
     parse_booking_calendars(value("booking_calendars"), variable="LAB_TRACKER_BOOKING_CALENDARS")
@@ -441,11 +463,12 @@ def _validate_email_capture(
 ) -> None:
     if address is None:
         raise CaptureConfigError(
-            "LAB_TRACKER_EMAIL_CAPTURE_IMAP_HOST requires LAB_TRACKER_EMAIL_CAPTURE_ADDRESS."
+            "LAB_TRACKER_EMAIL_CAPTURE_IMAP_HOST requires LAB_TRACKER_EMAIL_CAPTURE_ADDRESS "
+            "or LAB_TRACKER_REVIEW_EMAIL_REPLY_ADDRESS."
         )
     if not imap_host:
         raise CaptureConfigError(
-            "LAB_TRACKER_EMAIL_CAPTURE_ADDRESS requires LAB_TRACKER_EMAIL_CAPTURE_IMAP_HOST."
+            "Email capture and review replies require LAB_TRACKER_EMAIL_CAPTURE_IMAP_HOST."
         )
     if any(character.isspace() or character in "/@" for character in imap_host):
         raise CaptureConfigError("LAB_TRACKER_EMAIL_CAPTURE_IMAP_HOST must be a bare hostname.")

@@ -52,6 +52,7 @@ from lab_tracker.backup import database_lock_path
 from lab_tracker.bounded_subprocess import BoundedSubprocessExecutor, ProcessExecutor
 from lab_tracker.config import Settings
 from lab_tracker.db import get_engine, get_session_factory
+from lab_tracker.errors import AuthError, ConflictError, NotFoundError, ValidationError
 from lab_tracker.file_storage import LocalFileStorageBackend
 from lab_tracker.git_remote_policy import GitRemotePolicy
 from lab_tracker.git_store_health import GitStoreHealthProbe
@@ -641,13 +642,29 @@ def _process_one_review_email(app: FastAPI) -> bool:
             raise RuntimeError("Claimed review email has no lease token.")
         try:
             review_url = _review_email_url(app.state.settings, delivery)
-            result = provider.send_review_ready(
-                ReviewReadyEmail(
-                    recipient_email=delivery.destination_email,
-                    review_url=review_url,
-                    idempotency_key=delivery.idempotency_key,
-                    event_type=delivery.event_type,
+            if delivery.event_type == "review_ready" or delivery.event_type == "test":
+                result = provider.send_review_ready(
+                    ReviewReadyEmail(
+                        recipient_email=delivery.destination_email,
+                        review_url=review_url,
+                        idempotency_key=delivery.idempotency_key,
+                        event_type=delivery.event_type,
+                    )
                 )
+                message_id = result.message_id
+            else:
+                from lab_tracker.services.proposal_email_delivery import build_reviewer_message
+
+                message = build_reviewer_message(
+                    session, api, delivery, app.state.settings, review_url=review_url
+                )
+                provider.send_message(message, recipient_email=delivery.destination_email)
+                message_id = str(message["Message-ID"])
+        except (AuthError, ConflictError, NotFoundError, ValidationError):
+            api.review_emails.cancel(
+                delivery.delivery_id,
+                claim_token=claim_token,
+                reason="The proposal or its reviewer is no longer eligible for email review.",
             )
         except ReviewEmailDeliveryError as exc:
             api.review_emails.mark_failed(
@@ -668,7 +685,7 @@ def _process_one_review_email(app: FastAPI) -> bool:
             api.review_emails.mark_accepted(
                 delivery.delivery_id,
                 claim_token=claim_token,
-                provider_message_id=result.message_id,
+                provider_message_id=message_id,
             )
         return True
 

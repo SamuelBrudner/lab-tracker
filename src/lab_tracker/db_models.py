@@ -828,7 +828,7 @@ class ReviewEmailOutboxModel(Base):
             name="uq_review_email_outbox_idempotency_key",
         ),
         CheckConstraint(
-            "event_type IN ('review_ready', 'test')",
+            "event_type IN ('review_ready', 'test', 'proposal', 'reply_ack', 'reply_help')",
             name="ck_review_email_outbox_event_type",
         ),
         CheckConstraint(
@@ -868,6 +868,14 @@ class ReviewEmailOutboxModel(Base):
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
     event_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    # Operation rows may be replaced when a draft is saved. Keep the original
+    # identity and revision so an obsolete email can never select its successor.
+    operation_id: Mapped[UUID | None] = mapped_column(GUID)
+    parent_delivery_id: Mapped[UUID | None] = mapped_column(GUID)
+    operation_revision: Mapped[str | None] = mapped_column(String(64))
+    reply_expires_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    replied_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    reply_outcome: Mapped[str | None] = mapped_column(String(30))
     destination_email: Mapped[str] = mapped_column(String(320), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
     status: Mapped[ReviewEmailDeliveryStatus] = mapped_column(
@@ -1639,6 +1647,11 @@ class UserModel(Base):
     session_epoch: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
+    # Verification doubles as the explicit account-level opt-in to proposal mail.
+    review_mailbox_address: Mapped[str | None] = mapped_column(String(150))
+    review_mailbox_verified_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    review_mailbox_challenge_hash: Mapped[str | None] = mapped_column(String(64))
+    review_mailbox_challenge_expires_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
 
 
 class InvitationModel(Base):

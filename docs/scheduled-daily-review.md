@@ -9,6 +9,9 @@ memos — including notes tagged as meetings) and proposes how they fit your gra
 in one review queue you accept or reject. It can run **on demand** (the **Run
 now** button on the Batches page) or **on a schedule**.
 
+Scientists who enable **Review proposals by email** can approve or correct each
+assigned proposal from their inbox. [Email setup and reply examples](daily-review-email-alerts.md)
+
 On a server deployment, prefer the built-in scheduler/worker: set
 `LAB_TRACKER_GRAPH_DRAFT_SCHEDULER_ENABLED=true` and the app will enqueue due
 reviews itself, then draft them in the background. The older external scheduler

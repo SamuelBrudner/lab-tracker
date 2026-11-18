@@ -1,10 +1,8 @@
-"""Privacy-preserving email transport for ready graph-draft reviews.
+"""SMTP transport for review cues, verified mailbox enrollment, and proposal review.
 
-The transport intentionally accepts no project, note, proposal, or review-count
-content.  A delivery can therefore contain only a fixed cue and an authenticated
-review link.  Durable retry and deduplication remain the caller's responsibility;
-the stable ``Message-ID`` gives each retry of the same logical delivery the same
-SMTP identity.
+The external worker and basic alert use fixed content-free templates. The
+SMTP worker can also deliver a prepared message for an enrolled reviewer.
+Retries and recipient-scoped delivery identities belong to the outbox.
 """
 
 from __future__ import annotations
@@ -15,6 +13,7 @@ import ssl
 from dataclasses import dataclass, field
 from email.headerregistry import Address
 from email.message import EmailMessage
+from email.utils import make_msgid
 from enum import Enum
 from typing import Literal, Protocol, runtime_checkable
 from urllib.parse import urlsplit
@@ -288,7 +287,40 @@ class SMTPReviewEmailProvider:
                 delivery,
                 sender_email=self._settings.sender_email,
             )
-            refused = self._send(message, recipient_email=delivery.recipient_email)
+        except (TypeError, UnicodeError, ValueError):
+            raise ReviewEmailPermanentError("invalid_message") from None
+
+        self.send_message(message, recipient_email=delivery.recipient_email)
+        return ReviewEmailDeliveryResult(
+            provider="smtp",
+            idempotency_key=delivery.idempotency_key,
+            message_id=str(message["Message-ID"]),
+            dedupe_marker=delivery_dedupe_marker(delivery),
+        )
+
+    def send_verification_code(self, recipient_email: str, code: str) -> None:
+        message = EmailMessage()
+        message["To"] = recipient_email
+        message["Subject"] = "Verify your Lab Tracker login email"
+        message["Message-ID"] = make_msgid(domain="lab-tracker.invalid")
+        message["Auto-Submitted"] = "auto-generated"
+        message["X-Auto-Response-Suppress"] = "All"
+        message.set_content(
+            "Enter this verification code in Lab Tracker to enable proposal review "
+            f"by email:\n\n{code}\n\nThe code expires in 15 minutes. If you did not request "
+            "it, you can ignore this message."
+        )
+        self.send_message(message, recipient_email=recipient_email)
+
+    def send_message(self, message: EmailMessage, *, recipient_email: str) -> None:
+        """Deliver a prepared message using the configured sender and one envelope recipient."""
+        try:
+            if "From" in message:
+                message.replace_header("From", self._settings.sender_email)
+            else:
+                message["From"] = self._settings.sender_email
+            _parse_email_address(recipient_email, field_name="recipient_email")
+            refused = self._send(message, recipient_email=recipient_email)
             if refused:
                 code = next(iter(refused.values()))[0]
                 _raise_for_smtp_status(code)
@@ -322,13 +354,6 @@ class SMTPReviewEmailProvider:
             # exceptions.  Never let their potentially credential-bearing text
             # cross the transport boundary.
             raise ReviewEmailRetryableError("transport_unavailable") from None
-
-        return ReviewEmailDeliveryResult(
-            provider="smtp",
-            idempotency_key=delivery.idempotency_key,
-            message_id=str(message["Message-ID"]),
-            dedupe_marker=delivery_dedupe_marker(delivery),
-        )
 
     def _send(
         self,

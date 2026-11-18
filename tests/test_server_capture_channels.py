@@ -391,6 +391,67 @@ def _poll_email(client: TestClient, imap: FakeImap) -> dict[str, Any]:
     return poller.model_dump()
 
 
+def test_review_imap_acknowledges_only_after_application_decision(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lab_tracker.services import proposal_email_delivery
+
+    _configure(
+        client,
+        review_email_reply_address="review@lab.example",
+        review_email_authserv_id="mx.lab.example",
+        email_capture_imap_host="imap.lab.example",
+        email_capture_imap_username="reviews",
+        email_capture_imap_password="password",
+    )
+    mail = EmailMessage()
+    token = "b" * 52
+    mail["To"] = f"review+{token}@lab.example"
+    mail["From"] = "Scientist <s@lab.example>"
+    mail["Authentication-Results"] = "mx.lab.example; dmarc=pass header.from=lab.example"
+    mail["In-Reply-To"] = "<proposal@lab.example>"
+    mail.set_content("Approve\n\nOn Monday, Lab Tracker wrote:\n> Old proposal")
+    imap = FakeImap({"3": mail.as_bytes()})
+    attempts = []
+
+    def receive(session, *, token, sender_email, reply_text, settings):
+        attempts.append((session, token, sender_email, reply_text))
+        if len(attempts) == 1:
+            raise OSError("temporary database error")
+        return "approved" if len(attempts) == 2 else "ignored"
+
+    monkeypatch.setattr(proposal_email_delivery, "receive_proposal_reply", receive)
+    assert _poll_email(client, imap)["counts"]["failed"] == 1
+    assert not imap.flags["3"]
+    assert _poll_email(client, imap)["counts"]["reviews_approved"] == 1
+    assert imap.flags["3"] == {"\\Seen"}
+    imap.flags["3"].clear()
+    assert _poll_email(client, imap)["counts"]["rejected_review_ignored"] == 1
+    assert len({attempt[0] for attempt in attempts}) == 3
+    assert {attempt[1:] for attempt in attempts} == {(token, "s@lab.example", "Approve")}
+
+
+def test_invalid_review_reply_never_becomes_a_note(
+    client: TestClient,
+    email_setup: SimpleNamespace,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    _configure(
+        client,
+        review_email_reply_address="review@lab.example.org",
+        review_email_authserv_id="mx.lab.example.org",
+    )
+    raw = _email(
+        sender="alice@lab.example.org", to=f"{email_setup.address}, review+typo@lab.example.org"
+    )
+    imap = FakeImap({"9": raw})
+    report = _poll_email(client, imap)
+    assert report["counts"]["rejected_ambiguous_review_recipient"] == 1
+    assert "\\Seen" in imap.flags["9"]
+    assert _notes(client, admin_auth_headers, email_setup.project_id) == []
+
+
 def test_capture_address_endpoint_returns_the_signed_address(
     client: TestClient, email_setup: SimpleNamespace
 ) -> None:

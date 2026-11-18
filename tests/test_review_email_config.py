@@ -17,6 +17,8 @@ _AUTHENTICATED_EMAIL_SETTINGS: dict[str, Any] = {
     "base_url": "https://lab-tracker.example.test",
 }
 _ENV_EXAMPLE_REVIEW_EMAIL_DEFAULTS = {
+    "LAB_TRACKER_REVIEW_EMAIL_REPLY_ADDRESS": "",
+    "LAB_TRACKER_REVIEW_EMAIL_AUTHSERV_ID": "",
     "LAB_TRACKER_REVIEW_EMAIL_ENABLED": "false",
     "LAB_TRACKER_REVIEW_EMAIL_TRANSPORT": "external",
     "LAB_TRACKER_REVIEW_EMAIL_WORKER_POLL_SECONDS": "10",
@@ -85,6 +87,42 @@ def test_external_transport_requires_no_smtp_configuration() -> None:
     assert settings.review_email_enabled is True
     assert settings.review_email_transport == "external"
     assert settings.base_url == "https://lab-tracker.example.test"
+
+
+def test_review_mailbox_allows_review_without_capture() -> None:
+    settings = _settings(**_reply_settings())
+    assert settings.email_capture_address == ""
+    assert settings.review_email_reply_address == "review@lab.example"
+
+
+def _reply_settings(**updates: Any) -> dict[str, Any]:
+    return {
+        "review_email_transport": "smtp",
+        "review_email_smtp_host": "smtp.lab.example",
+        "review_email_smtp_from_address": "team@lab.example",
+        "review_email_reply_address": "review@lab.example",
+        "review_email_authserv_id": "mx.lab.example",
+        "email_capture_imap_host": "imap.lab.example",
+        "email_capture_imap_username": "review",
+        "email_capture_imap_password": "test-password",
+        **updates,
+    }
+
+
+@pytest.mark.parametrize(
+    ("updates", "error"),
+    [
+        ({"email_capture_address": "review@lab.example"}, "distinct mailbox alias"),
+        ({"review_email_reply_address": "long-review-alias@lab.example"}, "1 to 11"),
+        ({"review_email_authserv_id": ""}, "AUTHSERV_ID"),
+        ({"email_capture_imap_host": ""}, "IMAP_HOST"),
+        ({"review_email_enabled": False}, "enabled review email"),
+        ({"review_email_transport": "external"}, "with SMTP"),
+    ],
+)
+def test_review_mailbox_requires_deliverable_and_authenticated_replies(updates, error) -> None:
+    with pytest.raises(ValidationError, match=error):
+        _settings(**_reply_settings(**updates))
 
 
 def test_review_email_requires_authentication() -> None:

@@ -3,6 +3,7 @@ import * as React from "react";
 import { apiRequest } from "../shared/api.js";
 import { auth as authGateway } from "../shared/gateways/index.js";
 import { matchingClientSetup } from "./client-setup.js";
+import { ReviewMailbox } from "./review-mailbox.jsx";
 import { DailyReviewScheduleForm } from "./daily-review-schedule.jsx";
 import { OwnerOnboardingQueueBanner } from "./member-onboarding.jsx";
 
@@ -324,6 +325,7 @@ function OnboardingPage({
           ) : (
             <p className="subtle">Choose or create a project first.</p>
           )}
+          {token && activeProject && canManageSchedule && <ReviewMailbox key={token} token={token} />}
           <ReadinessStatus readiness={readiness} error={readinessError} />
         </li>
 

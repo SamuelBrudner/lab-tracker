@@ -43,6 +43,7 @@ from lab_tracker.capture_channels.email_capture import (
     stage_email,
 )
 from lab_tracker.capture_channels.poll_state import PollState, PollStateUnavailable
+from lab_tracker.capture_channels.review_replies import route_review_reply
 from lab_tracker.capture_channels.settings import (
     StoreScan,
     parse_booking_calendars,
@@ -129,7 +130,9 @@ class CaptureRuntime:
 
 
 def email_configured(settings: Any) -> bool:
-    return bool(str(settings.email_capture_address or "").strip())
+    return bool(
+        settings.email_capture_address.strip() or settings.review_email_reply_address.strip()
+    )
 
 
 def bookings_configured(settings: Any) -> bool:
@@ -252,26 +255,42 @@ def _run_email(runtime: CaptureRuntime, expired: Expired) -> _Outcome:
         return _Outcome()
     max_attachment_bytes = min(MAX_STORED_ATTACHMENT_BYTES, int(runtime.settings.max_upload_bytes))
     outcome = _Outcome()
-    with runtime.session_factory() as session:
-        api = runtime.api_for_session(session)
 
-        def stage(parsed: ParsedEmail) -> MessageOutcome:
-            try:
+    def receive(token: str, sender: str, text: str) -> str:
+        from lab_tracker.services.proposal_email_delivery import receive_proposal_reply
+
+        with runtime.session_factory() as session:
+            return receive_proposal_reply(
+                session,
+                token=token,
+                sender_email=sender,
+                reply_text=text,
+                settings=runtime.settings,
+            )
+
+    def stage(parsed: ParsedEmail) -> MessageOutcome:
+        try:
+            if config.reply_address is not None:
+                review = route_review_reply(
+                    parsed, config.reply_address, config.authserv_id, receive
+                )
+                if review is not None:
+                    return review
+            with runtime.session_factory() as session:
                 return stage_email(
                     parsed,
                     config=config,
                     users=runtime.users,
-                    api=api,
+                    api=runtime.api_for_session(session),
                     max_attachment_bytes=max_attachment_bytes,
                 )
-            except Exception as exc:  # leave the message unseen and retry next poll
-                _logger.warning("Email capture could not stage a message (%s).", type(exc).__name__)
-                session.rollback()
-                return MessageOutcome("failed", "storage_error")
+        except Exception as exc:  # leave the message unseen and retry next poll
+            _logger.warning("Mailbox message processing failed (%s).", type(exc).__name__)
+            return MessageOutcome("failed", "storage_error")
 
-        result = poll_mailbox(
-            config=config, imap_factory=runtime.imap_factory, stage=stage, expired=expired
-        )
+    result = poll_mailbox(
+        config=config, imap_factory=runtime.imap_factory, stage=stage, expired=expired
+    )
     outcome.add(
         examined=result.examined,
         stored=result.stored,
@@ -284,6 +303,7 @@ def _run_email(runtime: CaptureRuntime, expired: Expired) -> _Outcome:
     outcome.add(
         **{f"rejected_{reason}": count for reason, count in result.rejection_reasons.items()}
     )
+    outcome.add(**{f"reviews_{decision}": count for decision, count in result.reviews.items()})
     return outcome
 
 

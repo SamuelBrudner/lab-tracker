@@ -497,6 +497,9 @@ class GraphChangeSetRepository(EntityRepository[GraphChangeSet], Protocol):
 class ReviewEmailOutboxRepository(Protocol):
     """Persistence contract for durable review-email delivery."""
 
+    def verified_review_mailbox(self, user_id: UUID) -> str | None:
+        """Return the enrolled user's verified current login email."""
+
     def get(self, entity_id: UUID) -> ReviewEmailDelivery | None:
         """Return one delivery by ID, or None when it does not exist."""
 

@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { apiListRequest, apiRequest, buildApiPath } from "../shared/api.js";
 import { formatDate } from "../shared/formatters.js";
+import { ReviewMailbox } from "./review-mailbox.jsx";
 import { DailyReviewScheduleForm } from "./daily-review-schedule.jsx";
 import { DelegatedCurationForm } from "./delegated-curation.jsx";
 import { SessionSuggestionsCard } from "./sessions/SessionSuggestionsCard.jsx";
@@ -521,6 +522,8 @@ function BatchReviewPage({
             setFlash={setFlash}
             onRunNow={runNow}
           />
+
+          {token && <ReviewMailbox key={token} token={token} />}
 
           {canManageProject && selectedProjectId ? (
             <div className="stack">
