@@ -29,8 +29,9 @@ within this lane. Model confidence does not rank review importance.
 **Quick confirmations** contains note updates that only add concrete targets
 while preserving the targets in the captured context. The original targets must
 be known; unfamiliar or content-changing updates require judgment. Related link
-edits for the same capture can be confirmed together. Conflicting replacement
-target lists must be corrected before a group can be kept.
+edits for the same capture can be confirmed together. Draft updates add links
+to the note's current targets at commit time. To remove a link, edit the note
+itself.
 
 **Can wait** contains optional follow-ups and goals, and decisions the person
 explicitly deferred. A deferred operation remains proposed. **Return to review**

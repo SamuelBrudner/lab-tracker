@@ -270,7 +270,7 @@ def test_graph_patch_response_schema_requires_non_empty_source_note_ids() -> Non
 
 def test_graph_draft_prompt_versions_and_source_ref_contract_are_updated() -> None:
     assert PROMPT_VERSION == "multimodal-graph-draft-v5"
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v11"
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v12"
     assert ANALYSIS_PROMPT_VERSION == "analysis-graph-draft-v5"
     for instructions in (_instructions(), _batch_instructions(), _analysis_instructions()):
         assert "source_note_ids" in instructions
@@ -1182,7 +1182,7 @@ def test_batch_instructions_are_narrative_first_with_terse_capture_guardrail() -
     assert "observed_at_source" in instructions
     assert "still raise clarification_requests" in instructions
     # The summary contract changed (now a narrative), so the version bumps.
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v11"
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v12"
 
 
 @pytest.mark.parametrize(
@@ -1308,7 +1308,7 @@ def test_batch_instructions_carry_review_memory_guidance() -> None:
     assert pending_sentence in instructions
     assert "review_memory.recent_rejections" in instructions
     assert rejection_sentence in instructions
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v11"
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v12"
 
     batch_context = {
         "batch_notes": [{"note_id": "source-1", "raw_content": "Observed result"}],
@@ -1372,8 +1372,8 @@ def test_batch_metadata_contract_matches_api_and_rejects_nested_provenance() -> 
         "update": NoteUpdate.model_json_schema()["properties"]["metadata"],
     }
     assert "Supporting note ID lists belong in source_refs.source_note_ids" in instructions
-    assert "targets replaces its entire target list" in instructions
-    assert "Adding a session target must not erase a supported question link" in instructions
+    assert "Draft note updates append new targets to links already on the note" in instructions
+    assert "Include the question, session, or dataset targets this operation adds" in instructions
     assert "rather than linking every near-duplicate variant" in instructions
     assert "shared subject words alone are insufficient" in instructions
     validator = _recording_validator([])
@@ -1673,7 +1673,7 @@ def test_prompt_instructions_and_response_schema_include_resolve_prediction() ->
     assert contract["when_rejected_required_fields"] == ["terminal_reason"]
     # All draft prompts now include the opening-context contract.
     assert PROMPT_VERSION == "multimodal-graph-draft-v5"
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v11"
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v12"
     assert ANALYSIS_PROMPT_VERSION == "analysis-graph-draft-v5"
 
 

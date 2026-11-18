@@ -83,24 +83,6 @@ def decide_graph_draft_group(
         for edit in edits.values():
             if set(edit) - {"payload", "review_note"}:
                 raise ValidationError("Group edits may only change payload and review_note.")
-        if decision == "accepted":
-            targets_by_note: dict[str, list[dict[str, Any]]] = {}
-            for operation in change_set.operations:
-                if str(operation.operation_id) not in selected:
-                    continue
-                payload = edits.get(operation.operation_id, {}).get("payload", operation.payload)
-                if (
-                    operation.entity_type.value == "note"
-                    and operation.target_entity_id
-                    and "targets" in payload
-                ):
-                    key = str(operation.target_entity_id)
-                    if key in targets_by_note and targets_by_note[key] != payload["targets"]:
-                        raise ValidationError(
-                            "These capture edits replace links with different target lists. "
-                            "Correct them to the same combined targets before keeping the group."
-                        )
-                    targets_by_note[key] = payload["targets"]
         for operation_id in operation_ids:
             edit = edits.get(operation_id, {})
             change_set = review._update_graph_change_operation(

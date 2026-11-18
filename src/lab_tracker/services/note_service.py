@@ -763,90 +763,99 @@ class NoteService(BaseService):
         origin_model: str | None = None,
         origin_prompt_version: str | None = None,
         allow_member_onboarding_checkpoint: bool = False,
+        preserve_existing_targets: bool = False,
     ) -> Note:
-        note = self.get_note(note_id)
-        self.authorization.require_contributor(note.project_id, actor=actor)
-        designated_checkpoint = self._member_onboarding_checkpoint_for_capture(note)
-        reserved_update = is_provided(metadata) and has_reserved_note_metadata(metadata)
-        if not allow_member_onboarding_checkpoint and (
-            is_member_checkpoint(note)
-            or has_reserved_note_metadata(note.metadata)
-            or reserved_update
-        ):
-            raise ValidationError(
-                "Member-onboarding metadata and checkpoints are immutable outside "
-                "the guided workflow."
-            )
-        if is_provided(metadata):
-            validate_scheduled_draft_policy(metadata)
-        before = note.model_copy(deep=True)
-        if designated_checkpoint is not None:
-            if is_provided(targets):
-                proposed_targets = list(targets or [])
-                if not any(
-                    target.entity_type == EntityType.NOTE
-                    and target.entity_id == designated_checkpoint.note_id
-                    for target in proposed_targets
-                ):
-                    raise ValidationError(
-                        "The designated first capture must remain attached to its "
-                        "member onboarding checkpoint."
-                    )
-                targets = proposed_targets
-            if is_provided(status) and status not in {
-                NoteStatus.STAGED,
-                NoteStatus.COMMITTED,
-            }:
-                raise ValidationError(
-                    "The designated first capture must remain staged or committed."
-                )
-            if (
-                origin not in {None, EntityOrigin.USER}
-                or change_set_id is not None
+        with self.unit_of_work() as repository:
+            note = repository.notes.get_for_update(note_id)
+            if note is None:
+                raise NotFoundError("Note does not exist.")
+            self.authorization.require_contributor(note.project_id, actor=actor)
+            designated_checkpoint = self._member_onboarding_checkpoint_for_capture(note)
+            reserved_update = is_provided(metadata) and has_reserved_note_metadata(metadata)
+            if not allow_member_onboarding_checkpoint and (
+                is_member_checkpoint(note)
+                or has_reserved_note_metadata(note.metadata)
+                or reserved_update
             ):
                 raise ValidationError(
-                    "The designated first capture must remain a direct human record."
+                    "Member-onboarding metadata and checkpoints are immutable outside "
+                    "the guided workflow."
                 )
-        if is_provided(transcribed_text):
-            note.transcribed_text = transcribed_text.strip() if transcribed_text else None
-        if is_provided(targets):
-            if targets is None:
-                raise ValidationError("targets must not be null.")
-            resolved_targets = list(targets)
-            for target in resolved_targets:
-                self.validate_target(target, note.project_id)
-            note.targets = resolved_targets
-        if is_provided(metadata):
-            if metadata is None:
-                raise ValidationError("metadata must not be null.")
-            note.metadata = normalize_note_metadata(metadata)
-        if is_provided(status):
-            if status is None:
-                raise ValidationError("status must not be null.")
-            _ensure_note_status_transition(note.status, status)
-            if note.status == NoteStatus.ARCHIVED and status != NoteStatus.ARCHIVED:
-                # Restoring a capture must not leave it reporting a stale archive.
-                note.archived_reason = None
-                note.archived_at = None
-                note.archived_by = None
-                note.archived_by_user_id = None
-            note.status = status
-        if origin is not None:
-            note.origin = origin
-        if change_set_id is not None:
-            note.change_set_id = change_set_id
-        if origin_provider is not None:
-            note.origin_provider = origin_provider
-        if origin_model is not None:
-            note.origin_model = origin_model
-        if origin_prompt_version is not None:
-            note.origin_prompt_version = origin_prompt_version
-        if note == before:
-            return note
-        note.updated_at = utc_now()
-        with self.unit_of_work() as repository:
+            if is_provided(metadata):
+                validate_scheduled_draft_policy(metadata)
+            before = note.model_copy(deep=True)
+            if designated_checkpoint is not None:
+                if is_provided(targets):
+                    proposed_targets = list(targets or [])
+                    if not any(
+                        target.entity_type == EntityType.NOTE
+                        and target.entity_id == designated_checkpoint.note_id
+                        for target in proposed_targets
+                    ):
+                        raise ValidationError(
+                            "The designated first capture must remain attached to its "
+                            "member onboarding checkpoint."
+                        )
+                    targets = proposed_targets
+                if is_provided(status) and status not in {
+                    NoteStatus.STAGED,
+                    NoteStatus.COMMITTED,
+                }:
+                    raise ValidationError(
+                        "The designated first capture must remain staged or committed."
+                    )
+                if (
+                    origin not in {None, EntityOrigin.USER}
+                    or change_set_id is not None
+                ):
+                    raise ValidationError(
+                        "The designated first capture must remain a direct human record."
+                    )
+            if is_provided(transcribed_text):
+                note.transcribed_text = transcribed_text.strip() if transcribed_text else None
+            if is_provided(targets):
+                if targets is None:
+                    raise ValidationError("targets must not be null.")
+                resolved_targets = list(targets)
+                for target in resolved_targets:
+                    self.validate_target(target, note.project_id)
+                if preserve_existing_targets:
+                    by_key = {
+                        (target.entity_type, target.entity_id): target
+                        for target in [*note.targets, *resolved_targets]
+                    }
+                    resolved_targets = list(by_key.values())
+                note.targets = resolved_targets
+            if is_provided(metadata):
+                if metadata is None:
+                    raise ValidationError("metadata must not be null.")
+                note.metadata = normalize_note_metadata(metadata)
+            if is_provided(status):
+                if status is None:
+                    raise ValidationError("status must not be null.")
+                _ensure_note_status_transition(note.status, status)
+                if note.status == NoteStatus.ARCHIVED and status != NoteStatus.ARCHIVED:
+                    # Restoring a capture must not leave it reporting a stale archive.
+                    note.archived_reason = None
+                    note.archived_at = None
+                    note.archived_by = None
+                    note.archived_by_user_id = None
+                note.status = status
+            if origin is not None:
+                note.origin = origin
+            if change_set_id is not None:
+                note.change_set_id = change_set_id
+            if origin_provider is not None:
+                note.origin_provider = origin_provider
+            if origin_model is not None:
+                note.origin_model = origin_model
+            if origin_prompt_version is not None:
+                note.origin_prompt_version = origin_prompt_version
+            if note == before:
+                return note
+            note.updated_at = utc_now()
             repository.notes.save(note)
-        return note
+            return note
 
     def archive_note(
         self,
@@ -864,25 +873,27 @@ class NoteService(BaseService):
         rather than silent trust.
         """
 
-        note = self.get_note(note_id)
-        self.authorization.require_contributor(note.project_id, actor=actor)
-        if is_member_checkpoint(note) and not allow_member_onboarding_checkpoint:
-            raise ValidationError(
-                "Member onboarding checkpoints cannot be archived outside the guided workflow."
-            )
-        if self._member_onboarding_checkpoint_for_capture(note) is not None:
-            raise ValidationError(
-                "The designated first member-onboarding capture cannot be archived."
-            )
-        note.status = NoteStatus.ARCHIVED
-        note.archived_reason = reason
-        note.archived_at = utc_now()
-        note.archived_by = actor_user_id(actor)
-        note.archived_by_user_id = actor_user_fk(actor, self.repository)
-        note.updated_at = note.archived_at
         with self.unit_of_work() as repository:
+            note = repository.notes.get_for_update(note_id)
+            if note is None:
+                raise NotFoundError("Note does not exist.")
+            self.authorization.require_contributor(note.project_id, actor=actor)
+            if is_member_checkpoint(note) and not allow_member_onboarding_checkpoint:
+                raise ValidationError(
+                    "Member onboarding checkpoints cannot be archived outside the guided workflow."
+                )
+            if self._member_onboarding_checkpoint_for_capture(note) is not None:
+                raise ValidationError(
+                    "The designated first member-onboarding capture cannot be archived."
+                )
+            note.status = NoteStatus.ARCHIVED
+            note.archived_reason = reason
+            note.archived_at = utc_now()
+            note.archived_by = actor_user_id(actor)
+            note.archived_by_user_id = actor_user_fk(actor, self.repository)
+            note.updated_at = note.archived_at
             repository.notes.save(note)
-        return note
+            return note
 
     def download_note_raw(self, note_id: UUID) -> tuple[NoteRawAsset, bytes]:
         note = self.get_note(note_id)

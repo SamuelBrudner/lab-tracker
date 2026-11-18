@@ -103,6 +103,23 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
             return None
         return self.notes_from_rows([row])[0]
 
+    def get_for_update(self, entity_id: UUID) -> Note | None:
+        self._session.flush()
+        if self._session.get_bind().dialect.name == "sqlite":
+            self._session.execute(
+                update(NoteModel)
+                .where(NoteModel.note_id == entity_id)
+                .values(updated_at=NoteModel.updated_at)
+                .execution_options(synchronize_session=False)
+            )
+        row = self._session.scalar(
+            select(NoteModel)
+            .where(NoteModel.note_id == entity_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        return self.notes_from_rows([row])[0] if row is not None else None
+
     def list(self) -> list[Note]:
         self._session.flush()
         rows = list(

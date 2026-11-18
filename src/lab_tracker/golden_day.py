@@ -473,9 +473,7 @@ def _operation(
 def golden_day_expected_patch(graph: GoldenDayGraph, notes: Sequence[Note]) -> dict[str, Any]:
     """The batch patch a careful drafter would return for this day.
 
-    Question links come first, then session links that carry the question
-    targets forward (an update replaces a note's target list, so the later
-    operation must include what the earlier one set), then two grounded new
+    Question links come first, then session links, then two grounded new
     questions and two specific clarification requests.
     """
 
@@ -729,9 +727,6 @@ def _predicted_link_pairs(change_set: GraphChangeSet) -> set[tuple[UUID, UUID | 
         targets = operation.payload.get("targets")
         if not isinstance(targets, list):
             continue
-        # targets replaces the note's full target list regardless of the semantic
-        # label. A combined session/question update must count, and a later
-        # session-only update must remove a question link it overwrites.
         pairs: set[tuple[UUID, UUID | str]] = set()
         for target in targets:
             if not isinstance(target, dict):
@@ -746,7 +741,7 @@ def _predicted_link_pairs(change_set: GraphChangeSet) -> set[tuple[UUID, UUID | 
                 # source placement; they are not existing-question predictions.
                 question_id = "unresolved:" + json.dumps(raw_id, sort_keys=True, default=str)
             pairs.add((operation.target_entity_id, question_id))
-        by_note[operation.target_entity_id] = pairs
+        by_note.setdefault(operation.target_entity_id, set()).update(pairs)
     return set().union(*by_note.values())
 
 

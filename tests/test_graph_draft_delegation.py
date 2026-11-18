@@ -1551,3 +1551,50 @@ def test_delegated_curation_migration_defaults_existing_rows_to_off(monkeypatch,
             )
     finally:
         engine.dispose()
+
+
+@pytest.mark.parametrize("delegated", [False, True])
+def test_note_link_proposals_preserve_current_links(client, admin_auth_headers, delegated):
+    project_id, note_id, candidate = _linked_setup(client, admin_auth_headers)
+    original = _question(client, admin_auth_headers, project_id)
+    later = _question(client, admin_auth_headers, project_id)
+
+    def set_targets(*question_ids):
+        patched = client.patch(
+            f"/notes/{note_id}",
+            headers=admin_auth_headers,
+            json={"targets": [
+                {"entity_type": "question", "entity_id": identity} for identity in question_ids
+            ]},
+        )
+        assert patched.status_code == 200, patched.text
+
+    set_targets(original, *([later] if delegated else []))
+    if delegated:
+        _grant(client, admin_auth_headers, project_id, "organize")
+    draft = _note_draft(client, admin_auth_headers, note_id, _patch(_link_op(note_id, candidate)))
+    if delegated:
+        assert draft["status"] == "committed"
+    else:
+        set_targets(original, later)
+        draft_id = draft["change_set_id"]
+        operation_id = draft["operations"][0]["operation_id"]
+        accepted = client.patch(
+            f"/graph-drafts/{draft_id}/operations/{operation_id}",
+            headers=admin_auth_headers,
+            json={"status": "accepted"},
+        )
+        assert accepted.status_code == 200, accepted.text
+        committed = client.post(
+            f"/graph-drafts/{draft_id}/commit",
+            headers=admin_auth_headers,
+            json={"message": "Add a related question"},
+        )
+        assert committed.status_code == 200, committed.text
+
+    saved = client.get(f"/notes/{note_id}", headers=admin_auth_headers).json()["data"]
+    assert {target["entity_id"] for target in saved["targets"]} == {original, later, candidate}
+    # Ordinary edits still let a scientist explicitly remove a target.
+    set_targets(later, candidate)
+    saved = client.get(f"/notes/{note_id}", headers=admin_auth_headers).json()["data"]
+    assert {target["entity_id"] for target in saved["targets"]} == {later, candidate}

@@ -223,7 +223,7 @@ def test_score_counts_question_targets_in_combined_and_generic_updates(
     assert score.link_recall == 1.0
 
 
-def test_score_detects_a_later_target_update_removing_a_question_link(
+def test_score_preserves_question_links_when_a_later_operation_adds_only_a_session(
     api: LabTrackerAPI, golden_day: tuple[GoldenDayGraph, list[Note]]
 ) -> None:
     graph, notes = golden_day
@@ -239,9 +239,8 @@ def test_score_detects_a_later_target_update_removing_a_question_link(
     )
     assert draft.status == GraphChangeSetStatus.READY
     score = score_golden_day(draft, graph, notes)
-    count = len(expected_link_pairs(graph, notes))
     assert score.link_precision == 1.0
-    assert score.link_recall == pytest.approx((count - 1) / count)
+    assert score.link_recall == 1.0
 
 
 def test_score_grades_wrong_source_new_question_links_separately(

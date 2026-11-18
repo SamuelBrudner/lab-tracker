@@ -28,7 +28,7 @@ from lab_tracker.config import Settings
 from lab_tracker.provider_error_redaction import provider_error_message
 
 PROMPT_VERSION = "multimodal-graph-draft-v5"
-BATCH_PROMPT_VERSION = "daily-batch-graph-draft-v11"
+BATCH_PROMPT_VERSION = "daily-batch-graph-draft-v12"
 ANALYSIS_PROMPT_VERSION = "analysis-graph-draft-v5"
 # Default provider label only. Callers stamping provenance must prefer the active
 # client's `.provider` (e.g. getattr(client, "provider", PROVIDER)); transcripts and
@@ -1220,10 +1220,8 @@ def _batch_instructions() -> str:
         "Metadata values must be scalars, never arrays or objects. Supporting note "
         "ID lists belong in source_refs.source_note_ids. If structured metadata is "
         "needed, encode it as a JSON string rather than a nested list or object. "
-        "Updating a note's targets replaces its entire target list; it does not "
-        "append. Include all still-supported existing and proposed question, "
-        "session, and dataset targets, including links proposed earlier in this "
-        "patch. Adding a session target must not erase a supported question link. "
+        "Draft note updates append new targets to links already on the note. "
+        "Include the question, session, or dataset targets this operation adds. "
         "Each new question link must be supported by the capture's specific "
         "observation or comparison; shared subject words alone are insufficient. "
         "When several questions express the same underlying question, choose the "

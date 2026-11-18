@@ -155,6 +155,8 @@ class VisualizationRepository(EntityRepository[Visualization], Protocol):
 class NoteRepository(EntityRepository[Note], Protocol):
     """Note persistence operations that preserve concurrent human edits."""
 
+    def get_for_update(self, entity_id: UUID) -> Note | None: ...
+
     def try_claim_auto_transcription(
         self,
         note_id: UUID,

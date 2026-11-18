@@ -424,6 +424,7 @@ class GraphPatchApplier:
             return self.notes.update_note(
                 entity_id,
                 actor=actor,
+                preserve_existing_targets=True,
                 **origin_kwargs,
                 **provided_fields(data),
             )
