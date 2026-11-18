@@ -828,7 +828,8 @@ class ReviewEmailOutboxModel(Base):
             name="uq_review_email_outbox_idempotency_key",
         ),
         CheckConstraint(
-            "event_type IN ('review_ready', 'test', 'proposal', 'reply_ack', 'reply_help')",
+            "event_type IN ('review_ready', 'test', 'proposal', 'reply_ack', 'reply_help', "
+            "'clarification')",
             name="ck_review_email_outbox_event_type",
         ),
         CheckConstraint(
@@ -873,6 +874,7 @@ class ReviewEmailOutboxModel(Base):
     operation_id: Mapped[UUID | None] = mapped_column(GUID)
     parent_delivery_id: Mapped[UUID | None] = mapped_column(GUID)
     operation_revision: Mapped[str | None] = mapped_column(String(64))
+    clarification_revision: Mapped[str | None] = mapped_column(String(64))
     reply_expires_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
     replied_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
     reply_outcome: Mapped[str | None] = mapped_column(String(30))

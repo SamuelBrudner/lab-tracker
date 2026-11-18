@@ -17,12 +17,21 @@ from lab_tracker.auth import AuthContext, Role
 from lab_tracker.config import Settings
 from lab_tracker.db_models import ReviewEmailOutboxModel, UserModel
 from lab_tracker.errors import AuthError, ConflictError, NotFoundError, ValidationError
-from lab_tracker.models import ReviewEmailDelivery, ReviewEmailDeliveryStatus, utc_now
+from lab_tracker.graph_draft_triage import pending_clarifications
+from lab_tracker.models import (
+    GraphChangeOperation,
+    GraphChangeSet,
+    ReviewEmailDelivery,
+    ReviewEmailDeliveryStatus,
+    utc_now,
+)
 from lab_tracker.proposal_email_content import proposal_detail_lines
 from lab_tracker.services.proposal_email_decisions import (
     apply_proposal_email_decision,
     correctable_fields,
     parse_review_reply,
+    reply_line,
+    require_assigned_email_review,
     require_current_proposal,
 )
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
@@ -31,6 +40,10 @@ if TYPE_CHECKING:
     from lab_tracker.api import LabTrackerAPI
 
 _TOKEN = re.compile(r"[a-z2-7]{52}")
+_REVIEW_ITEMS = {"proposal", "clarification"}
+_CLARIFICATION_INSTRUCTIONS = (
+    "Reply with Answer: followed by your answer, or reply Later to set this aside."
+)
 _IN_FLIGHT = (
     ReviewEmailDeliveryStatus.SENDING,
     ReviewEmailDeliveryStatus.RETRYABLE,
@@ -75,6 +88,8 @@ def _mailbox_owner(session: Session, delivery: ReviewEmailDelivery) -> AuthConte
 def _subject(delivery: ReviewEmailDelivery) -> str:
     # Distinct, content-free subjects keep reviewers' proposals apart in inboxes
     # that group mail by subject. Field corrections stay in the same thread.
+    if delivery.event_type == "clarification" and delivery.clarification_revision:
+        return f"Lab Tracker needs your input [{delivery.clarification_revision[:8]}]"
     if delivery.operation_id is None:
         raise ConflictError("This delivery has no proposal.")
     return f"Lab Tracker proposal for review [{delivery.operation_id.hex[:8]}]"
@@ -98,6 +113,45 @@ def _thread_headers(
     return message
 
 
+def _current_review_item(
+    api: LabTrackerAPI, delivery: ReviewEmailDelivery, draft: GraphChangeSet, actor: AuthContext
+) -> GraphChangeOperation | str:
+    review = api.graph_drafts.review
+    if delivery.event_type == "clarification":
+        require_assigned_email_review(review, draft, actor)
+        question = pending_clarifications(draft).get(delivery.clarification_revision or "")
+        if question is None:
+            raise ConflictError("This clarification has changed since the email was queued.")
+        return question
+    if not delivery.operation_id or not delivery.operation_revision:
+        raise ConflictError("This delivery has no proposal revision.")
+    return require_current_proposal(
+        review, draft, delivery.operation_id, delivery.operation_revision, actor
+    )
+
+
+def _answer_clarification(
+    api: LabTrackerAPI, draft: GraphChangeSet, question: str, text: str, actor: AuthContext
+) -> str:
+    line = reply_line(text)
+    if line.casefold() == "later":
+        api.decide_graph_draft_clarification(
+            draft.change_set_id, question=question, decision="deferred", actor=actor
+        )
+        return "clarification_deferred"
+    command, separator, answer = line.partition(":")
+    if command.strip().casefold() != "answer" or not separator or not answer.strip():
+        raise ValidationError(_CLARIFICATION_INSTRUCTIONS)
+    api.decide_graph_draft_clarification(
+        draft.change_set_id,
+        question=question,
+        decision="answered",
+        answer=answer.strip(),
+        actor=actor,
+    )
+    return "clarification_answered"
+
+
 def build_reviewer_message(
     session: Session,
     api: LabTrackerAPI,
@@ -109,7 +163,7 @@ def build_reviewer_message(
     if delivery.event_type in {"reply_ack", "reply_help"} and delivery.parent_delivery_id:
         original = api.review_emails.get(delivery.parent_delivery_id)
         if (
-            original.event_type != "proposal"
+            original.event_type not in _REVIEW_ITEMS
             or delivery.recipient_user_id != original.recipient_user_id
             or delivery.destination_email != original.destination_email
             or delivery.change_set_id != original.change_set_id
@@ -119,27 +173,39 @@ def build_reviewer_message(
         message = _thread_headers(delivery, settings, original_id=original.delivery_id)
         message["Subject"] = f"Re: {_subject(original)}"
         if delivery.event_type == "reply_help" and not original.replied_at:
-            body = (
-                "Your reply did not change the proposal. To approve it, reply with just Approve. "
-                "To edit it, use a field listed in the original email, for example "
-                "Correct text: followed by the replacement. To request a revision, reply with "
-                "Correct: followed by your feedback."
-            )
+            if original.event_type == "clarification":
+                body = _CLARIFICATION_INSTRUCTIONS
+            else:
+                body = (
+                    "Your reply did not change the proposal. "
+                    "To approve it, reply with just Approve. "
+                    "To edit it, use a field listed in the original email, for example "
+                    "Correct text: followed by the replacement. To request a revision, reply with "
+                    "Correct: followed by your feedback."
+                )
         elif delivery.event_type == "reply_ack" and original.reply_outcome == "approved":
             body = "Your approval was recorded for this proposal."
         elif (
             delivery.event_type == "reply_ack" and original.reply_outcome == "correction_requested"
         ):
             body = "Your correction was recorded. The proposal has been set aside for revision."
+        elif (
+            delivery.event_type == "reply_ack"
+            and original.reply_outcome == "clarification_answered"
+        ):
+            body = "Your answer was recorded in the review."
+        elif (
+            delivery.event_type == "reply_ack"
+            and original.reply_outcome == "clarification_deferred"
+        ):
+            body = "The clarification was set aside. You can resume it in the full review."
         else:
             raise ConflictError("This response has been superseded.")
         message.set_content(body + "\n\nFull review: " + review_url)
         return message
     if (
-        delivery.event_type != "proposal"
+        delivery.event_type not in _REVIEW_ITEMS
         or not delivery.change_set_id
-        or not delivery.operation_id
-        or not delivery.operation_revision
         or not delivery.reply_expires_at
         or delivery.reply_expires_at <= utc_now()
         or delivery.replied_at is not None
@@ -147,13 +213,26 @@ def build_reviewer_message(
         raise ConflictError("This delivery is no longer awaiting review.")
     actor = _mailbox_owner(session, delivery)
     draft = api.get_graph_change_set(delivery.change_set_id)
-    proposal = require_current_proposal(
-        api.graph_drafts.review, draft, delivery.operation_id, delivery.operation_revision, actor
-    )
+    item = _current_review_item(api, delivery, draft, actor)
     project = api.projects.get_project(draft.project_id)
     message = _thread_headers(delivery, settings, original_id=delivery.delivery_id)
     message["Subject"] = _subject(delivery)
 
+    if isinstance(item, str):
+        message.set_content(
+            "\n\n".join(
+                (
+                    project.name,
+                    item,
+                    _CLARIFICATION_INSTRUCTIONS,
+                    f"Reply by {delivery.reply_expires_at:%Y-%m-%d %H:%M UTC}.",
+                    f"Full review: {review_url}",
+                )
+            )
+        )
+        return message
+
+    proposal = item
     lines = ["Revised proposal", project.name] if delivery.parent_delivery_id else [project.name]
     lines.extend(proposal_detail_lines(draft, proposal, api.questions.repository))
     if proposal.rationale:
@@ -208,11 +287,9 @@ def receive_proposal_reply(
         with api.graph_drafts.review.application_transaction():
             delivery = api.review_emails.get(delivery_id)
             if (
-                delivery.event_type != "proposal"
+                delivery.event_type not in _REVIEW_ITEMS
                 or sender_email != delivery.destination_email
-                or not delivery.operation_id
                 or not delivery.change_set_id
-                or not delivery.operation_revision
             ):
                 raise AuthError("This reply does not match the delivery.")
             if (
@@ -231,27 +308,24 @@ def receive_proposal_reply(
             # current consent and permissions after that reservation on all backends.
             actor = _mailbox_owner(session, delivery)
             now = utc_now()
+            item = _current_review_item(api, delivery, draft, actor)
             try:
                 # The ordinary editor can save validation diagnostics before it
                 # declines an approval. Keep those writes out of a rejected reply.
                 with api.graph_drafts.review.repository.savepoint():
-                    command = parse_review_reply(reply_text)
-                    outcome = apply_proposal_email_decision(
-                        api.graph_drafts.review,
-                        change_set_id=delivery.change_set_id,
-                        operation_id=delivery.operation_id,
-                        expected_revision=delivery.operation_revision,
-                        actor=actor,
-                        command=command,
-                    )
+                    if isinstance(item, str):
+                        outcome = _answer_clarification(api, draft, item, reply_text, actor)
+                    else:
+                        assert delivery.operation_revision is not None
+                        outcome = apply_proposal_email_decision(
+                            api.graph_drafts.review,
+                            change_set_id=delivery.change_set_id,
+                            operation_id=item.operation_id,
+                            expected_revision=delivery.operation_revision,
+                            actor=actor,
+                            command=parse_review_reply(reply_text),
+                        )
             except ValidationError:
-                require_current_proposal(
-                    api.graph_drafts.review,
-                    draft,
-                    delivery.operation_id,
-                    delivery.operation_revision,
-                    actor,
-                )
                 api.review_emails.enqueue_response(delivery, "reply_help")
                 return "ignored"
             # Consumption, audit and any resulting email share the draft transaction.

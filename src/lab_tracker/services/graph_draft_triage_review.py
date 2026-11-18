@@ -10,6 +10,7 @@ from lab_tracker.errors import ValidationError
 from lab_tracker.graph_draft_triage import (
     TRIAGE_CLARIFICATIONS_KEY,
     clarification_id,
+    clarification_reviews,
     review_triage,
 )
 from lab_tracker.models import (
@@ -147,8 +148,12 @@ def decide_graph_draft_clarification(
             raise ValidationError("Unknown clarification decision.")
         if decision == "answered" and not (answer and answer.strip()):
             raise ValidationError("An answer must not be blank.")
-        answers = dict(change_set.review_metadata.get(TRIAGE_CLARIFICATIONS_KEY, {}))
-        answers[clarification_id(question)] = {
+        answers = dict(clarification_reviews(change_set))
+        key = clarification_id(question)
+        previous_status = (answers.get(key) or {}).get("status")
+        if decision == "resume" and previous_status == "resume":
+            return change_set
+        answers[key] = {
             "status": decision,
             "answer": answer.strip() if answer else "",
             "reviewed_at": utc_now().isoformat(),
@@ -164,4 +169,6 @@ def decide_graph_draft_clarification(
         }
         change_set.updated_at = utc_now()
         review.records.save_graph_change_set(change_set)
+        if decision == "resume" and review.review_email_outbox is not None:
+            review.review_email_outbox.enqueue_ready_review(change_set)
         return change_set

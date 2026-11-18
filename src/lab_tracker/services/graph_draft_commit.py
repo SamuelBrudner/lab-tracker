@@ -38,6 +38,7 @@ from lab_tracker.models import (
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.graph_draft_context import EntityResult
 from lab_tracker.services.graph_draft_context import entity_id as graph_entity_id
+from lab_tracker.services.graph_draft_generation_ports import ReviewEmailEnqueuer
 
 # Review-audit keys that survive a commit. Validation messages and any other
 # transient review state are cleared when an operation is APPLIED, but the
@@ -149,6 +150,7 @@ class TransactionalDraftCommitCoordinator(BaseService):
         datasets: CommitDatasets,
         goals: CommitGoals,
         authorization: CommitAuthorization,
+        review_email_outbox: ReviewEmailEnqueuer | None = None,
     ) -> None:
         super().__init__(context)
         self.records = records
@@ -158,6 +160,7 @@ class TransactionalDraftCommitCoordinator(BaseService):
         self.datasets = datasets
         self.goals = goals
         self.authorization = authorization
+        self.review_email_outbox = review_email_outbox
 
     @property
     def commit_repository(self) -> CommitRepository:
@@ -275,6 +278,8 @@ class TransactionalDraftCommitCoordinator(BaseService):
             followup = carryover_triage(change_set, ref_map)
             if followup is not None:
                 self.records.save_graph_change_set(followup)
+                if self.review_email_outbox is not None:
+                    self.review_email_outbox.enqueue_ready_review(followup)
                 change_set.review_metadata = {
                     **change_set.review_metadata,
                     "review_triage_carryover_to": str(followup.change_set_id),

@@ -1330,6 +1330,22 @@ def test_drafting_pass_leaves_clarification_requests_for_a_person(
     assert operations["request_clarification"]["status"] == "proposed"
 
 
+def test_delegated_pass_keeps_standalone_clarification_open(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    project_id, note_id, question_id = _linked_setup(client, admin_auth_headers)
+    _grant(client, admin_auth_headers, project_id, "full")
+    question = "Which question was the rig used to address?"
+    patch = _patch(_link_op(note_id, question_id))
+    patch["clarification_requests"] = [question]
+
+    draft = _note_draft(client, admin_auth_headers, note_id, patch)
+
+    assert draft["status"] == "ready"
+    assert draft["clarification_requests"] == [question]
+    assert draft["operations"][0]["status"] == "accepted"
+
+
 def test_drafting_pass_commits_a_batch_whose_only_extra_is_a_capture_setup_tip(
     client: TestClient, admin_auth_headers: dict[str, str]
 ) -> None:

@@ -49,6 +49,7 @@ from lab_tracker.provider_error_redaction import provider_error_message
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.graph_draft_delegation import AcceptanceStamp, DelegatedCurationGrant
 from lab_tracker.services.graph_draft_generation import GeneratedDraftProposal
+from lab_tracker.services.graph_draft_generation_ports import ReviewEmailEnqueuer
 from lab_tracker.services.graph_draft_review_decisions import (
     apply_deferral,
     ensure_non_interactive_only_accepts,
@@ -192,12 +193,14 @@ class GraphDraftReviewCoordinator(BaseService):
         generation: RevisionGenerator,
         patch_validator: ReviewPatchValidator,
         authorization: ReviewAuthorization,
+        review_email_outbox: ReviewEmailEnqueuer | None = None,
     ) -> None:
         super().__init__(context)
         self.records = records
         self.generation = generation
         self.patch_validator = patch_validator
         self.authorization = authorization
+        self.review_email_outbox = review_email_outbox
 
     @property
     def user_reader(self) -> UserExistenceReader:

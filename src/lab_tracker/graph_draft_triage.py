@@ -86,6 +86,35 @@ def clarification_id(question: str) -> str:
     return "clarification-" + sha256(question.encode()).hexdigest()[:20]
 
 
+def clarification_reviews(change_set: GraphChangeSet) -> dict[str, Any]:
+    answers = change_set.review_metadata.get(TRIAGE_CLARIFICATIONS_KEY, {})
+    return answers if isinstance(answers, dict) else {}
+
+
+def unanswered_clarifications(change_set: GraphChangeSet) -> list[str]:
+    if change_set.review_metadata.get("review_triage_carryover_to"):
+        return []
+    answers = clarification_reviews(change_set)
+    return [
+        question for question in dict.fromkeys(change_set.clarification_requests)
+        if (answers.get(clarification_id(question)) or {}).get("status") != "answered"
+    ]
+
+
+def pending_clarifications(change_set: GraphChangeSet) -> dict[str, str]:
+    """Map unresolved clarification revisions to their original prompt."""
+    answers = clarification_reviews(change_set)
+    pending = {}
+    for question in unanswered_clarifications(change_set):
+        saved = answers.get(clarification_id(question)) or {}
+        if saved.get("status") == "deferred":
+            continue
+        # Resume creates a distinct review opportunity after a prior decision.
+        revision = sha256(json.dumps([question, saved], sort_keys=True).encode()).hexdigest()
+        pending[revision] = question
+    return pending
+
+
 def review_triage(change_set: GraphChangeSet) -> dict[str, Any]:
     """Return stable dependency groups and counts from the current operations."""
     operations = sorted(change_set.operations, key=lambda op: (op.sequence, str(op.operation_id)))
@@ -253,17 +282,12 @@ def carryover_triage(
     change_set: GraphChangeSet, resolved_refs: dict[str, UUID]
 ) -> GraphChangeSet | None:
     """Preserve unfinished triage after a partial commit, inside its transaction."""
-    if not change_set.review_metadata.get("review_triage_used"):
-        return None
-    proposed = [
-        op for op in change_set.operations if op.status == GraphChangeOperationStatus.PROPOSED
-    ]
-    answers = change_set.review_metadata.get(TRIAGE_CLARIFICATIONS_KEY, {})
-    questions = [
-        question
-        for question in change_set.clarification_requests
-        if answers.get(clarification_id(question), {}).get("status") != "answered"
-    ]
+    proposed = []
+    if change_set.review_metadata.get("review_triage_used"):
+        proposed = [
+            op for op in change_set.operations if op.status == GraphChangeOperationStatus.PROPOSED
+        ]
+    questions = unanswered_clarifications(change_set)
     if not proposed and not questions:
         return None
 

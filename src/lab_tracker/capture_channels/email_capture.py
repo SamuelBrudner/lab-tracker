@@ -486,6 +486,17 @@ class CaptureApi(Protocol):
     def upload_note_raw_result(self, *args: Any, **kwargs: Any) -> Any: ...
 
 
+REVIEW_REPLY_OUTCOMES = frozenset(
+    {
+        "approved",
+        "corrected",
+        "correction_requested",
+        "clarification_answered",
+        "clarification_deferred",
+    }
+)
+
+
 @dataclass
 class MessageOutcome:
     """What happened to one message; ``processed`` messages are flagged in IMAP."""
@@ -496,13 +507,10 @@ class MessageOutcome:
 
     @property
     def processed(self) -> bool:
-        return self.status in {
+        return self.status in REVIEW_REPLY_OUTCOMES or self.status in {
             "stored",
             "duplicate",
             "rejected",
-            "approved",
-            "corrected",
-            "correction_requested",
         }
 
 
@@ -818,7 +826,7 @@ def _tally(result: EmailPollResult, outcome: MessageOutcome) -> None:
         result.rejected += 1
         reasons = result.rejection_reasons
         reasons[outcome.reason] = reasons.get(outcome.reason, 0) + 1
-    elif outcome.status in {"approved", "corrected", "correction_requested"}:
+    elif outcome.status in REVIEW_REPLY_OUTCOMES:
         result.reviews[outcome.status] = result.reviews.get(outcome.status, 0) + 1
     else:
         result.failed += 1

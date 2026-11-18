@@ -9,6 +9,7 @@ from email.utils import quote
 
 from lab_tracker.capture_channels.email_capture import (
     MAX_BODY_SCAN_CHARS,
+    REVIEW_REPLY_OUTCOMES,
     MessageOutcome,
     ParsedEmail,
     recipient_addresses,
@@ -80,7 +81,7 @@ def route_review_reply(
     decision = receive(token, sender, text)
     if decision == "ignored":
         return MessageOutcome("rejected", "review_ignored")
-    if decision not in {"approved", "corrected", "correction_requested"}:
+    if decision not in REVIEW_REPLY_OUTCOMES:
         raise ValueError("Unexpected proposal review outcome.")
     return MessageOutcome(decision)
 

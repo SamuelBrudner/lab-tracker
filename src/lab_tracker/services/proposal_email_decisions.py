@@ -66,8 +66,8 @@ class EmailReviewCommand:
     text: str = ""
 
 
-def parse_review_reply(text: str) -> EmailReviewCommand:
-    """Parse only the scientist's new, unquoted text supplied by the mail adapter."""
+def reply_line(text: str) -> str:
+    """Require one line of author-written reply text."""
     line = text.strip()
     if (
         not line
@@ -76,6 +76,12 @@ def parse_review_reply(text: str) -> EmailReviewCommand:
         or any(ord(char) < 32 and char != "\t" for char in line)
     ):
         raise ValidationError("Reply with one line of up to 4000 characters.")
+    return line
+
+
+def parse_review_reply(text: str) -> EmailReviewCommand:
+    """Parse only the scientist's new, unquoted text supplied by the mail adapter."""
+    line = reply_line(text)
     if line.lower() == "approve":
         return EmailReviewCommand("approve")
     match = _CORRECTION.fullmatch(line)
@@ -100,18 +106,13 @@ def operation_fingerprint(operation: GraphChangeOperation) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def require_current_proposal(
-    review: GraphDraftReviewCoordinator,
-    draft: GraphChangeSet,
-    operation_id: UUID,
-    expected_revision: str,
-    actor: AuthContext,
-) -> GraphChangeOperation:
-    """Authorize delivery or review of this precise version to the assigned scientist."""
+def require_assigned_email_review(
+    review: GraphDraftReviewCoordinator, draft: GraphChangeSet, actor: AuthContext
+) -> None:
     if actor.principal_type != PrincipalType.USER:
         raise PermissionDeniedError("Email review requires the verified mailbox owner.")
     if draft.review_assignee_user_id != actor.user_id:
-        raise PermissionDeniedError("This proposal is no longer assigned to this reviewer.")
+        raise PermissionDeniedError("This draft is no longer assigned to this reviewer.")
     review.authorization.require_contributor(draft.project_id, actor=actor)
     if (
         draft.draft_mode != GraphDraftMode.GRAPH_BATCH
@@ -120,6 +121,17 @@ def require_current_proposal(
         or draft.review_metadata.get("review_triage_carryover_to")
     ):
         raise ConflictError("This draft is no longer awaiting email review.")
+
+
+def require_current_proposal(
+    review: GraphDraftReviewCoordinator,
+    draft: GraphChangeSet,
+    operation_id: UUID,
+    expected_revision: str,
+    actor: AuthContext,
+) -> GraphChangeOperation:
+    """Authorize delivery or review of this precise version to the assigned scientist."""
+    require_assigned_email_review(review, draft, actor)
     operation = review._find_graph_operation(draft, operation_id)
     if (
         operation.status != GraphChangeOperationStatus.PROPOSED

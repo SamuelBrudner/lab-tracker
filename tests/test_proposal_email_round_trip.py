@@ -14,6 +14,7 @@ from test_server_capture_channels import FakeImap, _poll_email
 from lab_tracker.app_parts.runtime import _background_api, _process_one_review_email
 from lab_tracker.auth import AuthContext, Role
 from lab_tracker.db_models import ReviewEmailOutboxModel
+from lab_tracker.graph_draft_triage import TRIAGE_CLARIFICATIONS_KEY, clarification_id
 from lab_tracker.models import GraphChangeOperationStatus, utc_now
 
 SCIENTIST = "researcher@example.edu"
@@ -29,10 +30,17 @@ SCIENTIST = "researcher@example.edu"
         ),
     ]
 )
-def assigned_mail(request):
+def mail_client(request):
     client_fixture, admin_fixture = request.param
-    client = request.getfixturevalue(client_fixture)
-    admin_auth_headers = request.getfixturevalue(admin_fixture)
+    return request.getfixturevalue(client_fixture), request.getfixturevalue(admin_fixture)
+
+
+@pytest.fixture
+def assigned_mail(mail_client):
+    return _prepare_assigned_mail(*mail_client, draft_client_factory=_BatchDraftClient)
+
+
+def _prepare_assigned_mail(client, admin_auth_headers, *, draft_client_factory):
     state = client.app.state
     settings = state.settings
     settings.review_email_enabled = True
@@ -71,17 +79,20 @@ def assigned_mail(request):
         api = _background_api(client.app, session)
         run = api.run_graph_draft_batch_for_project(
             UUID(project_id),
-            draft_client=_BatchDraftClient(project_id),
+            draft_client=draft_client_factory(project_id),
             actor=AuthContext(user_id=user_id, role=Role.EDITOR),
         )
         assert run.change_set_id
         draft = api.get_graph_change_set(run.change_set_id)
         invitations = api.review_emails.list()
-        assert {d.operation_id for d in invitations} == {op.operation_id for op in draft.operations}
+        assert {d.operation_id for d in invitations if d.event_type == "proposal"} == {
+            op.operation_id for op in draft.operations
+        }
         assert all(d.destination_email == SCIENTIST for d in invitations)
         api.review_emails.enqueue_ready_review(draft)
         assert len(api.review_emails.list()) == len(invitations)
-    return client, headers, draft.change_set_id, draft.operations[0].operation_id
+    first_operation = draft.operations[0].operation_id if draft.operations else None
+    return client, headers, draft.change_set_id, first_operation
 
 
 def _send(client):
@@ -196,3 +207,120 @@ def test_revoking_before_dispatch_cancels_queued_proposals(assigned_mail):
     client, headers, _, _ = assigned_mail
     assert client.delete("/auth/review-mailbox", headers=headers).status_code == 200
     assert _send(client) == []
+
+
+_INTENT = "Which question was today's recording intended to address?"
+_PLACEMENT = "Which rig was used for today's recording?"
+
+
+class _ClarificationOnlyClient(_BatchDraftClient):
+    def draft_from_batch(self, **kwargs):
+        return {
+            "summary": "Clarification needed before making a proposal.",
+            "uncertain_fields": [],
+            "clarification_requests": [_INTENT, _PLACEMENT, _INTENT],
+            "operations": [],
+        }
+
+
+@pytest.fixture
+def clarification_mail(mail_client):
+    client, headers, draft_id, operation_id = _prepare_assigned_mail(
+        *mail_client, draft_client_factory=_ClarificationOnlyClient
+    )
+    assert operation_id is None
+    messages = _send(client)
+    assert len(messages) == 2
+    return (
+        client,
+        headers,
+        draft_id,
+        {
+            prompt: next(message for message in messages if prompt in message.get_content())
+            for prompt in (_INTENT, _PLACEMENT)
+        },
+    )
+
+
+def test_clarification_only_batch_answers_and_defers_from_inbox(clarification_mail):
+    client, _, draft_id, prompts = clarification_mail
+    intent = prompts[_INTENT]
+    assert _reply(client, intent, "Approve")["rejected"] == 1
+    [help_email] = _send(client)
+    assert "Reply with Answer:" in help_email.get_content()
+    assert (
+        _reply(client, intent, "Answer: Calibration", sender="another@example.edu")["rejected"] == 1
+    )
+    assert _reply(client, intent, "Answer: Calibration")["reviews_clarification_answered"] == 1
+    assert _reply(client, intent, "Answer: Assess recovery")["rejected"] == 1
+    assert _reply(client, prompts[_PLACEMENT], "Later")["reviews_clarification_deferred"] == 1
+    receipts = _send(client)
+    assert {message["In-Reply-To"] for message in receipts} == {
+        message["Message-ID"] for message in prompts.values()
+    }
+    with client.app.state.db_session_factory() as session:
+        draft = _background_api(client.app, session).get_graph_change_set(draft_id)
+        answers = draft.review_metadata[TRIAGE_CLARIFICATIONS_KEY]
+        assert answers[clarification_id(_INTENT)]["answer"] == "Calibration"
+        assert answers[clarification_id(_INTENT)]["reviewed_by"] == str(
+            draft.review_assignee_user_id
+        )
+        assert answers[clarification_id(_PLACEMENT)]["status"] == "deferred"
+        assert draft.operations == []
+
+
+def test_mail_cannot_override_web_answer_or_resume(clarification_mail):
+    client, headers, draft_id, prompts = clarification_mail
+    endpoint = f"/graph-drafts/{draft_id}/triage-clarification"
+    answer = client.post(
+        endpoint,
+        headers=headers,
+        json={"question": _INTENT, "decision": "answered", "answer": "Q2"},
+    )
+    assert answer.status_code == 200, answer.text
+    assert _reply(client, prompts[_INTENT], "Answer: Q3")["rejected"] == 1
+    resumed = client.post(
+        endpoint, headers=headers, json={"question": _INTENT, "decision": "resume"}
+    )
+    assert resumed.status_code == 200, resumed.text
+    assert _reply(client, prompts[_INTENT], "Answer: Q3")["rejected"] == 1
+    [new_prompt] = _send(client)
+    assert _INTENT in new_prompt.get_content()
+    assert new_prompt["Reply-To"] != prompts[_INTENT]["Reply-To"]
+    assert _reply(client, new_prompt, "Answer: Q2")["reviews_clarification_answered"] == 1
+
+
+class _ProposalAndClarificationClient(_BatchDraftClient):
+    def draft_from_batch(self, **kwargs):
+        result = super().draft_from_batch(**kwargs)
+        result["clarification_requests"] = [_INTENT]
+        return result
+
+
+def test_partial_commit_carries_unanswered_clarification_to_new_mail(mail_client):
+    client, _, draft_id, _ = _prepare_assigned_mail(
+        *mail_client, draft_client_factory=_ProposalAndClarificationClient
+    )
+    sent = _send(client)
+    question = next(message for message in sent if _INTENT in message.get_content())
+    proposal = next(
+        message for message in sent if "Private proposed question" in message.get_content()
+    )
+    assert _reply(client, proposal, "Approve")["reviews_approved"] == 1
+    response = client.post(
+        f"/graph-drafts/{draft_id}/commit",
+        headers=mail_client[1],
+        json={"message": "Keep the approved proposal"},
+    )
+    assert response.status_code == 200, response.text
+    carryover_id = response.json()["data"]["review_metadata"]["review_triage_carryover_to"]
+    assert _reply(client, question, "Answer: Calibration")["rejected"] == 1
+    [new_prompt] = [mail for mail in _send(client) if _INTENT in mail.get_content()]
+    assert new_prompt["Reply-To"] != question["Reply-To"]
+    assert _reply(client, new_prompt, "Answer: Calibration")["reviews_clarification_answered"] == 1
+    with client.app.state.db_session_factory() as session:
+        draft = _background_api(client.app, session).get_graph_change_set(UUID(carryover_id))
+        assert (
+            draft.review_metadata[TRIAGE_CLARIFICATIONS_KEY][clarification_id(_INTENT)]["answer"]
+            == "Calibration"
+        )

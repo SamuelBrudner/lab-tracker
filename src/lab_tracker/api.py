@@ -332,6 +332,7 @@ class LabTrackerAPI(
             generation=graph_draft_generation,
             patch_validator=graph_patch_validator,
             authorization=self.project_authorization,
+            review_email_outbox=self.review_emails,
         )
         graph_draft_commit = TransactionalDraftCommitCoordinator(
             context,
@@ -342,6 +343,7 @@ class LabTrackerAPI(
             datasets=self.datasets,
             goals=self.goals,
             authorization=self.project_authorization,
+            review_email_outbox=self.review_emails,
         )
         graph_draft_delegation = DelegatedCurationCoordinator(
             context,

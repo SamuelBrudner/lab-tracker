@@ -33,6 +33,7 @@ from lab_tracker.auth import (
     Role,
 )
 from lab_tracker.errors import AuthError, PermissionDeniedError, ValidationError
+from lab_tracker.graph_draft_triage import unanswered_clarifications
 from lab_tracker.models import (
     DEFERRED_AT_KEY,
     EDITED_AT_KEY,
@@ -362,6 +363,8 @@ class DelegatedCurationGate(BaseService):
                 f"{action} under delegated curation requires every proposal to be "
                 f"decided; {undecided} still need a person's review."
             )
+        if unanswered_clarifications(change_set):
+            raise PermissionDeniedError("A person needs to review the outstanding clarifications.")
         return _person_of_record(actor, grant)
 
 
@@ -490,7 +493,7 @@ class DelegatedCurationCoordinator(BaseService):
             if key != DELEGATED_CURATION_ERROR_KEY
         }
         self.records.save_graph_change_set(change_set)
-        if not accepted or undecided:
+        if not accepted or undecided or unanswered_clarifications(change_set):
             return change_set
         committed = self.commit.commit_graph_change_set(
             change_set_id,
@@ -536,6 +539,8 @@ def is_fresh_draft(change_set: GraphChangeSet) -> bool:
     if change_set.status != GraphChangeSetStatus.READY:
         return False
     if change_set.purpose == GraphDraftPurpose.MEMBER_CHECKPOINT_ALIGNMENT:
+        return False
+    if change_set.review_metadata.get("review_triage_used"):
         return False
     if DELEGATED_CURATION_PACKET_KEY in change_set.context_packet:
         return False

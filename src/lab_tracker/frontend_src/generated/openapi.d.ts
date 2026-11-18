@@ -1310,7 +1310,7 @@ export interface components {
       "created_at"?: string;
       "delivery_id": string;
       "destination_email": string;
-      "event_type"?: "review_ready" | "test" | "proposal" | "reply_ack" | "reply_help";
+      "event_type"?: "review_ready" | "test" | "proposal" | "clarification" | "reply_ack" | "reply_help";
       "idempotency_key": string;
       "last_error"?: (string | null);
       "lease_expires_at"?: (string | null);

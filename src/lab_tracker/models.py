@@ -983,7 +983,9 @@ class GraphDraftBatchSettings(_DomainModel):
     updated_by: str | None = None
 
 
-ReviewEmailEventType = Literal["review_ready", "test", "proposal", "reply_ack", "reply_help"]
+ReviewEmailEventType = Literal[
+    "review_ready", "test", "proposal", "clarification", "reply_ack", "reply_help"
+]
 
 
 class ReviewEmailDelivery(_DomainModel):
@@ -996,6 +998,7 @@ class ReviewEmailDelivery(_DomainModel):
     operation_id: UUID | None = None
     parent_delivery_id: UUID | None = None
     operation_revision: str | None = Field(default=None, exclude=True)
+    clarification_revision: str | None = Field(default=None, exclude=True)
     reply_expires_at: datetime | None = None
     replied_at: datetime | None = None
     reply_outcome: str | None = None

@@ -29,6 +29,14 @@ Each reply address belongs to one version and accepts one decision. A reply to a
 older copy cannot approve a newer edit. Use the review link to inspect the full
 draft if its assignment, version, or deadline has changed.
 
+## Answer a clarification
+
+If the bucket needs more information, it can email a question on its own.
+Reply with one line such as `Answer: I was checking rig calibration` or
+`Answer: The recovery question`. Lab Tracker saves your answer in the draft's
+review. Reply `Later` to defer the question. Resuming it in the Batches page
+sends a fresh reply address.
+
 ## Server setup
 
 Use the SMTP transport and configure a distinct plus-addressed reply mailbox.
