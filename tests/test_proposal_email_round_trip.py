@@ -40,7 +40,9 @@ def assigned_mail(mail_client):
     return _prepare_assigned_mail(*mail_client, draft_client_factory=_BatchDraftClient)
 
 
-def _prepare_assigned_mail(client, admin_auth_headers, *, draft_client_factory):
+def _prepare_assigned_mail(
+    client, admin_auth_headers, *, draft_client_factory, bench_session=False
+):
     state = client.app.state
     settings = state.settings
     settings.review_email_enabled = True
@@ -65,16 +67,43 @@ def _prepare_assigned_mail(client, admin_auth_headers, *, draft_client_factory):
         _confirm(client, headers, provider.send_verification_code.call_args.args[1]).status_code
         == 200
     )
-    note = client.post(
-        "/notes",
-        headers=headers,
-        json={
-            "project_id": project_id,
-            "raw_content": "Recorded during today's session",
-            "status": "staged",
-        },
-    )
-    assert note.status_code == 201
+    targets = []
+    if bench_session:
+        response = client.post(
+            "/sessions",
+            headers=headers,
+            json={
+                "project_id": project_id,
+                "session_type": "operational",
+            },
+        )
+        assert response.status_code == 201, response.text
+        targets.append(
+            {"entity_type": "session", "entity_id": response.json()["data"]["session_id"]}
+        )
+        question = client.post(
+            "/questions",
+            headers=admin_auth_headers,
+            json={
+                "project_id": project_id,
+                "text": "Does recovery change with trial number?",
+                "question_type": "descriptive",
+                "status": "active",
+            },
+        )
+        assert question.status_code == 201, question.text
+    for index in range(2 if bench_session else 1):
+        note = client.post(
+            "/notes",
+            headers=headers,
+            json={
+                "project_id": project_id,
+                "raw_content": f"Recorded during today's session ({index})",
+                "status": "staged",
+                "targets": targets,
+            },
+        )
+        assert note.status_code == 201, note.text
     with state.db_session_factory() as session:
         api = _background_api(client.app, session)
         run = api.run_graph_draft_batch_for_project(
@@ -324,3 +353,79 @@ def test_partial_commit_carries_unanswered_clarification_to_new_mail(mail_client
             draft.review_metadata[TRIAGE_CLARIFICATIONS_KEY][clarification_id(_INTENT)]["answer"]
             == "Calibration"
         )
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [("Question 1", "question"), ("Calibration", "calibration"), ("Exploratory", "exploratory")],
+)
+def test_session_intent_is_confirmed_once_from_the_verified_inbox(mail_client, answer, expected):
+    client, headers, draft_id, _ = _prepare_assigned_mail(
+        *mail_client, draft_client_factory=_ClarificationOnlyClient, bench_session=True
+    )
+    [prompt] = [
+        message for message in _send(client) if "Which question, if any" in message.get_content()
+    ]
+    assert "Question 1. Does recovery change" in prompt.get_content()
+    assert _reply(client, prompt, f"Answer: {answer}")["reviews_clarification_answered"] == 1
+    with client.app.state.db_session_factory() as session:
+        api = _background_api(client.app, session)
+        draft = api.get_graph_change_set(draft_id)
+        packets = draft.review_metadata["work_intent_prompts"]
+        assert len(packets) == 1
+        session_id = next(iter(packets.values()))["session_id"]
+    read = client.get(f"/work-intent/session/{session_id}", headers=headers)
+    assert read.status_code == 200, read.text
+    intent = read.json()["data"]["intent"]
+    assert intent["kind"] == expected
+    assert intent["source"] == "confirmed_in_review"
+    assert intent["recorded_by_user_id"] == str(draft.review_assignee_user_id)
+    assert intent["review_draft_id"] == str(draft_id)
+    assert bool(intent["question_id"]) == (expected == "question")
+    assert _reply(client, prompt, "Answer: Maintenance")["rejected"] == 1
+    with client.app.state.db_session_factory() as session:
+        api = _background_api(client.app, session)
+        capture = api.get_note(draft.source_note_ids[0])
+        packet = api.build_batch_graph_context([capture])
+        item = packet["batch_notes"][0]
+        assert item["work_intent"]["kind"] == expected
+        assert item["work_intent"]["source"] == "confirmed_in_review"
+        assert item["work_intent"]["work_id"] == session_id
+
+
+def test_later_capture_does_not_repeat_a_pending_session_purpose_prompt(mail_client):
+    client, headers, draft_id, _ = _prepare_assigned_mail(
+        *mail_client, draft_client_factory=_ClarificationOnlyClient, bench_session=True
+    )
+    [orig] = [
+        message for message in _send(client) if "Which question, if any" in message.get_content()
+    ]
+    with client.app.state.db_session_factory() as session:
+        draft = _background_api(client.app, session).get_graph_change_set(draft_id)
+        session_id = next(iter(draft.review_metadata["work_intent_prompts"].values()))["session_id"]
+    capture = client.post(
+        "/notes",
+        headers=headers,
+        json={
+            "project_id": str(draft.project_id),
+            "status": "staged",
+            "raw_content": "Additional recording from the same bench session",
+            "targets": [{"entity_type": "session", "entity_id": session_id}],
+        },
+    )
+    assert capture.status_code == 201, capture.text
+    with client.app.state.db_session_factory() as session:
+        api = _background_api(client.app, session)
+        assert draft.review_assignee_user_id is not None
+        run = api.run_graph_draft_batch_for_project(
+            draft.project_id,
+            actor=AuthContext(draft.review_assignee_user_id, Role.EDITOR),
+            draft_client=_ClarificationOnlyClient(str(draft.project_id)),
+        )
+        assert run.change_set_id and run.change_set_id != draft_id
+        followup = api.get_graph_change_set(run.change_set_id)
+        assert "work_intent_prompts" not in followup.review_metadata
+    assert not [
+        message for message in _send(client) if "Which question, if any" in message.get_content()
+    ]
+    assert _reply(client, orig, "Answer: Calibration")["reviews_clarification_answered"] == 1

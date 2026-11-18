@@ -39,6 +39,7 @@ from lab_tracker.services.shared import (
     actor_user_id,
     ensure_non_empty,
 )
+from lab_tracker.work_intent import WorkIntent
 
 if TYPE_CHECKING:
     from lab_tracker.services.dataset_service import DatasetService
@@ -119,6 +120,7 @@ class SessionService(BaseService):
                 raise ValidationError("Scientific sessions require a primary question.")
         elif session_type == SessionType.OPERATIONAL and primary_question_id is not None:
             raise ValidationError("Operational sessions cannot have a primary question.")
+        question = None
         if primary_question_id is not None:
             question = self.questions.get_question(primary_question_id)
             if question.project_id != project_id:
@@ -142,6 +144,26 @@ class SessionService(BaseService):
         )
         with self.unit_of_work() as repository:
             repository.sessions.save(session)
+            if (
+                question is not None
+                and origin == EntityOrigin.USER
+                and change_set_id is None
+                and actor is not None
+                and actor.is_interactive
+            ):
+                repository.work_intents.save(
+                    WorkIntent(
+                        scope="session",
+                        work_id=session.session_id,
+                        kind="question",
+                        question_id=question.question_id,
+                        question_text=question.text,
+                        recorded_by_user_id=session.created_by_user_id,
+                        recorded_at=now,
+                        source="declared",
+                    ),
+                    replace_existing=False,
+                )
         return session
 
     def get_session(self, session_id: UUID) -> Session:

@@ -80,6 +80,7 @@ from lab_tracker.services import (
     VisualizationService,
 )
 from lab_tracker.services.graph_draft_batch_policy import DraftingHostFacts
+from lab_tracker.services.work_intent import WorkIntentService
 from lab_tracker.store_authority_registry import StoreAuthorityRegistry
 
 _logger = logging.getLogger(__name__)
@@ -176,6 +177,7 @@ class LabTrackerAPI(
             sessions_provider=lambda: self.sessions,
             authorization=self.project_authorization,
         )
+        self.work_intents = WorkIntentService(context, authorization=self.project_authorization)
         self.sessions: SessionService = SessionService(
             context,
             projects=self.projects,
@@ -333,6 +335,7 @@ class LabTrackerAPI(
             patch_validator=graph_patch_validator,
             authorization=self.project_authorization,
             review_email_outbox=self.review_emails,
+            work_intents=self.work_intents,
         )
         graph_draft_commit = TransactionalDraftCommitCoordinator(
             context,

@@ -270,7 +270,7 @@ def test_graph_patch_response_schema_requires_non_empty_source_note_ids() -> Non
 
 def test_graph_draft_prompt_versions_and_source_ref_contract_are_updated() -> None:
     assert PROMPT_VERSION == "multimodal-graph-draft-v5"
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v12"
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v13"
     assert ANALYSIS_PROMPT_VERSION == "analysis-graph-draft-v5"
     for instructions in (_instructions(), _batch_instructions(), _analysis_instructions()):
         assert "source_note_ids" in instructions
@@ -579,7 +579,7 @@ def test_batch_instructions_ask_the_drafter_to_pick_and_explain_capture_setup() 
     assert (
         unplaced
         < instructions.index(RESPONSE_FIELD)
-        < instructions.index("Each note's targets are anchors")
+        < instructions.index("When a work_intent is present")
     )
     for other in (_instructions(), _analysis_instructions()):
         for marker in _CAPTURE_SETUP_MARKERS:
@@ -1182,7 +1182,7 @@ def test_batch_instructions_are_narrative_first_with_terse_capture_guardrail() -
     assert "observed_at_source" in instructions
     assert "still raise clarification_requests" in instructions
     # The summary contract changed (now a narrative), so the version bumps.
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v12"
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v13"
 
 
 @pytest.mark.parametrize(
@@ -1308,7 +1308,7 @@ def test_batch_instructions_carry_review_memory_guidance() -> None:
     assert pending_sentence in instructions
     assert "review_memory.recent_rejections" in instructions
     assert rejection_sentence in instructions
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v12"
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v13"
 
     batch_context = {
         "batch_notes": [{"note_id": "source-1", "raw_content": "Observed result"}],
@@ -1673,7 +1673,7 @@ def test_prompt_instructions_and_response_schema_include_resolve_prediction() ->
     assert contract["when_rejected_required_fields"] == ["terminal_reason"]
     # All draft prompts now include the opening-context contract.
     assert PROMPT_VERSION == "multimodal-graph-draft-v5"
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v12"
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v13"
     assert ANALYSIS_PROMPT_VERSION == "analysis-graph-draft-v5"
 
 

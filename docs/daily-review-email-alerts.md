@@ -37,6 +37,14 @@ Reply with one line such as `Answer: I was checking rig calibration` or
 review. Reply `Later` to defer the question. Resuming it in the Batches page
 sends a fresh reply address.
 
+When captures explicitly name a bench session with no recorded purpose, the
+review asks once for that session. Replies such as `Answer: Question 1`,
+`Answer: Calibration`, and `Answer: Exploratory` record the scientist's stated
+purpose. The **Work purpose** panel on a session or capture shows the
+declaration or review confirmation and its date. Choosing a primary question
+when starting a scientific session records a declaration. Scientists can also
+record purpose directly from that panel.
+
 ## Server setup
 
 Use the SMTP transport and configure a distinct plus-addressed reply mailbox.

@@ -55,6 +55,7 @@ from lab_tracker.models import (
     Visualization,
 )
 from lab_tracker.reference_registry import BlockingReference, DeletableEntity
+from lab_tracker.work_intent import WorkIntent, WorkScope
 
 if TYPE_CHECKING:
     from lab_tracker.schemas import GraphSearchHit
@@ -540,6 +541,14 @@ class ReviewEmailOutboxRepository(Protocol):
         """
 
 
+class WorkIntentRepository(Protocol):
+    def get(self, scope: WorkScope, work_id: UUID) -> WorkIntent | None: ...
+
+    def for_work(self, scope: WorkScope, work_ids: set[UUID]) -> dict[UUID, WorkIntent]: ...
+
+    def save(self, intent: WorkIntent, *, replace_existing: bool) -> bool: ...
+
+
 class LabTrackerRepository(Protocol):
     """Repository surface expected by the Lab Tracker domain layer."""
 
@@ -588,6 +597,9 @@ class LabTrackerRepository(Protocol):
 
     @property
     def notes(self) -> NoteRepository: ...
+
+    @property
+    def work_intents(self) -> WorkIntentRepository: ...
 
     @property
     def sessions(self) -> EntityRepository[Session]: ...

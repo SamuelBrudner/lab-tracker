@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { WorkIntentEditor } from "../work-intent/WorkIntentEditor.jsx";
 import { formatDate, sessionTypeClass } from "../../shared/formatters.js";
 import { AppLink, navigateBack } from "../../shared/routing.jsx";
 import { PhotoImportPanel } from "../bench-capture/PhotoImportPanel.jsx";
@@ -185,6 +186,16 @@ function SessionDetailCard({
               <div className="mono">{session.primary_question_id}</div>
             </div>
           ) : null}
+
+          <WorkIntentEditor
+            key={session.session_id}
+            token={token}
+            scope="session"
+            workId={session.session_id}
+            projectId={session.project_id}
+            canWrite={canWrite}
+            navigate={navigate}
+          />
 
           {session.session_type === "operational" ? (
             <div className="stack">

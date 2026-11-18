@@ -34,6 +34,7 @@ from lab_tracker.services.proposal_email_decisions import (
     require_assigned_email_review,
     require_current_proposal,
 )
+from lab_tracker.services.work_intent_prompts import session_intent_prompt
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 if TYPE_CHECKING:
@@ -122,6 +123,9 @@ def _current_review_item(
         question = pending_clarifications(draft).get(delivery.clarification_revision or "")
         if question is None:
             raise ConflictError("This clarification has changed since the email was queued.")
+        prompt = session_intent_prompt(draft, question)
+        if prompt and api.work_intents.get("session", prompt.session_id, actor=actor):
+            raise ConflictError("A scientist has already recorded the purpose of this session.")
         return question
     if not delivery.operation_id or not delivery.operation_revision:
         raise ConflictError("This delivery has no proposal revision.")

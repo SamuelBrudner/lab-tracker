@@ -70,6 +70,7 @@ from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.session_service import SessionService
 from lab_tracker.services.shared import is_meeting_note
 from lab_tracker.services.visualization_service import VisualizationService
+from lab_tracker.services.work_intent_prompts import explicitly_linked_sessions
 
 if TYPE_CHECKING:
     from lab_tracker.schemas import GraphSearchHit
@@ -411,6 +412,22 @@ class GraphContextBuilder:
             ),
             "truncated_note_count": truncated_note_count,
         }
+        intent_repository = self.notes.repository.work_intents
+        note_intents = intent_repository.for_work("note", {note.note_id for note in batch_notes})
+        explicit_sessions = explicitly_linked_sessions(batch_notes)
+        session_intents = intent_repository.for_work("session", set(explicit_sessions.values()))
+        for item in packet["batch_notes"]:
+            note_id = UUID(item["id"])
+            declared_session = explicit_sessions.get(note_id)
+            intent = note_intents.get(note_id)
+            if declared_session is not None:
+                item["explicit_session_id"] = str(declared_session)
+                if intent is None:
+                    intent = session_intents.get(declared_session)
+            if intent is not None:
+                item["work_intent"] = intent.model_dump(
+                    mode="json", exclude={"recorded_by_user_id", "review_draft_id"}
+                )
         candidates = self._capture_setup_candidates(
             batch_notes,
             reviewer_user_id=reviewer_user_id,

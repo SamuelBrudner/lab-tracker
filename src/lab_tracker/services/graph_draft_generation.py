@@ -76,6 +76,7 @@ from lab_tracker.services.graph_draft_revision_hints import (
 )
 from lab_tracker.services.graph_draft_validation import string_list
 from lab_tracker.services.shared import UserExistenceReader, actor_user_fk, actor_user_id
+from lab_tracker.services.work_intent_prompts import add_session_intent_prompts
 
 DEFAULT_BATCH_RETRY_ATTEMPTS = 3
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 60.0
@@ -663,6 +664,7 @@ class GraphDraftGenerationCoordinator(BaseService):
             )
             change_set.error_metadata = {}
             with self.application_transaction():
+                add_session_intent_prompts(self.repository, change_set, batch_notes)
                 completed = self.complete_generation_claim(
                     change_set,
                     claim_token=claim.claim_token,

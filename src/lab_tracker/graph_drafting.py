@@ -28,7 +28,7 @@ from lab_tracker.config import Settings
 from lab_tracker.provider_error_redaction import provider_error_message
 
 PROMPT_VERSION = "multimodal-graph-draft-v5"
-BATCH_PROMPT_VERSION = "daily-batch-graph-draft-v12"
+BATCH_PROMPT_VERSION = "daily-batch-graph-draft-v13"
 ANALYSIS_PROMPT_VERSION = "analysis-graph-draft-v5"
 # Default provider label only. Callers stamping provenance must prefer the active
 # client's `.provider` (e.g. getattr(client, "provider", PROVIDER)); transcripts and
@@ -1261,13 +1261,16 @@ def _batch_instructions() -> str:
         "which session or question does it belong to?\"), and do not narrate it "
         "as if it happened.\n\n"
         f"{_capture_setup_instructions()}\n\n"
-        "Each note's targets are anchors the person declared at capture time (a "
-        "question, session, or dataset): prefer a declared target over guessing a "
-        "placement, treat a target whose note metadata carries "
-        "declared_target_source=config_default as a weaker tool-wide default rather "
-        "than a per-capture choice, use capture_placement.observed_at (labelled by "
-        "observed_at_source as the client, adapter, or server clock) rather than "
-        "created_at as the capture's time, and still raise clarification_requests "
+        "When a work_intent is present, report the person's recorded purpose with its "
+        "source. Calibration, maintenance, and exploratory work can be complete without "
+        "an intended question. Other targets associate records with questions, sessions, "
+        "or datasets. Use those targets as placement evidence. Never present an inferred "
+        "association as the person's stated purpose. A declared target marked "
+        "declared_target_source=config_default is a tool-wide default. Lab Tracker asks "
+        "about missing purpose for explicit_session_id sessions; clarify other missing "
+        "details about those sessions. Use capture_placement.observed_at and its "
+        "observed_at_source for timing, and "
+        "still raise clarification_requests "
         "when a capture stays ambiguous even with its declared target.\n\n"
         "Repository commit captures include a '# Git Commit Evidence' text asset "
         "with commit metadata, a file summary, and a bounded diff. In the narrative, "

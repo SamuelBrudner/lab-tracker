@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from lab_tracker.auth import AuthContext
-from lab_tracker.errors import ValidationError
+from lab_tracker.errors import PermissionDeniedError, ValidationError
 from lab_tracker.graph_draft_triage import (
     TRIAGE_CLARIFICATIONS_KEY,
     clarification_id,
@@ -23,6 +23,7 @@ from lab_tracker.models import (
 )
 from lab_tracker.patching import NOT_PROVIDED
 from lab_tracker.services.shared import actor_user_id
+from lab_tracker.services.work_intent_prompts import session_intent_prompt
 
 if TYPE_CHECKING:
     from lab_tracker.services.graph_draft_review import GraphDraftReviewCoordinator
@@ -130,6 +131,24 @@ def decide_graph_draft_clarification(
             raise ValidationError("Unknown clarification decision.")
         if decision == "answered" and not (answer and answer.strip()):
             raise ValidationError("An answer must not be blank.")
+        prompt = session_intent_prompt(change_set, question)
+        if prompt is not None:
+            if actor is None or change_set.review_assignee_user_id != actor.user_id:
+                raise PermissionDeniedError("Only the assigned scientist can answer this prompt.")
+            if decision == "answered" and answer:
+                if review.work_intents is None:
+                    raise RuntimeError("The work intent service is unavailable.")
+                choice, expected_text = prompt.parse_answer(
+                    answer, repository=review.repository, project_id=change_set.project_id
+                )
+                review.work_intents.record(
+                    "session",
+                    prompt.session_id,
+                    choice,
+                    actor=actor,
+                    review_draft_id=change_set_id,
+                    expected_question_text=expected_text,
+                )
         answers = dict(clarification_reviews(change_set))
         key = clarification_id(question)
         previous_status = (answers.get(key) or {}).get("status")

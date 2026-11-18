@@ -109,6 +109,7 @@ from .usage import (
     summarize_usage_events,
 )
 from .versions import SQLAlchemyEntityVersionRepository
+from .work_intent import SQLAlchemyWorkIntentRepository
 
 if TYPE_CHECKING:
     from lab_tracker.schemas import GraphSearchHit
@@ -198,6 +199,7 @@ class SQLAlchemyLabTrackerRepository:
         self.datasets = SQLAlchemyDatasetRepository(session)
         self.notes = SQLAlchemyNoteRepository(session)
         self.sessions = SQLAlchemySessionRepository(session)
+        self.work_intents = SQLAlchemyWorkIntentRepository(session)
         self.acquisition_outputs = SQLAlchemyAcquisitionOutputRepository(session)
         self.acquisition_collections = SQLAlchemyAcquisitionCollectionRepository(
             session

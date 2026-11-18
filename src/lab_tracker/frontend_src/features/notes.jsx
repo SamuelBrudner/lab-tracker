@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { WorkIntentEditor } from "./work-intent/WorkIntentEditor.jsx";
 import { apiRequest } from "../shared/api.js";
 import { noteShape } from "../shared/gateways/notes.js";
 import { formatDate } from "../shared/formatters.js";
@@ -503,6 +504,18 @@ function NoteDetailCard({
             Set active project
           </button>
         ) : null}
+        {note && !isMemberOnboardingCheckpoint ? (
+          <WorkIntentEditor
+            key={note.note_id}
+            token={token}
+            scope="note"
+            workId={note.note_id}
+            projectId={note.project_id}
+            canWrite={canWrite}
+            navigate={navigate}
+          />
+        ) : null}
+
         {note && isMemberOnboardingCheckpoint ? (
           <button
             type="button"

@@ -52,6 +52,7 @@ from .supervision import build_supervision_router
 from .usage_events import build_usage_events_router
 from .visualizations import build_visualizations_router
 from .voice_capture import build_voice_capture_router
+from .work_intent import build_work_intent_router
 
 
 def register_routes(
@@ -111,6 +112,7 @@ def register_routes(
     app.include_router(build_schema_router())
     app.include_router(build_assistant_router())
     app.include_router(build_sessions_router(api))
+    app.include_router(build_work_intent_router(api))
     app.include_router(build_collections_router(api))
     app.include_router(build_analyses_router(api))
     app.include_router(build_claims_router(api))

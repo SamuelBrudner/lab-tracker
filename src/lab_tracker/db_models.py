@@ -2255,3 +2255,40 @@ from lab_tracker.collection_db_models import (  # noqa: E402, F401
     AcquisitionCollectionModel,
     AcquisitionCollectionSnapshotModel,
 )
+
+
+class WorkIntentModel(Base):
+    __tablename__ = "work_intents"
+    __table_args__ = (
+        UniqueConstraint("note_id", name="uq_work_intents_note_id"),
+        UniqueConstraint("session_id", name="uq_work_intents_session_id"),
+        CheckConstraint("(note_id IS NULL) <> (session_id IS NULL)", name="ck_work_intents_scope"),
+        CheckConstraint(
+            "kind IN ('question', 'exploratory', 'calibration', 'maintenance')",
+            name="ck_work_intents_kind",
+        ),
+        CheckConstraint(
+            "source IN ('declared', 'confirmed_in_review')", name="ck_work_intents_source"
+        ),
+    )
+
+    intent_id: Mapped[UUID] = mapped_column(GUID, primary_key=True, default=uuid4)
+    note_id: Mapped[UUID | None] = mapped_column(
+        GUID, ForeignKey("notes.note_id", ondelete="CASCADE")
+    )
+    session_id: Mapped[UUID | None] = mapped_column(
+        GUID, ForeignKey("sessions.session_id", ondelete="CASCADE")
+    )
+    kind: Mapped[str] = mapped_column(String(20))
+    question_id: Mapped[UUID | None] = mapped_column(
+        GUID, ForeignKey("questions.question_id", ondelete="SET NULL")
+    )
+    question_text: Mapped[str | None] = mapped_column(Text)
+    recorded_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID, ForeignKey("users.user_id", ondelete="SET NULL")
+    )
+    recorded_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    source: Mapped[str] = mapped_column(String(24))
+    review_draft_id: Mapped[UUID | None] = mapped_column(
+        GUID, ForeignKey("graph_change_sets.change_set_id", ondelete="SET NULL")
+    )

@@ -68,6 +68,7 @@ from lab_tracker.services.graph_draft_triage_review import (
 )
 from lab_tracker.services.graph_draft_validation import ensure_graph_change_set_revisable
 from lab_tracker.services.shared import UserExistenceReader, actor_user_id, user_fk_for
+from lab_tracker.services.work_intent import WorkIntentService
 
 _REVISION_ATTACHMENT_EVIDENCE_MESSAGE = (
     "Reviewer attachment previews are unavailable because revision attachments are not persisted."
@@ -194,6 +195,7 @@ class GraphDraftReviewCoordinator(BaseService):
         patch_validator: ReviewPatchValidator,
         authorization: ReviewAuthorization,
         review_email_outbox: ReviewEmailEnqueuer | None = None,
+        work_intents: WorkIntentService | None = None,
     ) -> None:
         super().__init__(context)
         self.records = records
@@ -201,6 +203,7 @@ class GraphDraftReviewCoordinator(BaseService):
         self.patch_validator = patch_validator
         self.authorization = authorization
         self.review_email_outbox = review_email_outbox
+        self.work_intents = work_intents
 
     @property
     def user_reader(self) -> UserExistenceReader:

@@ -69,7 +69,10 @@ function TriageReview({ changeSet, workflow, sourceReview, sourcePreviews, onSho
             <span className="subtle">Decision {visible.indexOf(group) + 1} of {visible.length}</span>
             {visible.length > 1 ? <select aria-label="Choose a triage decision" value={group.group_id} onChange={(event) => { setChosenGroup(event.target.value); setCorrecting(false); setRejecting(false); }}>{visible.map((item, index) => <option key={item.group_id} value={item.group_id}>Decision {index + 1}: {item.statement || item.question}</option>)}</select> : null}
           </div>
-          <h3>{group.question}</h3>
+          <h3>{group.question.split("\n", 1)[0]}</h3>
+          {group.question.includes("\n") ? (
+            <p style={{ whiteSpace: "pre-line" }}>{group.question.split("\n").slice(1).join("\n").trim()}</p>
+          ) : null}
           <p className="subtle">{group.reason}</p>
           {group.kind === "clarification" ? <label>Your answer<textarea value={answers[group.group_id] ?? group.answer ?? ""} disabled={!workflow.canEditDraft || pending} onChange={(event) => setAnswers((current) => ({ ...current, [group.group_id]: event.target.value }))} /></label> : null}
           {group.kind === "clarification" ? <DictateText key={group.group_id} label="Dictate answer" disabled={!workflow.canEditDraft || pending} onText={(text) => setAnswers((current) => ({ ...current, [group.group_id]: text }))} /> : null}
