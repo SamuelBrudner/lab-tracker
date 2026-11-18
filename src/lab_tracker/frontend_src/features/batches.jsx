@@ -1,4 +1,5 @@
 import * as React from "react";
+import { UnassignedCaptures } from "./capture-routing/CaptureRouting.jsx";
 
 import { apiListRequest, apiRequest, buildApiPath } from "../shared/api.js";
 import { formatDate } from "../shared/formatters.js";
@@ -496,6 +497,9 @@ function BatchReviewPage({
               emptyMessage="No submitted reviews need your approval."
               navigate={navigate}
             />
+            {canManageProject && selectedProjectId ? (
+              <UnassignedCaptures key={selectedProjectId} token={token} projectId={selectedProjectId} navigate={navigate} />
+            ) : null}
             {canManageProject || !selectedProjectId ? (
               <>
                 <h3>Unassigned project oversight</h3>

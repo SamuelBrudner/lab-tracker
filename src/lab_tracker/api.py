@@ -79,6 +79,7 @@ from lab_tracker.services import (
     TransactionalDraftCommitCoordinator,
     VisualizationService,
 )
+from lab_tracker.services.capture_routing import CaptureRoutingService
 from lab_tracker.services.graph_draft_batch_policy import DraftingHostFacts
 from lab_tracker.services.work_intent import WorkIntentService
 from lab_tracker.store_authority_registry import StoreAuthorityRegistry
@@ -176,6 +177,9 @@ class LabTrackerAPI(
             questions=self.questions,
             sessions_provider=lambda: self.sessions,
             authorization=self.project_authorization,
+        )
+        self.capture_routing = CaptureRoutingService(
+            context, authorization=self.project_authorization
         )
         self.work_intents = WorkIntentService(context, authorization=self.project_authorization)
         self.sessions: SessionService = SessionService(

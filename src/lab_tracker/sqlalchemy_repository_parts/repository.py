@@ -71,6 +71,7 @@ from .analyses import (
     SQLAlchemyClaimRepository,
     SQLAlchemyVisualizationRepository,
 )
+from .capture_routing import SQLAlchemyReviewOperatorRepository
 from .collections import SQLAlchemyAcquisitionCollectionRepository
 from .common import apply_pagination, substring_pattern, uuid_values
 from .core import (
@@ -200,6 +201,7 @@ class SQLAlchemyLabTrackerRepository:
         self.notes = SQLAlchemyNoteRepository(session)
         self.sessions = SQLAlchemySessionRepository(session)
         self.work_intents = SQLAlchemyWorkIntentRepository(session)
+        self.review_operators = SQLAlchemyReviewOperatorRepository(session)
         self.acquisition_outputs = SQLAlchemyAcquisitionOutputRepository(session)
         self.acquisition_collections = SQLAlchemyAcquisitionCollectionRepository(
             session

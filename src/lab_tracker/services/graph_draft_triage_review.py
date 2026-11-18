@@ -22,6 +22,7 @@ from lab_tracker.models import (
     utc_now,
 )
 from lab_tracker.patching import NOT_PROVIDED
+from lab_tracker.services.capture_routing import require_current_capture_routes
 from lab_tracker.services.shared import actor_user_id
 from lab_tracker.services.work_intent_prompts import session_intent_prompt
 
@@ -131,6 +132,8 @@ def decide_graph_draft_clarification(
             raise ValidationError("Unknown clarification decision.")
         if decision == "answered" and not (answer and answer.strip()):
             raise ValidationError("An answer must not be blank.")
+        if decision == "answered":
+            require_current_capture_routes(review.repository, change_set)
         prompt = session_intent_prompt(change_set, question)
         if prompt is not None:
             if actor is None or change_set.review_assignee_user_id != actor.user_id:

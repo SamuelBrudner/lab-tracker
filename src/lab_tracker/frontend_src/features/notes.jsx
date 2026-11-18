@@ -1,4 +1,5 @@
 import * as React from "react";
+import { ReviewOperatorEditor } from "./capture-routing/CaptureRouting.jsx";
 
 import { WorkIntentEditor } from "./work-intent/WorkIntentEditor.jsx";
 import { apiRequest } from "../shared/api.js";
@@ -514,6 +515,14 @@ function NoteDetailCard({
             canWrite={canWrite}
             navigate={navigate}
           />
+        ) : null}
+
+        {note && noteAccess.canManage && (note.machine_captured === true || (
+          note.machine_captured == null &&
+          (["ics", "store_scan"].includes(note.origin_provider) ||
+            ["ics", "store_scan"].includes(note.metadata?.capture_channel))
+        )) ? (
+          <ReviewOperatorEditor key={note.note_id} token={token} scope="note" workId={note.note_id} projectId={note.project_id} />
         ) : null}
 
         {note && isMemberOnboardingCheckpoint ? (

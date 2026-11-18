@@ -47,6 +47,7 @@ from lab_tracker.models import (
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 from lab_tracker.provider_error_redaction import provider_error_message
 from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.capture_routing import require_current_capture_routes
 from lab_tracker.services.graph_draft_delegation import AcceptanceStamp, DelegatedCurationGrant
 from lab_tracker.services.graph_draft_generation import GeneratedDraftProposal
 from lab_tracker.services.graph_draft_generation_ports import ReviewEmailEnqueuer
@@ -252,6 +253,8 @@ class GraphDraftReviewCoordinator(BaseService):
     ) -> GraphChangeSet:
         change_set = self.records.get_graph_change_set_for_update(change_set_id)
         self._ensure_graph_change_set_editable(change_set, actor=actor)
+        if status == GraphChangeOperationStatus.ACCEPTED:
+            require_current_capture_routes(self.repository, change_set)
         operation = self._find_graph_operation(change_set, operation_id)
         provided = (payload, status, review_note, deferred, reject_reason)
         if not any(is_provided(value) for value in provided):
@@ -397,6 +400,7 @@ class GraphDraftReviewCoordinator(BaseService):
                 actor, change_set=change_set, action="Accepting graph operations"
             )
         )
+        require_current_capture_routes(self.repository, change_set)
         accepted_any = False
         for operation in change_set.operations:
             # Bulk accept covers undecided proposals only: a deferral is a verdict.

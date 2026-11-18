@@ -578,6 +578,10 @@ def note_to_model(note: Note) -> NoteModel:
         note_id=note.note_id,
         project_id=note.project_id,
         raw_content=note.raw_content,
+        machine_captured=note.machine_captured,
+        capture_source=note.capture_source,
+        review_session_id=note.review_session_id,
+        review_session_linked_at=note.review_session_linked_at,
         raw_storage_id=(
             _uuid_str(note.raw_asset.storage_id) if note.raw_asset is not None else None
         ),
@@ -624,6 +628,10 @@ def note_from_model(
         note_id=row.note_id,
         project_id=row.project_id,
         raw_content=row.raw_content,
+        machine_captured=row.machine_captured,
+        capture_source=row.capture_source,
+        review_session_id=row.review_session_id,
+        review_session_linked_at=row.review_session_linked_at,
         raw_asset=raw_asset,
         transcribed_text=row.transcribed_text,
         targets=list(targets),
@@ -667,6 +675,10 @@ def note_target_models(note: Note) -> list[NoteTargetModel]:
 def apply_note_to_model(row: NoteModel, note: Note) -> None:
     row.project_id = note.project_id
     row.raw_content = note.raw_content
+    row.machine_captured = note.machine_captured
+    row.capture_source = note.capture_source
+    row.review_session_id = note.review_session_id
+    row.review_session_linked_at = note.review_session_linked_at
     row.raw_storage_id = (
         _uuid_str(note.raw_asset.storage_id) if note.raw_asset is not None else None
     )

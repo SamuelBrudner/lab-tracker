@@ -37,6 +37,11 @@ from lab_tracker.note_text import is_text_content_type
 from lab_tracker.provider_error_redaction import provider_error_message
 from lab_tracker.services import graph_draft_batch_policy as batch_policy
 from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.capture_routing import (
+    CAPTURE_ROUTES_KEY,
+    require_current_capture_routes,
+    snapshot_capture_routes,
+)
 from lab_tracker.services.graph_draft_capture_setup import record_capture_setup
 from lab_tracker.services.graph_draft_day_log import with_day_log_proposals
 from lab_tracker.services.graph_draft_generation_keys import (
@@ -573,6 +578,9 @@ class GraphDraftGenerationCoordinator(BaseService):
         non_staged = [note.note_id for note in batch_notes if note.status != NoteStatus.STAGED]
         if non_staged:
             raise ValidationError("Batch graph drafts can only include staged notes.")
+        capture_routes = snapshot_capture_routes(
+            self.repository, project_id, batch_notes, review_assignee_user_id,
+        )
         cleaned_hint = user_hint.strip() if user_hint else None
         primary_note = batch_notes[0]
         primary_raw_asset = primary_note.raw_asset
@@ -616,6 +624,7 @@ class GraphDraftGenerationCoordinator(BaseService):
             prompt_version=BATCH_PROMPT_VERSION,
             draft_mode=GraphDraftMode.GRAPH_BATCH,
             context_packet=context_packet,
+            review_metadata={CAPTURE_ROUTES_KEY: capture_routes},
             created_by=actor_user_id(actor),
             created_by_user_id=actor_user_fk(actor, self.user_reader),
             review_assignee=review_assignee,
@@ -629,6 +638,8 @@ class GraphDraftGenerationCoordinator(BaseService):
         def renew_all(attempt: int) -> bool:
             if before_attempt is not None and not before_attempt(attempt):
                 return False
+            if capture_routes:
+                require_current_capture_routes(self.repository, change_set)
             return (
                 self.renew_generation_claim(
                     change_set.change_set_id,
@@ -664,6 +675,9 @@ class GraphDraftGenerationCoordinator(BaseService):
             )
             change_set.error_metadata = {}
             with self.application_transaction():
+                if capture_routes:
+                    self.repository.lock_graph_draft_batch_settings(project_id)
+                    require_current_capture_routes(self.repository, change_set)
                 add_session_intent_prompts(self.repository, change_set, batch_notes)
                 completed = self.complete_generation_claim(
                     change_set,

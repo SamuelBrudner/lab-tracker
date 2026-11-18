@@ -36,6 +36,7 @@ from lab_tracker.models import (
     utc_now,
 )
 from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.capture_routing import require_current_capture_routes
 from lab_tracker.services.graph_draft_context import EntityResult
 from lab_tracker.services.graph_draft_context import entity_id as graph_entity_id
 from lab_tracker.services.graph_draft_generation_ports import ReviewEmailEnqueuer
@@ -220,6 +221,7 @@ class TransactionalDraftCommitCoordinator(BaseService):
                     raise ValidationError("This graph draft is already being committed.")
                 raise ValidationError("Only ready or submitted graph drafts can be committed.")
             change_set = claimed
+            require_current_capture_routes(self.repository, change_set)
             accepted = [
                 operation
                 for operation in sorted(change_set.operations, key=lambda item: item.sequence)

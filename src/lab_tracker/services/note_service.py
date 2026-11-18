@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 from sqlalchemy.exc import IntegrityError
 
 from lab_tracker.auth import AuthContext
+from lab_tracker.capture_routing import is_machine_capture, machine_capture_source, session_targets
 from lab_tracker.errors import ConflictError, NotFoundError, ValidationError
 from lab_tracker.graph_drafting import PROVIDER, GraphDraftingError
 from lab_tracker.member_onboarding import (
@@ -288,6 +289,7 @@ class NoteService(BaseService):
             note_id=uuid4(),
             project_id=project_id,
             raw_content=raw_text,
+            machine_captured=bool(actor is not None and actor.is_system and change_set_id is None),
             raw_asset=raw_asset,
             transcribed_text=resolved_transcribed_text,
             targets=resolved_targets,
@@ -302,6 +304,12 @@ class NoteService(BaseService):
             origin_model=origin_model,
             origin_prompt_version=origin_prompt_version,
         )
+        if note.machine_captured:
+            note.capture_source = machine_capture_source(note)
+            sessions = session_targets(note)
+            if len(sessions) == 1:
+                note.review_session_id = sessions[0]
+                note.review_session_linked_at = note.created_at
         with self.application_transaction():
             try:
                 unit_of_work = (
@@ -784,6 +792,8 @@ class NoteService(BaseService):
             if is_provided(metadata):
                 validate_scheduled_draft_policy(metadata)
             before = note.model_copy(deep=True)
+            if is_machine_capture(note) and note.capture_source is None:
+                note.capture_source = machine_capture_source(note)
             if designated_checkpoint is not None:
                 if is_provided(targets):
                     proposed_targets = list(targets or [])
@@ -826,6 +836,19 @@ class NoteService(BaseService):
                     }
                     resolved_targets = list(by_key.values())
                 note.targets = resolved_targets
+                if (
+                    is_machine_capture(note) and not preserve_existing_targets
+                    and actor is not None and actor.is_interactive
+                ):
+                    # A draft may add a related session to the graph. Only an
+                    # explicit capture association controls personal routing.
+                    sessions = session_targets(note)
+                    reviewed_session = sessions[0] if len(sessions) == 1 else None
+                    if reviewed_session != note.review_session_id:
+                        note.review_session_id = reviewed_session
+                        note.review_session_linked_at = utc_now() if reviewed_session else None
+                    note.machine_captured = True
+
             if is_provided(metadata):
                 if metadata is None:
                     raise ValidationError("metadata must not be null.")

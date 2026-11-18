@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from uuid import UUID
 
 from lab_tracker.auth import AuthContext
+from lab_tracker.capture_routing import overlapping_sessions, session_targets
 from lab_tracker.capture_setup_catalog import CANDIDATES_PACKET_KEY
 from lab_tracker.claim_effective_status import (
     OPEN_PREDICTION_STATUSES,
@@ -1531,33 +1532,32 @@ def _batch_window(
 
 
 def _capture_placement(note: Note, sessions: list[Session]) -> dict[str, Any]:
-    """Where a capture lands in the day.
-
-    Pre-computes the most recent session window (if any) that contains the
-    note's capture time, plus the bundle it belongs to, so terse
-    identifier-only captures can be placed -- or surfaced as unplaceable --
-    rather than guessed. The capture time is the note's capture clock
-    (client, adapter, or server receipt), reported with its source so the
-    model can weigh a phone clock differently from a server timestamp.
-    """
-
+    """Keep declared placement and competing clock matches distinguishable."""
     observed_at, observed_at_source = note_observed_at(note)
-    candidates = [
-        session
-        for session in sessions
-        if as_utc(session.started_at) <= observed_at
-        and (session.ended_at is None or observed_at <= as_utc(session.ended_at))
-    ]
-    in_session: dict[str, str] | None = None
-    if candidates:
-        best = max(candidates, key=lambda session: session.started_at)
-        in_session = {
-            "id": str(best.session_id),
+    named = session_targets(note)
+    declared = explicitly_linked_sessions([note]).get(note.note_id)
+    candidates = (
+        [session for session in sessions if session.session_id in named]
+        if named else overlapping_sessions(observed_at, sessions)
+    )
+    options = [
+        {
+            "id": str(session.session_id),
             "label": (
-                f"{best.session_type.value} session "
-                f"{best.started_at.date().isoformat()}"
+                f"{session.session_type.value} session {session.started_at.date().isoformat()}"
             ),
         }
+        for session in candidates
+    ]
+    in_session = None
+    basis = None
+    if declared is not None:
+        in_session = next((option for option in options if option["id"] == str(declared)), None)
+        if in_session is not None:
+            basis = "explicit_session"
+    elif not named and len(options) == 1:
+        in_session = options[0]
+        basis = "time_window"
     return {
         "note_id": str(note.note_id),
         "created_at": note.created_at.isoformat(),
@@ -1566,6 +1566,9 @@ def _capture_placement(note: Note, sessions: list[Session]) -> dict[str, Any]:
         "project_id": str(note.project_id),
         "capture_bundle_id": note.metadata.get("capture_bundle_id"),
         "in_session": in_session,
+        "session_match_basis": basis,
+        "session_candidates": options,
+        "session_ambiguous": in_session is None and (len(options) > 1 or len(named) > 1),
     }
 
 
@@ -1589,6 +1592,8 @@ def _compact_note(note: Note, *, include_raw_asset: bool = False) -> dict[str, A
             str(note.created_by_user_id) if note.created_by_user_id is not None else None
         ),
     }
+    if note.capture_source is not None:
+        payload["capture_source"] = note.capture_source
     if include_raw_asset and note.raw_asset is not None:
         payload["raw_asset"] = {
             "filename": note.raw_asset.filename,

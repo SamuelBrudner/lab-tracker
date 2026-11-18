@@ -24,6 +24,7 @@ from lab_tracker.models import (
 )
 from lab_tracker.services import graph_draft_batch_policy as batch_policy
 from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.capture_routing import capture_route_revision, resolve_capture_routes
 from lab_tracker.services.graph_draft_scheduling_ports import (
     SchedulingNotes,
     SchedulingProjects,
@@ -242,12 +243,12 @@ class GraphDraftBatchReservationCoordinator(BaseService):
             window_start = batch_policy.as_utc(
                 latest.window_end if latest is not None else datetime(1970, 1, 1)
             )
-            note_created_at = batch_policy.as_utc(note.created_at)
-            if note_created_at > batch_policy.as_utc(until) or note_created_at < window_start:
+            available = batch_policy.note_review_available_at(note, routes.get(note.note_id))
+            if available > batch_policy.as_utc(until) or available < window_start:
                 return False
             return not (
                 latest is not None
-                and note_created_at == window_start
+                and available == window_start
                 and note.note_id in drafted_note_ids_by_reviewer[key]
             )
 
@@ -260,14 +261,18 @@ class GraphDraftBatchReservationCoordinator(BaseService):
             if note.metadata.get(SCHEDULED_DRAFT_POLICY_KEY)
             != SCHEDULED_DRAFT_EXCLUDE
         ]
+        routes = resolve_capture_routes(self.repository, settings.project_id, staged_notes)
+        recipients = {
+            note.note_id: batch_policy.review_recipient_for_note(note, routes.get(note.note_id))
+            for note in staged_notes
+        }
         if settings.user_id is not None:
             reviewer = batch_policy.BatchReviewer(
                 reviewer=str(settings.user_id),
                 reviewer_user_id=settings.user_id,
             )
             if any(
-                batch_policy.note_matches_reviewer(note, reviewer)
-                and note_is_new_for_reviewer(note, reviewer)
+                recipients[note.note_id] == reviewer and note_is_new_for_reviewer(note, reviewer)
                 for note in staged_notes
             ):
                 return [reviewer]
@@ -281,14 +286,14 @@ class GraphDraftBatchReservationCoordinator(BaseService):
         }
         reviewers: dict[tuple[str | None, UUID | None], batch_policy.BatchReviewer] = {}
         for note in staged_notes:
-            if note.created_by_user_id is not None and note.created_by_user_id in explicit_user_ids:
+            recipient = recipients[note.note_id]
+            if recipient is None or recipient.reviewer_user_id in explicit_user_ids:
                 continue
-            reviewer = batch_policy.reviewer_for_note(note)
-            if reviewer.reviewer is None and reviewer.reviewer_user_id is None:
+            if recipient.reviewer is None and recipient.reviewer_user_id is None:
                 continue
-            if not note_is_new_for_reviewer(note, reviewer):
+            if not note_is_new_for_reviewer(note, recipient):
                 continue
-            reviewers[(reviewer.reviewer, reviewer.reviewer_user_id)] = reviewer
+            reviewers[(recipient.reviewer, recipient.reviewer_user_id)] = recipient
         return [
             reviewers[key]
             for key in sorted(
@@ -343,19 +348,23 @@ class GraphDraftBatchReservationCoordinator(BaseService):
             if continuing_auto_window
             else set()
         )
+        staged = self.notes.list_notes(project_id=project_id, status=NoteStatus.STAGED)
+        routes = resolve_capture_routes(self.repository, project_id, staged)
         eligible_notes = batch_policy.staged_notes_in_window(
-            self.notes.list_notes(project_id=project_id, status=NoteStatus.STAGED),
+            staged,
             since=window_start,
             until=window_end,
             include_start=continuing_auto_window,
             exclude_note_ids=already_drafted_note_ids,
             reviewer=reviewer_filter,
+            capture_routes=routes,
         )
         eligible_note_ids = {note.note_id for note in eligible_notes}
         notes = [note for note in eligible_notes if note.note_id not in active_note_ids]
         notes, window_end = batch_policy.limit_notes_to_draft(
             notes,
             window_end=window_end,
+            capture_routes=routes,
         )
         note_ids = [note.note_id for note in notes]
         run = GraphDraftBatchRun(
@@ -372,6 +381,10 @@ class GraphDraftBatchReservationCoordinator(BaseService):
                 note_ids=note_ids,
                 review_assignee=reviewer.reviewer,
                 review_assignee_user_id=reviewer.reviewer_user_id,
+                capture_route_revisions={
+                    str(note.note_id): capture_route_revision(note, routes[note.note_id])
+                    for note in notes if note.note_id in routes
+                },
                 generation_run_id=(
                     previous_run.run_id if previous_run is not None and not note_ids else None
                 ),

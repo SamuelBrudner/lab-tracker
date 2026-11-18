@@ -45,6 +45,20 @@ declaration or review confirmation and its date. Choosing a primary question
 when starting a scientific session records a declaration. Scientists can also
 record purpose directly from that panel.
 
+## Route machine captures
+
+Project owners can use **Unassigned machine captures** on the Batches page to
+assign captures from a calendar or shared folder to a current project
+contributor. A capture with an explicit session link can use that session's
+**Review operator**. An assignment on a capture takes precedence. Overlapping
+session times are shown for context and the capture stays in the unassigned
+queue until an operator is identified.
+
+Assignment keeps the capture's original source and makes older captures
+available to the operator's next batch. A change of operator closes the reply
+address for an earlier draft. The new operator receives review emails via their
+existing batch cadence and verified mailbox.
+
 ## Server setup
 
 Use the SMTP transport and configure a distinct plus-addressed reply mailbox.

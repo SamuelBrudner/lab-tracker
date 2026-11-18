@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
 from uuid import UUID
 
+from lab_tracker.capture_routing import AssignmentScope, ReviewOperatorAssignment
 from lab_tracker.collection_models import (
     AcquisitionCollection,
     AcquisitionCollectionCapture,
@@ -549,6 +550,14 @@ class WorkIntentRepository(Protocol):
     def save(self, intent: WorkIntent, *, replace_existing: bool) -> bool: ...
 
 
+class ReviewOperatorRepository(Protocol):
+    def for_work(
+        self, scope: AssignmentScope, work_ids: set[UUID]
+    ) -> dict[UUID, ReviewOperatorAssignment]: ...
+
+    def save(self, assignment: ReviewOperatorAssignment) -> None: ...
+
+
 class LabTrackerRepository(Protocol):
     """Repository surface expected by the Lab Tracker domain layer."""
 
@@ -597,6 +606,9 @@ class LabTrackerRepository(Protocol):
 
     @property
     def notes(self) -> NoteRepository: ...
+
+    @property
+    def review_operators(self) -> ReviewOperatorRepository: ...
 
     @property
     def work_intents(self) -> WorkIntentRepository: ...

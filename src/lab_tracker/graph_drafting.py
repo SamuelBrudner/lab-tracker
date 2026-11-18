@@ -28,7 +28,7 @@ from lab_tracker.config import Settings
 from lab_tracker.provider_error_redaction import provider_error_message
 
 PROMPT_VERSION = "multimodal-graph-draft-v5"
-BATCH_PROMPT_VERSION = "daily-batch-graph-draft-v13"
+BATCH_PROMPT_VERSION = "daily-batch-graph-draft-v14"
 ANALYSIS_PROMPT_VERSION = "analysis-graph-draft-v5"
 # Default provider label only. Callers stamping provenance must prefer the active
 # client's `.provider` (e.g. getattr(client, "provider", PROVIDER)); transcripts and
@@ -1255,7 +1255,9 @@ def _batch_instructions() -> str:
         "'plate 3, redo'). Place such a capture into the day's story only where "
         "capture_placement, a session window, or a known alias actually anchors "
         "it; never invent an observation, result, or interpretation a capture "
-        "does not state. Any capture you cannot place is a gap: record it in "
+        "does not state. If session_ambiguous is true, leave the session open and ask "
+        "which session was involved. A time_window match is a clock hint. "
+        "Any capture you cannot place is a gap: record it in "
         "clarification_requests with what is needed to place it (for example "
         "\"Capture 'Rig 2 Fly 12' could not be placed in today's activity -- "
         "which session or question does it belong to?\"), and do not narrate it "

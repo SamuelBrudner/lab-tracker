@@ -20,6 +20,7 @@ from lab_tracker.models import (
     GraphDraftMode,
     GraphDraftPurpose,
 )
+from lab_tracker.services.capture_routing import require_current_capture_routes
 
 if TYPE_CHECKING:
     from lab_tracker.services.graph_draft_review import GraphDraftReviewCoordinator
@@ -121,6 +122,7 @@ def require_assigned_email_review(
         or draft.review_metadata.get("review_triage_carryover_to")
     ):
         raise ConflictError("This draft is no longer awaiting email review.")
+    require_current_capture_routes(review.repository, draft)
 
 
 def require_current_proposal(

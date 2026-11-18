@@ -1154,12 +1154,14 @@ export interface components {
       "archived_by"?: (string | null);
       "archived_by_user_id"?: (string | null);
       "archived_reason"?: (components["schemas"]["NoteArchiveReason"] | null);
+      "capture_source"?: (string | null);
       "change_set_id"?: (string | null);
       "client_capture_id"?: (string | null);
       "created_at"?: string;
       "created_by"?: (string | null);
       "created_by_user_id"?: (string | null);
       "evidence_content_hash": (string | null);
+      "machine_captured"?: (boolean | null);
       "metadata"?: Record<string, string>;
       "note_id": string;
       "origin"?: components["schemas"]["EntityOrigin"];
@@ -1169,6 +1171,8 @@ export interface components {
       "project_id": string;
       "raw_asset"?: (components["schemas"]["NoteRawAsset"] | null);
       "raw_content": string;
+      "review_session_id"?: (string | null);
+      "review_session_linked_at"?: (string | null);
       "status"?: components["schemas"]["NoteStatus"];
       "targets"?: Array<components["schemas"]["EntityRef"]>;
       "transcribed_text"?: (string | null);

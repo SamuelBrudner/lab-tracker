@@ -1227,6 +1227,10 @@ class Note(_DomainModel):
     note_id: UUID
     project_id: UUID
     raw_content: str
+    machine_captured: bool | None = None
+    capture_source: str | None = None
+    review_session_id: UUID | None = None
+    review_session_linked_at: datetime | None = None
     raw_asset: NoteRawAsset | None = None
     transcribed_text: str | None = None
     targets: list[EntityRef] = Field(default_factory=list)

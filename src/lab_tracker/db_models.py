@@ -524,6 +524,10 @@ class NoteModel(Base):
         nullable=False,
     )
     raw_content: Mapped[str] = mapped_column(Text, nullable=False)
+    machine_captured: Mapped[bool | None] = mapped_column(Boolean)
+    capture_source: Mapped[str | None] = mapped_column(String(80))
+    review_session_id: Mapped[UUID | None] = mapped_column(GUID)
+    review_session_linked_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
     raw_storage_id: Mapped[UUID | None] = mapped_column(GUID)
     raw_filename: Mapped[str | None] = mapped_column(String(255))
     raw_content_type: Mapped[str | None] = mapped_column(String(255))
@@ -2292,3 +2296,29 @@ class WorkIntentModel(Base):
     review_draft_id: Mapped[UUID | None] = mapped_column(
         GUID, ForeignKey("graph_change_sets.change_set_id", ondelete="SET NULL")
     )
+
+
+class ReviewOperatorModel(Base):
+    __tablename__ = "review_operator_assignments"
+    __table_args__ = (
+        UniqueConstraint("note_id", name="uq_review_operators_note"),
+        UniqueConstraint("session_id", name="uq_review_operators_session"),
+        CheckConstraint(
+            "(note_id IS NULL) <> (session_id IS NULL)", name="ck_review_operators_scope"
+        ),
+    )
+
+    assignment_id: Mapped[UUID] = mapped_column(GUID, primary_key=True, default=uuid4)
+    note_id: Mapped[UUID | None] = mapped_column(
+        GUID, ForeignKey("notes.note_id", ondelete="CASCADE")
+    )
+    session_id: Mapped[UUID | None] = mapped_column(
+        GUID, ForeignKey("sessions.session_id", ondelete="CASCADE")
+    )
+    user_id: Mapped[UUID | None] = mapped_column(
+        GUID, ForeignKey("users.user_id", ondelete="SET NULL")
+    )
+    assigned_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID, ForeignKey("users.user_id", ondelete="SET NULL")
+    )
+    assigned_at: Mapped[datetime] = mapped_column(UtcDateTime)

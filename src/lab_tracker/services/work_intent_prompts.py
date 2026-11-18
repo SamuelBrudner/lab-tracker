@@ -7,16 +7,21 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
+from lab_tracker.capture_routing import (
+    is_machine_capture,
+    review_session_for_capture,
+    session_targets,
+)
 from lab_tracker.errors import ValidationError
 from lab_tracker.graph_draft_triage import clarification_id, unanswered_clarifications
 from lab_tracker.models import (
-    EntityType,
     GraphChangeSet,
     GraphChangeSetStatus,
     GraphDraftMode,
     Note,
     QuestionStatus,
 )
+from lab_tracker.services.capture_routing import resolve_capture_routes
 from lab_tracker.work_intent import WorkIntentChoice
 
 if TYPE_CHECKING:
@@ -83,11 +88,14 @@ def explicitly_linked_sessions(notes: list[Note]) -> dict[UUID, UUID]:
     """Use a single declared session target. Time overlap remains a hint."""
     result = {}
     for note in notes:
-        session_ids = {
-            ref.entity_id for ref in note.targets if ref.entity_type == EntityType.SESSION
-        }
-        if len(session_ids) == 1:
-            result[note.note_id] = next(iter(session_ids))
+        if is_machine_capture(note):
+            session_id = review_session_for_capture(note)
+            if session_id is not None:
+                result[note.note_id] = session_id
+        else:
+            linked = session_targets(note)
+            if len(linked) == 1:
+                result[note.note_id] = linked[0]
     return result
 
 
@@ -97,6 +105,13 @@ def add_session_intent_prompts(
     if draft.review_assignee_user_id is None:
         return
     links = explicitly_linked_sessions(notes)
+    routes = resolve_capture_routes(repository, draft.project_id, notes)
+    for note_id in routes:
+        route = routes[note_id]
+        # A capture-specific assignment authorizes reviewing that capture.
+        # Session-wide intent belongs to the assigned session operator.
+        if route.operator is None or route.operator.scope != "session":
+            links.pop(note_id, None)
     if not links:
         return
     note_intents = repository.work_intents.for_work("note", set(links))

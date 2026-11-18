@@ -646,5 +646,8 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
         else:
             stmt = stmt.order_by(NoteModel.created_at, NoteModel.note_id)
         total = count_from_statement(self._session, count_stmt)
-        rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
+        rows = list(self._session.scalars(
+            apply_pagination(stmt, limit=limit, offset=offset)
+            .execution_options(populate_existing=True)
+        ))
         return self.notes_from_rows(rows), total

@@ -16,6 +16,7 @@ from lab_tracker.auth import (
 from .analyses import build_analyses_router
 from .assistant import build_assistant_router
 from .auth import build_auth_router
+from .capture_routing import build_capture_routing_router
 from .claims import build_claims_router
 from .collections import build_collections_router
 from .data_stores import build_data_stores_router
@@ -113,6 +114,7 @@ def register_routes(
     app.include_router(build_assistant_router())
     app.include_router(build_sessions_router(api))
     app.include_router(build_work_intent_router(api))
+    app.include_router(build_capture_routing_router(api))
     app.include_router(build_collections_router(api))
     app.include_router(build_analyses_router(api))
     app.include_router(build_claims_router(api))

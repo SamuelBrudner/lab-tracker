@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from lab_tracker.auth import AuthContext
+from lab_tracker.capture_routing import CaptureRoute
 from lab_tracker.errors import ValidationError
 from lab_tracker.member_onboarding import (
     SCHEDULED_DRAFT_EXCLUDE,
@@ -181,6 +182,7 @@ def make_reserved_batch_key(
     review_assignee: str | None,
     review_assignee_user_id: UUID | None,
     generation_run_id: UUID | None,
+    capture_route_revisions: dict[str, str] | None = None,
 ) -> str:
     """Return a stable key for one reviewer-note reservation generation.
 
@@ -201,6 +203,8 @@ def make_reserved_batch_key(
             str(generation_run_id) if generation_run_id is not None else None
         ),
     }
+    if capture_route_revisions:
+        payload["capture_routes"] = capture_route_revisions
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
     return f"batch:{digest[:48]}"
 
@@ -290,6 +294,25 @@ def as_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def review_recipient_for_note(note: Note, route: CaptureRoute | None) -> BatchReviewer | None:
+    if route is None:
+        return reviewer_for_note(note)
+    if route.status != "assigned" or route.operator is None or route.operator.user_id is None:
+        return None
+    user_id = route.operator.user_id
+    return BatchReviewer(reviewer=str(user_id), reviewer_user_id=user_id)
+
+
+def note_review_available_at(note: Note, route: CaptureRoute | None = None) -> datetime:
+    created_at = as_utc(note.created_at)
+    if route is None or route.operator is None:
+        return created_at
+    assigned_at = as_utc(route.operator.assigned_at)
+    if route.operator.scope == "session" and note.review_session_linked_at is not None:
+        assigned_at = max(assigned_at, as_utc(note.review_session_linked_at))
+    return max(created_at, assigned_at)
+
+
 def staged_notes_in_window(
     notes: list[Note],
     *,
@@ -298,28 +321,35 @@ def staged_notes_in_window(
     include_start: bool = False,
     exclude_note_ids: set[UUID] | None = None,
     reviewer: BatchReviewer | None = None,
+    capture_routes: dict[UUID, CaptureRoute] | None = None,
 ) -> list[Note]:
     start = as_utc(since)
     end = as_utc(until)
     excluded = exclude_note_ids or set()
-    return sorted(
-        [
-            note
-            for note in notes
-            if note.status == NoteStatus.STAGED
-            and note.metadata.get(SCHEDULED_DRAFT_POLICY_KEY)
-            != SCHEDULED_DRAFT_EXCLUDE
-            and note.note_id not in excluded
-            and note_matches_reviewer(note, reviewer)
-            and (
-                start <= as_utc(note.created_at)
-                if include_start
-                else start < as_utc(note.created_at)
-            )
-            and as_utc(note.created_at) <= end
-        ],
-        key=lambda item: (item.created_at, str(item.note_id)),
-    )
+    routes = capture_routes or {}
+    eligible: list[tuple[datetime, str, Note]] = []
+    for note in notes:
+        if (
+            note.status != NoteStatus.STAGED
+            or note.metadata.get(SCHEDULED_DRAFT_POLICY_KEY) == SCHEDULED_DRAFT_EXCLUDE
+            or note.note_id in excluded
+        ):
+            continue
+        route = routes.get(note.note_id)
+        if route is None:
+            if not note_matches_reviewer(note, reviewer):
+                continue
+        else:
+            # Automated captures enter only their explicit operator's review.
+            recipient = review_recipient_for_note(note, route)
+            if reviewer is None or recipient is None or (
+                recipient.reviewer_user_id != reviewer.reviewer_user_id
+            ):
+                continue
+        available = note_review_available_at(note, route)
+        if available <= end and (start <= available if include_start else start < available):
+            eligible.append((available, str(note.note_id), note))
+    return [entry[2] for entry in sorted(eligible, key=lambda entry: entry[:2])]
 
 
 def context_owner_for(
@@ -369,8 +399,10 @@ def limit_notes_to_draft(
     notes: list[Note],
     *,
     window_end: datetime,
+    capture_routes: dict[UUID, CaptureRoute] | None = None,
 ) -> tuple[list[Note], datetime]:
     if len(notes) <= BATCH_NOTE_LIMIT:
         return notes, window_end
     limited = notes[:BATCH_NOTE_LIMIT]
-    return limited, as_utc(limited[-1].created_at)
+    boundary = limited[-1]
+    return limited, note_review_available_at(boundary, (capture_routes or {}).get(boundary.note_id))

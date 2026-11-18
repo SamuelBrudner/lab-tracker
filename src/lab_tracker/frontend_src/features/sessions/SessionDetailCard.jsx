@@ -1,4 +1,5 @@
 import * as React from "react";
+import { ReviewOperatorEditor } from "../capture-routing/CaptureRouting.jsx";
 
 import { WorkIntentEditor } from "../work-intent/WorkIntentEditor.jsx";
 import { formatDate, sessionTypeClass } from "../../shared/formatters.js";
@@ -196,6 +197,10 @@ function SessionDetailCard({
             canWrite={canWrite}
             navigate={navigate}
           />
+
+          {sessionAccess.canManage ? (
+            <ReviewOperatorEditor key={session.session_id} token={token} scope="session" workId={session.session_id} projectId={session.project_id} />
+          ) : null}
 
           {session.session_type === "operational" ? (
             <div className="stack">
