@@ -34,6 +34,31 @@ next scheduled drain, connect the client once (`lt setup connect`).
 
 After that, the per-run effort is the `lt run --` prefix.
 
+### Pull questions and sessions before going offline
+
+While connected, run `lt pull` for the project you plan to work on. It saves a
+timestamped local copy of the active questions and open sessions for that
+project and Lab Tracker instance. Pulling again replaces the copy and leaves
+queued run records alone. A failed pull keeps the last complete copy.
+
+```bash
+lt pull --project "$PROJECT_ID"
+lt list-questions --offline --project "$PROJECT_ID" --status active
+lt session list --project "$PROJECT_ID"
+lt session use "$SESSION_ID" --offline --project "$PROJECT_ID"
+lt run --no-drain --project "$PROJECT_ID" --question "$QUESTION_ID" -- ./acquire
+```
+
+The offline lists return IDs in JSON. Use `--search` on `list-questions` to
+narrow the active questions. The offline session selection writes the same
+expiring checkout context used by the launcher. The session list also includes
+the `primary_question_id` where one is recorded. The chosen question can go
+into the launcher's local session setup for reuse across runs.
+
+The pull is read-only on the server. The local copy stays at its last pull time
+until you refresh it, and offline commands read it directly. `--no-drain` keeps
+run records in the local outbox for a separate `lt outbox sync` when appropriate.
+
 ## Usage
 
 ```bash

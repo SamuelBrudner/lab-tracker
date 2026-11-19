@@ -5,9 +5,9 @@ A session's link code is the base32 form of its UUID (26 characters from
 phone scans. Consumers can name it in three places so captures arrive already
 linked to the session:
 
-* ``lt session use <code-or-uuid>`` looks the session up on the server and
-  records it, with the project it belongs to, as the *active session* for the
-  current checkout (``.lab-tracker/session.json``) for a bounded time; figure
+* ``lt session use <code-or-uuid>`` looks the session up on the server or, with
+  ``--offline``, in the last pull. It records the session with its project as
+  the *active session* for this checkout (``.lab-tracker/session.json``). Figure
   saves and watch scans made while it is active carry a session target when
   they are filed into that same project. A context recorded without its
   project (by an older client) is unverified and targets nothing.
@@ -18,8 +18,7 @@ linked to the session:
 
 Reading is fail-soft: an unreadable or expired context simply yields no
 session, never an exception in a consumer script. Recording is not: ``lt
-session use`` fails loudly when the session does not exist or the server
-cannot be reached.
+session use`` requires verification against the configured source.
 """
 
 from __future__ import annotations
@@ -171,7 +170,7 @@ def active_session_path(start: str | Path | None = None) -> Path:
 
 
 class SessionLookup(Protocol):
-    """The one server call recording an active session needs."""
+    """The session lookup required to record an active session."""
 
     def get_session(self, session_id: str) -> Mapping[str, Any]: ...
 
@@ -185,7 +184,7 @@ def set_active_session(
     start: str | Path | None = None,
     dry_run: bool = False,
 ) -> JsonObject:
-    """Verify a session on the server and record it, with its project, for this checkout.
+    """Verify a session against the supplied lookup and record it for this checkout.
 
     Raises ``LTAPIError`` when the session does not exist or the server cannot
     be reached, and ``LTValidationError`` when ``project_id`` names a
@@ -195,7 +194,7 @@ def set_active_session(
     session_id = strict_session_id(session_ref)
     if hours <= 0:
         raise LTValidationError("--hours must be greater than zero.")
-    session_project_id = _server_session_project(client, session_id)
+    session_project_id = _session_project(client, session_id)
     if project_id and str(project_id) != session_project_id:
         raise LTValidationError(
             f"Session {session_id} belongs to project {session_project_id}, "
@@ -224,7 +223,7 @@ def set_active_session(
     return result
 
 
-def _server_session_project(client: SessionLookup, session_id: str) -> str:
+def _session_project(client: SessionLookup, session_id: str) -> str:
     try:
         record = client.get_session(session_id)
     except httpx.TransportError as exc:

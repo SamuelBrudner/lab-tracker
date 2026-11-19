@@ -8,6 +8,7 @@ import json
 import os
 import sys
 from collections.abc import Callable
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ import lab_tracker_client.figure_autotrack as autotrack_helpers
 import lab_tracker_client.git_capture as git_capture
 import lab_tracker_client.hook_context as hook_context
 import lab_tracker_client.hooks as hook_install
+import lab_tracker_client.pull_context as pull_context
 import lab_tracker_client.r_autotrack as r_autotrack
 import lab_tracker_client.registry as repo_registry
 import lab_tracker_client.repo as repo_capture
@@ -363,11 +365,22 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     export_parser.set_defaults(func=_cmd_export)
 
-    questions_parser = subcommands.add_parser("list-questions")
+    pull_parser = subcommands.add_parser(
+        "pull", help="Fetch active questions and open sessions for offline use."
+    )
+    pull_parser.add_argument("--project", help="Project UUID or LAB_TRACKER_PROJECT_ID.")
+    pull_parser.set_defaults(func=_cmd_pull)
+
+    questions_parser = subcommands.add_parser(
+        "list-questions", help="List project questions with their IDs."
+    )
     questions_parser.add_argument("--project", required=True)
     questions_parser.add_argument("--status")
     questions_parser.add_argument("--search")
-    questions_parser.set_defaults(func=_cmd_list_questions)
+    questions_parser.add_argument(
+        "--offline", action="store_true", help="List active questions from the last local pull."
+    )
+    questions_parser.set_defaults(func=_cmd_list_questions, needs_client=False)
 
     notes_parser = subcommands.add_parser("list-notes")
     notes_parser.add_argument("--project", required=True)
@@ -1071,6 +1084,12 @@ def _add_session_parsers(subcommands: argparse._SubParsersAction) -> None:
     )
     session_commands = session_parser.add_subparsers(dest="session_command", required=True)
 
+    list_parser = session_commands.add_parser(
+        "list", help="List open sessions from the last local pull."
+    )
+    list_parser.add_argument("--project", help="Project UUID or LAB_TRACKER_PROJECT_ID.")
+    list_parser.set_defaults(func=_cmd_session_list, needs_client=False)
+
     use_parser = session_commands.add_parser(
         "use",
         help="Record the active session (a UUID or the session's link code) for a bounded time.",
@@ -1089,10 +1108,7 @@ def _add_session_parsers(subcommands: argparse._SubParsersAction) -> None:
     )
     use_parser.add_argument(
         "--project",
-        help=(
-            "Project UUID the session must belong to. The session's own project is "
-            "always looked up on the server and recorded with the context."
-        ),
+        help="Project UUID the session belongs to, required offline unless set in the environment.",
     )
     use_parser.add_argument(
         "--repo",
@@ -1100,7 +1116,10 @@ def _add_session_parsers(subcommands: argparse._SubParsersAction) -> None:
         help="Checkout whose .lab-tracker/session.json to write. Defaults to cwd.",
     )
     use_parser.add_argument("--dry-run", action="store_true", help="Preview without writing.")
-    use_parser.set_defaults(func=_cmd_session_use)
+    use_parser.add_argument(
+        "--offline", action="store_true", help="Check the session against the last local pull."
+    )
+    use_parser.set_defaults(func=_cmd_session_use, needs_client=False)
 
     clear_parser = session_commands.add_parser(
         "clear", help="Stop attaching captures to a session."
@@ -1613,16 +1632,24 @@ def _cmd_watch_add(args: argparse.Namespace) -> Any:
     return payload
 
 
-def _cmd_session_use(client: LabTracker, args: argparse.Namespace) -> Any:
+def _cmd_session_list(args: argparse.Namespace) -> Any:
+    context = pull_context.read_project(pull_context.resolve_project_id(args.project))
+    return [session.list_entry() for session in context.sessions]
+
+
+def _cmd_session_use(args: argparse.Namespace) -> Any:
+    options = {
+        "project_id": args.project,
+        "hours": args.hours,
+        "start": args.repo,
+        "dry_run": args.dry_run,
+    }
     try:
-        return session_context.set_active_session(
-            args.session,
-            client=client,
-            project_id=args.project,
-            hours=args.hours,
-            start=args.repo,
-            dry_run=args.dry_run,
-        )
+        if args.offline:
+            context = pull_context.read_project(pull_context.resolve_project_id(args.project))
+            return session_context.set_active_session(args.session, client=context, **options)
+        with closing(LabTracker.from_env()) as client:
+            return session_context.set_active_session(args.session, client=client, **options)
     except LTError as exc:
         # A session that cannot be verified is never recorded: say why and
         # exit non-zero rather than leave captures pointed at it.
@@ -2598,12 +2625,26 @@ def _cmd_hpc_sync(client: LabTracker, args: argparse.Namespace) -> Any:
     )
 
 
-def _cmd_list_questions(client: LabTracker, args: argparse.Namespace) -> Any:
-    return client.list_questions(
-        project_id=args.project,
-        status=args.status,
-        search=args.search,
-    )
+def _cmd_pull(client: LabTracker, args: argparse.Namespace) -> Any:
+    return pull_context.pull_project(client, pull_context.resolve_project_id(args.project))
+
+
+def _cmd_list_questions(args: argparse.Namespace) -> Any:
+    if args.offline:
+        if args.status not in (None, "active"):
+            raise LTAPIError("The local pull contains active questions. Use --status active.")
+        context = pull_context.read_project(pull_context.resolve_project_id(args.project))
+        search = (args.search or "").strip().casefold()
+        return [
+            question.model_dump(mode="json")
+            for question in context.questions if search in question.text.casefold()
+        ]
+    with closing(LabTracker.from_env()) as client:
+        return client.list_questions(
+            project_id=args.project,
+            status=args.status,
+            search=args.search,
+        )
 
 
 def _cmd_list_notes(client: LabTracker, args: argparse.Namespace) -> Any:

@@ -158,6 +158,29 @@ def load_connection_profile(path: Path | None = None) -> dict[str, str]:
     return {}
 
 
+def _connection_endpoint(profile: Mapping[str, str]) -> tuple[str, bool]:
+    """Return the configured instance and whether the saved profile belongs to it."""
+    canonical = os.getenv(BASE_URL_ENV)
+    legacy = os.getenv(LEGACY_MCP_BASE_URL_ENV)
+    env_url = (
+        resolve_instance_base_url(((BASE_URL_ENV, canonical), (LEGACY_MCP_BASE_URL_ENV, legacy)))
+        if canonical or legacy else None
+    )
+    try:
+        profile_url = normalize_instance_base_url(
+            profile.get("base_url") or DEFAULT_BASE_URL,
+            setting_name="connection profile base_url",
+        )
+    except ValueError:
+        return env_url or DEFAULT_BASE_URL, False
+    return env_url or profile_url, env_url is None or env_url == profile_url
+
+
+def configured_instance_url() -> str:
+    """Resolve the instance from local settings without constructing an API client."""
+    return _connection_endpoint(load_connection_profile())[0]
+
+
 def _resolve_install_id() -> str:
     """Read or lazily create a stable per-install id; fail-soft to ""."""
     path = _install_id_path()
@@ -473,38 +496,15 @@ class LabTracker:
         """
 
         profile = load_connection_profile()
-        canonical_env_url = os.getenv(BASE_URL_ENV)
-        legacy_env_url = os.getenv(LEGACY_MCP_BASE_URL_ENV)
-        env_base_url = None
-        if canonical_env_url or legacy_env_url:
-            env_base_url = resolve_instance_base_url(
-                (
-                    (BASE_URL_ENV, canonical_env_url),
-                    (LEGACY_MCP_BASE_URL_ENV, legacy_env_url),
-                )
-            )
+        base_url, profile_matches_instance = _connection_endpoint(profile)
         env_username = os.getenv("LAB_TRACKER_USERNAME") or os.getenv("LAB_TRACKER_MCP_USERNAME")
-        profile_token = profile.get("access_token")
-        profile_project_id = profile.get("default_project_id")
-        try:
-            profile_base_url = normalize_instance_base_url(
-                profile.get("base_url") or DEFAULT_BASE_URL,
-                setting_name="connection profile base_url",
-            )
-        except ValueError:
-            profile_base_url = DEFAULT_BASE_URL
-            profile_token = None
-            profile_project_id = None
-        if env_base_url and env_base_url != profile_base_url:
-            # The profile's token and project id belong to the profile's
-            # server; project ids are per-server, so neither carries over.
-            profile_token = None
-            profile_project_id = None
-        if env_username:
-            profile_token = None
+        profile_token = (
+            profile.get("access_token") if profile_matches_instance and not env_username else None
+        )
+        profile_project_id = profile.get("default_project_id") if profile_matches_instance else None
         env_token = os.getenv("LAB_TRACKER_ACCESS_TOKEN")
         client = cls(
-            base_url=env_base_url or profile_base_url,
+            base_url=base_url,
             username=env_username,
             password=os.getenv("LAB_TRACKER_PASSWORD") or os.getenv("LAB_TRACKER_MCP_PASSWORD"),
             access_token=env_token or profile_token,
