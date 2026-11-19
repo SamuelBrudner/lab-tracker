@@ -45,6 +45,7 @@ from lab_tracker.decision_context_constants import (
     COMMIT_CAPTURE_RECOVERY_POLICY,
     CONNECTION_RECOVERY_POLICY,
     EMPTY_PROJECT_ORIENTATION_POLICY,
+    OFFLINE_CLI_POLICY,
     code_conventions_version_line,
     code_facing_idioms,
     cursor_rules_mdc,
@@ -2020,6 +2021,8 @@ def _agents_fragment() -> str:
         configured (`LAB_TRACKER_GRAPH_DRAFT_PROVIDER`: OpenAI, Anthropic, or
         Google — the lab's choice). See `docs/agent-setup.md` in the Lab
         Tracker repository, or the `lab-tracker://setup-guide` MCP resource.
+
+        {OFFLINE_CLI_POLICY}
 
         {COMMIT_CAPTURE_RECOVERY_POLICY}
 

@@ -29,9 +29,9 @@ short, consent-gated sequence on the `lt` CLI.
 
 ## Consent rules (hard requirements)
 
-- `lt setup status` and `lt setup verify-client` are local read-only
-  checks. `lt setup verify-mcp` launches the configured executable but
-  makes only health and project-list reads.
+- `lt setup status` is read-only and can probe the server. `lt setup
+  verify-client` checks the local installation. `lt setup verify-mcp`
+  launches the configured executable and makes health and project-list reads.
 - Repository setup writes that support `--dry-run` are previewed
   before applying. `lt maintain --dry-run` previews package, repo and
   skill maintenance as one job; a person reviews that plan before
@@ -188,6 +188,16 @@ short, consent-gated sequence on the `lt` CLI.
     server settings an operator turns on. `docs/capture-guide.md` in the
     Lab Tracker repository maps every capture path to its setup.
 
+## Offline acquisition
+
+Use `lt pull --project <project-id>` on the rig while connected to
+refresh active questions and open sessions. During acquisition, use
+`lt list-questions --offline --project <project-id>` and `lt session
+list --project <project-id>` for locally saved IDs, and `lt run
+--no-drain` to queue records. Upload later with `lt outbox sync` when
+the rig can connect. Read the exact command examples in the Lab Tracker
+skill's offline CLI reference or at `lab-tracker://offline-cli`.
+
 ## Projects already underway
 
 Setup configures capture going forward, with one exception. Commit
@@ -288,4 +298,4 @@ rerunning its pinned `uv add` (step 5), which neither `lt update` nor
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.3.0 sha256=39c6dc0a271e -->
+<!-- lab-tracker-setup-guide version=0.3.0 sha256=babc5d7927fe -->

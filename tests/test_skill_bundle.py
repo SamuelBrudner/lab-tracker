@@ -23,6 +23,8 @@ def test_installed_research_skill_references_are_resolvable(tmp_path, monkeypatc
     assert links
     for link in links:
         assert (entry.parent / link).is_file()
+    assert "references/offline-cli.md" in links
+    assert "lab-tracker://offline-cli" in (home / "lab-tracker-setup/SKILL.md").read_text()
     assert _skills_status()["all_resources_up_to_date"] is True
 
 

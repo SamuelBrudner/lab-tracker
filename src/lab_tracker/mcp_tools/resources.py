@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from importlib.resources import files
 from typing import Any
 
 from lab_tracker.decision_context import AGENT_CONSULTATION_POLICY
@@ -38,6 +39,8 @@ def lab_tracker_quickstart() -> str:
         "reuse datasets before analyses, analyses before supported claims or "
         "visualizations, upload visualization files into managed storage when local "
         "figure assets exist, and verify the graph with list tools.\n"
+        "\nFor offline acquisition, see `lab-tracker://offline-cli`. It explains "
+        "which local CLI commands use the last pull and when to sync runs.\n"
     )
 
 
@@ -59,6 +62,12 @@ def lab_tracker_code_conventions() -> str:
 
 def lab_tracker_setup_guide() -> str:
     return setup_guide_markdown()
+
+
+def lab_tracker_offline_cli() -> str:
+    return files("lab_tracker").joinpath(
+        "skill_data", "lab-tracker", "references", "offline-cli.md"
+    ).read_text(encoding="utf-8")
 
 
 def register_resources(server: Any) -> None:
@@ -87,3 +96,8 @@ def register_resources(server: Any) -> None:
         name="Lab Tracker Guided Setup",
         mime_type="text/markdown",
     )(lab_tracker_setup_guide)
+    server.resource(
+        "lab-tracker://offline-cli",
+        name="Lab Tracker Offline CLI for Bench Runs",
+        mime_type="text/markdown",
+    )(lab_tracker_offline_cli)

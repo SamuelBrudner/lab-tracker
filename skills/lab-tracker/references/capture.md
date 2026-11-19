@@ -67,7 +67,9 @@ the person works; setup verbs need their consent (`--dry-run`, then `--yes`).
 - **Runs:** `lt run [--output DIR] -- <command>` records the redacted command
   line, git and working-copy state, a lockfile fingerprint, and hashed
   pointers to files written under `--output`, and exits with the command's
-  own status. See `docs/run-capture.md`.
+  own status. For a rig that must stay offline, use `lt pull` while connected
+  and `lt run --no-drain` during acquisition. See the [offline CLI
+  workflow](offline-cli.md) for local question and session lookup and later sync.
 - **Pipelines, CI, clusters:** `lt pipeline report|nextflow|dvc`, the
   Snakemake and Kedro adapters in `lab_tracker_client.integrations`, the
   `.github/actions/lab-tracker-repo-report` action, `lt hpc submit`, and the

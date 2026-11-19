@@ -37,6 +37,7 @@ from lab_tracker.decision_context_constants import (
     CODE_CONVENTIONS_BLOCK_BEGIN,
     CODE_CONVENTIONS_BLOCK_END,
     COMMIT_CAPTURE_RECOVERY_POLICY,
+    OFFLINE_CLI_POLICY,
     code_conventions_version_line,
     code_facing_idioms,
     cursor_rules_mdc,
@@ -103,6 +104,7 @@ def test_init_creates_portable_consumer_files(tmp_path: Path) -> None:
     assert ".gemini/settings.json" in agents_fragment
     assert "~/.codex/config.toml" in agents_fragment
     assert COMMIT_CAPTURE_RECOVERY_POLICY in agents_fragment
+    assert OFFLINE_CLI_POLICY in agents_fragment
     # Every agent instruction file gets the same activation block; the
     # code-conventions blocks stay behind --yes consent.
     agents_md = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
@@ -122,7 +124,7 @@ def test_init_creates_portable_consumer_files(tmp_path: Path) -> None:
     for prompt_name in ("CLAUDE.md", "AGENTS.md", "GEMINI.md"):
         prompt = (tmp_path / prompt_name).read_text(encoding="utf-8")
         assert COMMIT_CAPTURE_RECOVERY_POLICY in prompt
-        assert prompt.index("lt outbox sync") < prompt.index("lt outbox status")
+        assert OFFLINE_CLI_POLICY in prompt
 
 
 def test_init_skips_existing_files_without_force(tmp_path: Path) -> None:
@@ -450,7 +452,10 @@ def test_update_refreshes_commit_capture_recovery_policy(tmp_path: Path) -> None
         refreshed = path.read_text(encoding="utf-8")
         assert COMMIT_CAPTURE_RECOVERY_POLICY in refreshed
         assert "Stale commit-capture recovery policy." not in refreshed
-        assert refreshed.index("lt outbox sync") < refreshed.index("lt outbox status")
+        connected_recovery = refreshed.split("When network access and upload are permitted,", 1)[1]
+        assert connected_recovery.index("lt outbox sync") < connected_recovery.index(
+            "lt outbox status"
+        )
 
 
 def test_update_never_rewrites_lt_ids(tmp_path: Path) -> None:

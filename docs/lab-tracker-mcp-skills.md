@@ -407,3 +407,7 @@ command and doc; the generated `lab-tracker-setup` skill (installed by
 `lt update --skills-only` refreshes both complete skills machine-wide without
 touching the current directory (a relative `LAB_TRACKER_SKILLS_HOME` resolves
 against the current directory, so keep that override absolute).
+
+For an offline rig, agents can read the [offline CLI reference](../skills/lab-tracker/references/offline-cli.md)
+from the installed skill or the `lab-tracker://offline-cli` MCP resource. It
+covers connected pulls, lookup and capture on the rig, and later outbox sync.

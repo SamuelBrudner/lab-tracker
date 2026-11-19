@@ -32,6 +32,7 @@ from lab_tracker.auth import utc_now
 from lab_tracker.cli import _cursor_mcp_json, _mcp_json
 from lab_tracker.decision_context_constants import code_facing_idioms
 from lab_tracker.mcp_tools import READ_TOOLS, WRITE_TOOLS
+from lab_tracker.skill_bundle import skill_resources
 
 # Path-bound ids must be canonical UUIDs; the client refuses anything else (H7).
 PROJECT_ID = "11111111-1111-4111-8111-111111111111"
@@ -419,7 +420,11 @@ def test_hosted_mcp_bearer_gate_rejects_missing_invalid_and_duplicate_credential
     assert downstream_authorization == [None]
 
 
-def test_valid_hosted_bearer_completes_mcp_initialize_and_resource_read() -> None:
+def test_valid_hosted_bearer_completes_mcp_initialize_and_resource_read(monkeypatch) -> None:
+    def unexpected_api_call(*_args, **_kwargs):
+        pytest.fail("Reading offline CLI guidance must not call the API.")
+
+    monkeypatch.setattr(mcp_server.LabTrackerAPIClient, "_request", unexpected_api_call)
     inbound_token = "inbound-" + "a" * 32
     settings = mcp_server.MCPServerRuntimeSettings(
         transport="streamable-http",
@@ -445,11 +450,20 @@ def test_valid_hosted_bearer_completes_mcp_initialize_and_resource_read() -> Non
             ) as (read_stream, write_stream, _),
             ClientSession(read_stream, write_stream) as session,
         ):
-            await session.initialize()
+            initialized = await session.initialize()
+            assert "lab-tracker://offline-cli" in (initialized.instructions or "")
+            resources = await session.list_resources()
+            assert "lab-tracker://offline-cli" in {str(item.uri) for item in resources.resources}
             resource = await session.read_resource(AnyUrl("lab-tracker://surface"))
+            offline_cli = await session.read_resource(AnyUrl("lab-tracker://offline-cli"))
 
         assert resource.contents
         assert "Lab Tracker" in resource.contents[0].text
+        [guide] = offline_cli.contents
+        assert guide.mimeType == "text/markdown"
+        assert guide.text == skill_resources()["lab-tracker/references/offline-cli.md"]
+        assert 'lt list-questions --offline --project "$PROJECT_ID"' in guide.text
+        assert "lt run --no-drain" in guide.text
 
     asyncio.run(exercise())
 
