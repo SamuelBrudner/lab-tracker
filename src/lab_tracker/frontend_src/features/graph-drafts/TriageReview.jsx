@@ -3,6 +3,7 @@ import * as React from "react";
 import { OperationRow } from "./OperationRow.jsx";
 import { DictateText } from "./DictateText.jsx";
 import { ReasonChips } from "./ReasonChips.jsx";
+import { ProposalSourceEvidence } from "./ProposalSourceEvidence.jsx";
 import { operationProposalText, operationIntent } from "./format.js";
 
 const LANES = [
@@ -77,7 +78,14 @@ function TriageReview({ changeSet, workflow, sourceReview, sourcePreviews, onSho
           {group.kind === "clarification" ? <label>Your answer<textarea value={answers[group.group_id] ?? group.answer ?? ""} disabled={!workflow.canEditDraft || pending} onChange={(event) => setAnswers((current) => ({ ...current, [group.group_id]: event.target.value }))} /></label> : null}
           {group.kind === "clarification" ? <DictateText key={group.group_id} label="Dictate answer" disabled={!workflow.canEditDraft || pending} onText={(text) => setAnswers((current) => ({ ...current, [group.group_id]: text }))} /> : null}
           <div className="triage-changes">
-            {members.map((operation) => <div key={operation.operation_id}><strong>{operationIntent(operation)}</strong><p>{operationProposalText(operation, workflow.payloads)}</p>{operation.rationale ? <p className="subtle">{operation.rationale}</p> : null}{(operation.source_refs || []).map((ref, index) => ref.quote ? <blockquote className="source-snippet" key={index}>{ref.quote}</blockquote> : null)}</div>)}
+            {members.map((operation) => (
+              <div key={operation.operation_id}>
+                <strong>{operationIntent(operation)}</strong>
+                <p>{operationProposalText(operation, workflow.payloads)}</p>
+                {operation.rationale ? <p className="subtle">Proposed rationale · {operation.rationale}</p> : null}
+                <ProposalSourceEvidence sources={changeSet.proposal_evidence?.[operation.operation_id]} />
+              </div>
+            ))}
           </div>
           {members.length ? <p className="subtle">{members.length} {members.length === 1 ? "graph edit" : "related graph edits"}. Keeping this decision records explicit acceptance; an owner commits the graph changes.</p> : null}
           <div className="inline triage-actions">

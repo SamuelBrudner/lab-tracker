@@ -2,8 +2,15 @@
 
 Seeds the golden-day project into a throwaway in-memory database, asks one
 draft client for a batch draft of its fifteen captures, and prints link
-precision/recall, duplicate-question rate and clarification rate so prompt
-versions can be compared on the same day.
+precision/recall, plus independently labelled work-coverage and review-burden
+metrics so prompt versions can be compared on the same day.
+
+The work inventory includes a calibration event deliberately absent from the
+captures. Coverage separates missing capture from missing or incorrectly
+linked work in the draft. A correct question link, grounded follow-up with a source
+link, or specific clarification can represent captured work. Clarification
+cost counts each standalone question and proposed note annotation that asks
+for clarification. A second review item for the same need counts as extra.
 
 ``--provider scripted`` (the default) uses the package's scripted client and
 costs nothing. ``--provider live`` builds the configured provider client from
@@ -111,6 +118,19 @@ def summarize(scores: list[GoldenDayScore]) -> dict[str, Any]:
         "mean_ambiguity_link_rate": mean(score.ambiguity_link_rate for score in scores),
         "mean_proposal_precision": mean(score.proposal_precision for score in scores),
         "mean_proposal_recall": mean(score.proposal_recall for score in scores),
+        "mean_uncaptured_work": mean(len(score.work_coverage.uncaptured_work) for score in scores),
+        "mean_omitted_captured_work": mean(
+            len(score.work_coverage.omitted_captured_work) for score in scores
+        ),
+        "mean_incorrect_question_assignments": mean(
+            score.work_coverage.incorrect_question_assignments for score in scores
+        ),
+        "mean_clarification_review_items": mean(
+            score.work_coverage.clarification_review_items for score in scores
+        ),
+        "mean_unnecessary_clarification_items": mean(
+            score.work_coverage.unnecessary_clarification_items for score in scores
+        ),
     }
 
 

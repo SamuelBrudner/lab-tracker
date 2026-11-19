@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { sourceRefText, sourceRegionStyle } from "./format.js";
+import { sourceRegionStyle } from "./format.js";
 import {
   artifactDisplayName,
   isFigureArtifact,
@@ -112,13 +112,14 @@ function ArtifactPreview({ artifact, operation, operationArtifactCount, preview 
                 className="source-region-box"
                 key={`${artifact.note_id || name}-${index}`}
                 style={style}
-                title={sourceRefText(ref)}
+                title={`Model-selected region: ${ref?.label || name}`}
               >
                 <span>{index + 1}</span>
               </div>
             ))}
           </div>
         </div>
+        {regions.length ? <p className="subtle">Highlighted regions were suggested by the model.</p> : null}
         <button
           type="button"
           className="btn-link source-artifact-expand"

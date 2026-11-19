@@ -301,13 +301,13 @@ describe("GraphDraftDetailCard narrative review", () => {
   });
 
   it("opens citations by hover, focus, and click and routes every decision through the workflow", async () => {
+    const { source_note_id: sourceNoteId, operations: [operation] } = draftFixture();
     const draft = draftFixture({
-      operations: [
-        {
-          ...draftFixture().operations[0],
-          source_refs: [{ label: "voice memo", quote: "courtship dropped after deprivation" }],
-        },
-      ],
+      operations: [{ ...operation, source_refs: [{ label: "voice memo", quote: "Invented quote" }] }],
+      proposal_evidence: { [operation.operation_id]: [
+        { status: "exact_excerpt", excerpt_kind: "transcript", excerpt: "courtship dropped after deprivation", note_id: sourceNoteId, text_shortened: true },
+        { status: "ambiguous" },
+      ] },
     });
     const patchBodies = [];
     let currentDraft = draft;
@@ -340,9 +340,13 @@ describe("GraphDraftDetailCard narrative review", () => {
     });
 
     fireEvent.focus(citation);
-    expect(
-      screen.getByRole("group", { name: "Proposed edit 1 details" })
-    ).toHaveTextContent("courtship dropped after deprivation");
+    const evidence = screen.getByRole("group", { name: "Proposed edit 1 details" });
+    expect(evidence).toHaveTextContent("courtship dropped after deprivation");
+    expect(evidence).toHaveTextContent("Exact quote from saved transcript (derived)");
+    expect(evidence).toHaveTextContent("Source text was shortened for review");
+    expect(evidence).toHaveTextContent("The citation does not identify a single saved source");
+    expect(evidence).not.toHaveTextContent("Invented quote");
+    expect(within(evidence).getByRole("link", { name: "Open source note" })).toHaveAttribute("href", `/app/notes/${sourceNoteId}`);
     fireEvent.keyDown(citation, { key: "Escape" });
     expect(
       screen.queryByRole("group", { name: "Proposed edit 1 details" })

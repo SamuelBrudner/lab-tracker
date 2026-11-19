@@ -34,6 +34,7 @@ from lab_tracker.local_store_locator import (
     canonical_store_uri,
 )
 from lab_tracker.note_text import is_text_content_type
+from lab_tracker.review_source_evidence import ReviewSourceEvidence, source_evidence_by_operation
 
 NoteMetadataScalar = str | bool | int | float
 ClaimConfidence = Annotated[
@@ -901,6 +902,11 @@ class GraphChangeSet(_DomainModel):
     @property
     def source_note_count(self) -> int:
         return len(self.source_note_ids or [self.source_note_id])
+
+    @computed_field
+    @property
+    def proposal_evidence(self) -> dict[UUID, list[ReviewSourceEvidence]]:
+        return source_evidence_by_operation(self)
 
     @computed_field(return_type=dict[str, Any])
     @property

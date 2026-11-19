@@ -10,11 +10,11 @@ import {
   parsedPayloadFromText,
   payloadTargetId,
   semanticLinkTargetType,
-  sourceRefText,
   statusClass,
 } from "./format.js";
 import { ReasonChips } from "./ReasonChips.jsx";
 import { DictateText } from "./DictateText.jsx";
+import { ProposalSourceEvidence } from "./ProposalSourceEvidence.jsx";
 import { SourceArtifactEvidence } from "./SourceArtifactEvidence.jsx";
 
 // Presentational per-proposal editor: proposal body, evidence, typed and raw
@@ -78,16 +78,7 @@ function OperationRow({
               : ""}
           </p>
         ) : null}
-        {(operation.source_refs || []).length > 0 ? (
-          <div className="review-evidence">
-            <div className="subtle">Source evidence</div>
-            {(operation.source_refs || []).map((ref, index) => (
-              <p className="source-snippet" key={`${operation.operation_id}-${index}`}>
-                {sourceRefText(ref)}
-              </p>
-            ))}
-          </div>
-        ) : null}
+        <ProposalSourceEvidence sources={changeSet.proposal_evidence?.[operation.operation_id]} />
         <SourceArtifactEvidence
           artifacts={sourceArtifacts}
           previews={sourcePreviews}

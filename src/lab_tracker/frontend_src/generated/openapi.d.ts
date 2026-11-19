@@ -959,6 +959,7 @@ export interface components {
       "operations"?: Array<components["schemas"]["GraphChangeOperation"]>;
       "project_id": string;
       "prompt_version": string;
+      "proposal_evidence": Record<string, Array<components["schemas"]["ReviewSourceEvidence"]>>;
       "provider"?: string;
       "purpose"?: components["schemas"]["GraphDraftPurpose"];
       "reject_reason_counts": Record<string, Record<string, number>>;
@@ -1333,6 +1334,15 @@ export interface components {
     "ReviewEmailTestRequest": {
       "destination_email": string;
       "recipient_user_id"?: (string | null);
+    };
+    "ReviewSourceEvidence": {
+      "artifact_id"?: (string | null);
+      "excerpt"?: (string | null);
+      "excerpt_kind"?: ("attachment_text" | "note_text" | "transcript" | null);
+      "filename"?: (string | null);
+      "note_id"?: (string | null);
+      "status": "exact_excerpt" | "source_context" | "stored_artifact" | "unverified" | "ambiguous";
+      "text_shortened"?: boolean;
     };
     "Role": "admin" | "editor" | "viewer";
     "Session": {

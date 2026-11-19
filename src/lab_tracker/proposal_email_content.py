@@ -10,6 +10,7 @@ from uuid import UUID
 
 from lab_tracker.models import EntityType, GraphChangeOp, GraphChangeOperation, GraphChangeSet
 from lab_tracker.repository import LabTrackerRepository
+from lab_tracker.review_source_evidence import proposal_source_evidence
 
 _QUESTION_FIELDS = {
     "primary_question_id": "Primary question",
@@ -20,6 +21,35 @@ _QUESTION_FIELDS = {
     "linked_question_id": "Linked question",
     "question_id": "Question",
 }
+
+_EXCERPT_NAMES = {
+    "attachment_text": "saved attachment text",
+    "note_text": "saved note text",
+    "transcript": "saved transcript (derived)",
+}
+
+
+def source_evidence_lines(draft: GraphChangeSet, proposal: GraphChangeOperation) -> list[str]:
+    evidence = proposal_source_evidence(draft, proposal)
+    lines = []
+    for item in evidence[:6]:
+        if item.status == "ambiguous":
+            lines.append("Source evidence: the citation does not identify a single saved source.")
+        elif item.status == "unverified":
+            lines.append("Source evidence: the citation could not be verified against saved text.")
+        if item.artifact_id:
+            lines.append(f"Saved attachment: {item.filename or 'Attachment'} ({item.artifact_id})")
+        if item.excerpt and item.excerpt_kind:
+            source = _EXCERPT_NAMES[item.excerpt_kind]
+            label = "Exact quote from" if item.status == "exact_excerpt" else "Excerpt from"
+            lines.append(f"{label} {source}:\n{item.excerpt}")
+            if item.text_shortened:
+                lines.append("Source text was shortened for review.")
+        if item.note_id:
+            lines.append(f"Source note: {item.note_id}")
+    if len(evidence) > 6:
+        lines.append("Open the full review for additional citations.")
+    return lines
 
 
 def _references(operation: GraphChangeOperation) -> Iterator[tuple[str, Any]]:

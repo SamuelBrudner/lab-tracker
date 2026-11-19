@@ -252,6 +252,39 @@ class _ClarificationOnlyClient(_BatchDraftClient):
         }
 
 
+class _QuotedProposalClient(_BatchDraftClient):
+    def draft_from_batch(self, **kwargs):
+        patch = super().draft_from_batch(**kwargs)
+        [source] = kwargs["batch_context"]["source_artifacts"]
+        patch["operations"][0]["source_refs"] = [
+            {"source_note_ids": [source["note_id"]], "quote": quote, "label": "observation"}
+            for quote in ("Recorded during today's session (0)", "The model invented this line")
+        ]
+        return patch
+
+
+def test_proposal_email_and_api_share_verified_source_evidence(mail_client):
+    client, headers, draft_id, operation_id = _prepare_assigned_mail(
+        *mail_client, draft_client_factory=_QuotedProposalClient
+    )
+    response = client.get(f"/graph-drafts/{draft_id}", headers=headers)
+    assert response.status_code == 200, response.text
+    exact, unsupported = response.json()["data"]["proposal_evidence"][str(operation_id)]
+    assert exact["status"] == "exact_excerpt"
+    assert exact["excerpt"] == "Recorded during today's session (0)"
+    assert unsupported["status"] == "unverified"
+    assert unsupported["excerpt"] == exact["excerpt"]
+    [message] = [
+        mail for mail in _send(client) if "Private proposed question" in mail.get_content()
+    ]
+    body = message.get_content()
+    assert message["To"] == SCIENTIST
+    assert "Exact quote from saved note text:\nRecorded during today's session (0)" in body
+    assert "the citation could not be verified against saved text" in body
+    assert "The model invented this line" not in body
+    assert "Private staged observation" not in body
+
+
 @pytest.fixture
 def clarification_mail(mail_client):
     client, headers, draft_id, operation_id = _prepare_assigned_mail(

@@ -25,7 +25,7 @@ from lab_tracker.models import (
     ReviewEmailDeliveryStatus,
     utc_now,
 )
-from lab_tracker.proposal_email_content import proposal_detail_lines
+from lab_tracker.proposal_email_content import proposal_detail_lines, source_evidence_lines
 from lab_tracker.services.proposal_email_decisions import (
     apply_proposal_email_decision,
     correctable_fields,
@@ -241,6 +241,7 @@ def build_reviewer_message(
     lines.extend(proposal_detail_lines(draft, proposal, api.questions.repository))
     if proposal.rationale:
         lines.extend(("", f"Reason for the proposal: {proposal.rationale}"))
+    lines.extend(("", *source_evidence_lines(draft, proposal)))
     fields = correctable_fields(proposal)
     lines.extend(
         (

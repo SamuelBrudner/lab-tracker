@@ -4,13 +4,14 @@ import {
   operationIntent,
   operationNarrativeAction,
   operationProposalText,
-  sourceRefText,
   statusClass,
 } from "./format.js";
 import { ReasonChips } from "./ReasonChips.jsx";
+import { ProposalSourceEvidence } from "./ProposalSourceEvidence.jsx";
 
 function ProposalCitation({
   operation,
+  sources,
   index,
   payloads,
   reviewNote,
@@ -84,19 +85,7 @@ function ProposalCitation({
                 : ""}
             </span>
           ) : null}
-          {(operation.source_refs || []).length > 0 ? (
-            <span className="proposal-citation-evidence">
-              <span className="subtle">Source evidence</span>
-              {(operation.source_refs || []).map((ref, refIndex) => (
-                <span
-                  className="source-snippet"
-                  key={`${operation.operation_id}-${refIndex}`}
-                >
-                  {sourceRefText(ref)}
-                </span>
-              ))}
-            </span>
-          ) : null}
+          <ProposalSourceEvidence sources={sources} />
           <label className="proposal-citation-note">
             Note for proposed edit {editNumber}
             <textarea
@@ -221,6 +210,7 @@ function NarrativeReview({
                 ) : null}{" "}
                 <ProposalCitation
                   operation={operation}
+                  sources={changeSet.proposal_evidence?.[operationId]}
                   index={index}
                   payloads={payloads}
                   reviewNote={operationReviewNotes[operationId]}

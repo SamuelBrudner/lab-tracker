@@ -324,6 +324,41 @@ def test_specific_clarification_does_not_excuse_an_unjustified_link(
     assert score.link_precision < 1.0
 
 
+def test_work_coverage_distinguishes_capture_and_draft_omissions_from_review_burden(
+    api: LabTrackerAPI, golden_day: tuple[GoldenDayGraph, list[Note]]
+) -> None:
+    graph, notes = golden_day
+    by_slug = {capture_slug(note): note for note in notes}
+    uncaptured = by_slug["imaging_bleaching"]
+    omitted = by_slug["commit"]
+    misrouted = by_slug["bench_dose_1"]
+    patch = golden_day_expected_patch(graph, notes)
+    patch["operations"] = [
+        operation for operation in patch["operations"]
+        if operation["target_entity_id"] not in {str(omitted.note_id), str(uncaptured.note_id)}
+    ]
+    for operation in patch["operations"]:
+        if operation["target_entity_id"] == str(misrouted.note_id):
+            payload = json.loads(operation["payload_json"])
+            for target in payload["targets"]:
+                if target["entity_type"] == "question":
+                    target["entity_id"] = str(graph.question_id("dose_response_near_dup"))
+            operation["payload_json"] = json.dumps(payload)
+    patch["clarification_requests"].append("Could you explain the entire day?")
+
+    staged = [note for note in notes if note.note_id != uncaptured.note_id]
+    draft = api.create_batch_graph_draft(
+        staged, draft_client=ScriptedGoldenDayDraftClient(patch), actor=ADMIN
+    )
+    assert draft.status == GraphChangeSetStatus.READY
+    coverage = score_golden_day(draft, graph, staged).work_coverage
+    assert coverage.uncaptured_work == ["imaging_bleaching", "post_run_calibration"]
+    assert coverage.omitted_captured_work == ["bench_dose_1", "commit"]
+    assert coverage.incorrect_question_assignments == 1
+    assert coverage.clarification_review_items == 5
+    assert coverage.unnecessary_clarification_items == 3
+
+
 @pytest.mark.parametrize(
     "clarification_text", ["Please clarify?", "Which question?", "Which animal and session?"]
 )

@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Final
 from uuid import UUID
 
 from lab_tracker.auth import AuthContext
+from lab_tracker.graph_draft_triage import pending_clarifications
 from lab_tracker.graph_drafting import GraphDraftingError
 from lab_tracker.models import (
     EntityRef,
@@ -34,6 +35,7 @@ from lab_tracker.models import (
     ExplorationNodeType,
     GoalType,
     GraphChangeOp,
+    GraphChangeOperationStatus,
     GraphChangeSet,
     GraphDraftSemanticType,
     Note,
@@ -263,6 +265,15 @@ GOLDEN_DAY_EXPECTED_LINKS: Final[dict[str, frozenset[str]]] = {
     "figure": frozenset({"figure_reproducibility", "dose_response"}),
     "commit": frozenset({"analysis_pipeline"}),
 }
+
+# Hand-labelled work inventory for coverage. The final episode happened in the
+# scenario but produced no capture. The drafter only receives the staged notes.
+GOLDEN_DAY_WORK_EPISODES: Final = frozenset({
+    "bench_dose_1", "bench_dose_2", "bench_pipette", "bench_temperature",
+    "bench_slice_health", "bench_timing", "imaging_drift", "imaging_bleaching",
+    "imaging_pooling", "figure", "commit", MEETING_CAPTURE_SLUG,
+    IDENTIFIER_CAPTURE_SLUG, "followup", AMBIGUOUS_CAPTURE_SLUG, "post_run_calibration",
+})
 
 
 @dataclass(frozen=True)
@@ -637,6 +648,7 @@ def expected_link_pairs(graph: GoldenDayGraph, notes: Sequence[Note]) -> set[tup
     return {
         (by_slug[capture_slug].note_id, graph.question_id(question_slug))
         for capture_slug, question_slugs in GOLDEN_DAY_EXPECTED_LINKS.items()
+        if capture_slug in by_slug
         for question_slug in question_slugs
     }
 
@@ -698,6 +710,16 @@ class ScriptedGoldenDayDraftClient:
 
 
 @dataclass(frozen=True)
+class GoldenDayWorkCoverage:
+    expected_episodes: int
+    uncaptured_work: list[str]
+    omitted_captured_work: list[str]
+    incorrect_question_assignments: int
+    clarification_review_items: int
+    unnecessary_clarification_items: int
+
+
+@dataclass(frozen=True)
 class GoldenDayScore:
     provider: str
     model: str
@@ -711,6 +733,7 @@ class GoldenDayScore:
     proposal_precision: float
     proposal_recall: float
     operation_count: int
+    work_coverage: GoldenDayWorkCoverage
 
 
 def _normalize_question_text(text: str) -> str:
@@ -848,10 +871,11 @@ def _proposal_diagnostics(change_set: GraphChangeSet, notes: Sequence[Note]) -> 
             (
                 slug
                 for slug, concepts in _PROPOSAL_CONCEPTS.items()
-                if str(by_slug[slug].note_id) in sources
+                if slug in by_slug and str(by_slug[slug].note_id) in sources
                 and sources
                 <= {
                     str(by_slug[capture].note_id) for capture in _PROPOSAL_SUPPORTING_CAPTURES[slug]
+                    if capture in by_slug
                 }
                 and text.endswith("?")
                 and not re.search(r"\d", text)
@@ -884,6 +908,7 @@ def _proposal_diagnostics(change_set: GraphChangeSet, notes: Sequence[Note]) -> 
         "new_link_count": len(new_links),
         "unsupported_create_count": len(creates) - valid_creates,
         "unsupported_link_count": len(new_links) - len(valid_links),
+        "linked_proposals": sorted(linked_slugs),
         "missing_proposals": sorted(set(_PROPOSAL_CONCEPTS) - linked_slugs),
         "created_questions": descriptions,
     }
@@ -893,24 +918,35 @@ def _clarification_diagnostics(
     change_set: GraphChangeSet, graph: GoldenDayGraph, notes: Sequence[Note]
 ) -> dict[str, Any]:
     by_slug = _notes_by_slug(notes)
+    standalone = list(pending_clarifications(change_set).values())
+    metadata_prompts: list[tuple[UUID | None, str]] = []
+    for operation in change_set.operations:
+        if (
+            operation.entity_type == EntityType.NOTE
+            and operation.op == GraphChangeOp.UPDATE
+            and operation.status == GraphChangeOperationStatus.PROPOSED
+            and operation.deferred_at is None
+        ):
+            metadata = operation.payload.get("metadata")
+            text = metadata.get("needs_clarification") if isinstance(metadata, dict) else None
+            if isinstance(text, str) and text.strip():
+                metadata_prompts.append((operation.target_entity_id, text))
 
     def requests(slug: str) -> list[str]:
-        note = by_slug[slug]
+        note = by_slug.get(slug)
+        if note is None:
+            return []
         marker = (
             r"\bunassigned\b.*\b(dose|comparison)\b"
             if slug == AMBIGUOUS_CAPTURE_SLUG
             else re.escape(GOLDEN_DAY_IDENTIFIER_CAPTURE.casefold())
         )
         texts = [
-            str(operation.payload.get("metadata", {}).get("needs_clarification") or "")
-            for operation in change_set.operations
-            if operation.entity_type == EntityType.NOTE
-            and operation.op == GraphChangeOp.UPDATE
-            and operation.target_entity_id == note.note_id
+            text for target, text in metadata_prompts if target == note.note_id
         ]
         texts.extend(
             text
-            for text in change_set.clarification_requests
+            for text in standalone
             if re.search(marker, text.casefold()) or str(note.note_id) in text
         )
         return texts
@@ -936,16 +972,18 @@ def _clarification_diagnostics(
         )
         for text in requests(AMBIGUOUS_CAPTURE_SLUG)
     )
+    ambiguous_note = by_slug.get(AMBIGUOUS_CAPTURE_SLUG)
     ambiguous_links = {
         pair
         for pair in _predicted_link_pairs(change_set)
-        if pair[0] == by_slug[AMBIGUOUS_CAPTURE_SLUG].note_id
+        if ambiguous_note is not None and pair[0] == ambiguous_note.note_id
     }
     return {
         "identifier_specific": identifier_ok,
         "dose_choice_specific": bool(ambiguity_ok),
         "recall": (int(identifier_ok) + int(bool(ambiguity_ok))) / 2,
         "ambiguity_link_rate": float(bool(ambiguous_links)),
+        "review_items": len(standalone) + len(metadata_prompts),
     }
 
 
@@ -957,8 +995,6 @@ def score_golden_day(
     """Compare one READY change set for the day against the expected draft."""
 
     expected = expected_link_pairs(graph, notes)
-    if not expected:
-        raise ValueError("The golden day expects at least one note link.")
     predicted = {pair for pair in _predicted_link_pairs(change_set) if isinstance(pair[1], UUID)}
     matched = len(predicted & expected)
     existing_texts = list(golden_day_question_texts().values())
@@ -977,17 +1013,41 @@ def score_golden_day(
     )
     proposals = _proposal_diagnostics(change_set, notes)
     clarification_details = _clarification_diagnostics(change_set, graph, notes)
+    slugs_by_id = {note.note_id: capture_slug(note) for note in notes}
+    captured = GOLDEN_DAY_WORK_EPISODES.intersection(slugs_by_id.values())
+    represented = {slugs_by_id[note_id] for note_id, _ in predicted & expected}
+    represented.update(proposals["linked_proposals"])
+    needed_clarifications = {
+        slug
+        for slug, is_specific in (
+            (IDENTIFIER_CAPTURE_SLUG, clarification_details["identifier_specific"]),
+            (AMBIGUOUS_CAPTURE_SLUG, clarification_details["dose_choice_specific"]),
+        )
+        if is_specific
+    }
+    represented.update(needed_clarifications)
+    review_items = clarification_details["review_items"]
     return GoldenDayScore(
         provider=change_set.provider,
         model=change_set.model,
         prompt_version=change_set.prompt_version,
         link_precision=matched / len(predicted) if predicted else 0.0,
-        link_recall=matched / len(expected),
+        link_recall=matched / len(expected) if expected else 0.0,
         duplicate_create_rate=duplicates / len(create_texts) if create_texts else 0.0,
-        clarification_rate=clarifications / len(notes),
+        clarification_rate=clarifications / len(notes) if notes else 0.0,
         clarification_recall=clarification_details["recall"],
         ambiguity_link_rate=clarification_details["ambiguity_link_rate"],
         proposal_precision=proposals["precision"],
         proposal_recall=proposals["recall"],
         operation_count=len(change_set.operations),
+        work_coverage=GoldenDayWorkCoverage(
+            expected_episodes=len(GOLDEN_DAY_WORK_EPISODES),
+            uncaptured_work=sorted(GOLDEN_DAY_WORK_EPISODES - captured),
+            omitted_captured_work=sorted(captured - represented),
+            incorrect_question_assignments=(
+                len(predicted - expected) + proposals["unsupported_link_count"]
+            ),
+            clarification_review_items=review_items,
+            unnecessary_clarification_items=max(0, review_items - len(needed_clarifications)),
+        ),
     )

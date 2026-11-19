@@ -2,7 +2,14 @@
 
 A scientist can review an assigned daily proposal by replying from their verified
 login email. Each message shows one proposed change, the project, the reason for
-the change when available, and the deadline for replying.
+the change when available, its saved source evidence, and the deadline for replying.
+
+Lab Tracker checks quoted text against the source snapshot saved with the draft.
+Review shows exact matching excerpts, labels saved transcripts as derived, and
+provides a note or attachment identifier when available. A citation is flagged
+when the saved text cannot verify it or the cited source is ambiguous. Image
+highlights are model-selected, and the scientist judges whether the evidence
+supports the proposed change.
 
 ## Enable review in your inbox
 

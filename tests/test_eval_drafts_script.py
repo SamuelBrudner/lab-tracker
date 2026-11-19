@@ -36,6 +36,14 @@ def test_scripted_provider_scores_perfectly(capsys) -> None:
     assert payload["mean_duplicate_create_rate"] == 0.0
     assert len(payload["runs"]) == 1
     assert payload["runs"][0]["operation_count"] > 0
+    assert payload["runs"][0]["work_coverage"] == {
+        "expected_episodes": 16,
+        "uncaptured_work": ["post_run_calibration"],
+        "omitted_captured_work": [],
+        "incorrect_question_assignments": 0,
+        "clarification_review_items": 4,
+        "unnecessary_clarification_items": 2,
+    }
 
 
 def test_repeat_runs_are_independent_and_averaged(capsys) -> None:

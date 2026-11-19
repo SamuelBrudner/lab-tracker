@@ -306,12 +306,6 @@ function sourceRegions(changeSet) {
   return regions;
 }
 
-function sourceRefText(ref) {
-  const label = ref?.label ? `${ref.label}: ` : "";
-  const quote = ref?.quote || "";
-  return `${label}${quote}` || "Source reference";
-}
-
 // A day log the server appended to a batch by rule (no model): the change set
 // records its operation id under context_packet.day_logs, a field only the
 // server writes, so the review page can say who proposed it.
@@ -421,7 +415,6 @@ export {
   payloadText,
   pickAudioMimeType,
   semanticLinkTargetType,
-  sourceRefText,
   sourceRegionStyle,
   sourceRegions,
   spokenReviewScript,
