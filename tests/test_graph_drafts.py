@@ -3824,6 +3824,35 @@ def test_reject_reason_is_validated_and_stored(
     assert "reject_reason" not in accepted_operation["error_metadata"]
 
 
+def test_failed_unreject_does_not_leave_a_stale_reason_for_a_reasonless_rereject(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    change_set_id, operation = _note_graph_draft(client, admin_auth_headers)
+    path = _operation_path(change_set_id, operation)
+    _patch_ok(
+        client, admin_auth_headers, path, {"status": "rejected", "reject_reason": "wrong_target"}
+    )
+
+    # Un-rejecting with a payload that fails validation still leaves the rejected state.
+    invalid_payload = {key: value for key, value in operation["payload"].items() if key != "text"}
+    unrejected_data = _patch_ok(
+        client, admin_auth_headers, path, {"status": "accepted", "payload": invalid_payload}
+    )
+    unrejected = _operation_by_id(unrejected_data, operation["operation_id"])
+    assert unrejected["status"] == "proposed"
+    assert "text" in unrejected["error_metadata"]["message"]
+    assert unrejected["reject_reason"] is None
+    assert "reject_reason" not in unrejected["error_metadata"]
+
+    # A later re-reject that states no reason must not inherit the old one.
+    rerejected_data = _patch_ok(client, admin_auth_headers, path, {"status": "rejected"})
+    rerejected = _operation_by_id(rerejected_data, operation["operation_id"])
+    assert rerejected["status"] == "rejected"
+    assert rerejected["reject_reason"] is None
+    assert "reject_reason" not in rerejected["error_metadata"]
+    assert rerejected_data["reject_reason_counts"] == {"suggest_new_question": {"unspecified": 1}}
+
+
 def test_reject_reason_counts_exposed_on_change_set(
     client: TestClient, admin_auth_headers: dict[str, str]
 ) -> None:
