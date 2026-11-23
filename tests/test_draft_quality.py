@@ -28,6 +28,7 @@ from lab_tracker.graph_drafting import BATCH_PROMPT_VERSION
 from lab_tracker.models import (
     EDITED_AT_KEY,
     EDITED_BY_KEY,
+    REJECT_REASON_KEY,
     REVIEW_NOTE_KEY,
     REVIEWED_AT_KEY,
     REVIEWED_BY_KEY,
@@ -40,6 +41,7 @@ from lab_tracker.models import (
     GraphChangeSetStatus,
     GraphDraftMode,
     GraphDraftSemanticType,
+    GraphOperationRejectReason,
 )
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 from lab_tracker.sqlalchemy_repository_parts.graph_drafts import (
@@ -66,6 +68,7 @@ def _row(
     acceptance_mode: AcceptanceMode | None = None,
     accepted_at: datetime | None = None,
     edited: bool = False,
+    reject_reason: str | None = None,
     provider: str = "openai",
     model: str = "gpt-x",
     prompt_version: str = "v1",
@@ -84,6 +87,7 @@ def _row(
         acceptance_mode=acceptance_mode,
         accepted_at=accepted_at,
         edited_before_accept=edited,
+        reject_reason=reject_reason,
     )
 
 
@@ -151,7 +155,66 @@ def test_aggregate_counts_each_cell_and_split_by_acceptance_mode() -> None:
     assert cell.accepted_bulk_accepted == 1
     assert cell.edited_before_accept == 1
     assert cell.rejected == 1
+    assert cell.reject_reason_counts == {"unspecified": 1}
     assert cell.left_proposed_at_commit == 1
+
+
+def test_aggregate_splits_rejections_by_reason_per_cell() -> None:
+    change_set_id = uuid4()
+    rejected = GraphChangeOperationStatus.REJECTED
+    link = GraphDraftSemanticType.LINK_NOTE_TO_QUESTION
+    question = GraphDraftSemanticType.SUGGEST_NEW_QUESTION
+    rows = [
+        _row(
+            change_set_id=change_set_id,
+            operation_status=rejected,
+            reject_reason=GraphOperationRejectReason.WRONG_TARGET.value,
+        ),
+        _row(
+            change_set_id=change_set_id,
+            operation_status=rejected,
+            reject_reason=GraphOperationRejectReason.DUPLICATE_OF_EXISTING.value,
+        ),
+        _row(
+            change_set_id=change_set_id,
+            operation_status=rejected,
+            reject_reason=GraphOperationRejectReason.WRONG_TARGET.value,
+        ),
+        _row(change_set_id=change_set_id, operation_status=rejected),
+        # A reason left on an operation that is no longer rejected is not a rejection.
+        _row(
+            change_set_id=change_set_id,
+            operation_status=GraphChangeOperationStatus.PROPOSED,
+            reject_reason=GraphOperationRejectReason.NOT_NOW.value,
+        ),
+        _row(
+            change_set_id=change_set_id,
+            semantic_type=question,
+            operation_status=rejected,
+            reject_reason=GraphOperationRejectReason.DUPLICATE_OF_EXISTING.value,
+        ),
+        _row(
+            change_set_id=change_set_id,
+            semantic_type=question,
+            operation_status=GraphChangeOperationStatus.ACCEPTED,
+            acceptance_mode=AcceptanceMode.HUMAN_SELECTED,
+        ),
+    ]
+
+    ledger = aggregate_draft_quality(uuid4(), None, rows)
+
+    cells = {cell.semantic_type: cell for cell in ledger.cells}
+    assert cells[link].rejected == 4
+    assert cells[link].reject_reason_counts == {
+        "duplicate_of_existing": 1,
+        "unspecified": 1,
+        "wrong_target": 2,
+    }
+    assert list(cells[link].reject_reason_counts) == sorted(cells[link].reject_reason_counts)
+    assert cells[question].rejected == 1
+    assert cells[question].reject_reason_counts == {"duplicate_of_existing": 1}
+    for cell in ledger.cells:
+        assert sum(cell.reject_reason_counts.values()) == cell.rejected
 
 
 def test_aggregate_groups_change_set_stats_and_medians() -> None:
@@ -263,7 +326,10 @@ def _saved_change_set(
     note_id: UUID,
     created_at: datetime,
     operations: int,
+    rejected: tuple[str | None, ...] = (),
 ) -> GraphChangeSet:
+    """Save ``operations`` accepted links (the first edited), then one rejection per reason."""
+
     change_set_id = uuid4()
     change_set = GraphChangeSet(
         change_set_id=change_set_id,
@@ -293,6 +359,20 @@ def _saved_change_set(
                 error_metadata={EDITED_AT_KEY: created_at.isoformat()} if sequence == 1 else {},
             )
             for sequence in range(1, operations + 1)
+        ]
+        + [
+            GraphChangeOperation(
+                operation_id=uuid4(),
+                change_set_id=change_set_id,
+                sequence=operations + offset,
+                op=GraphChangeOp.UPDATE,
+                entity_type=EntityType.NOTE,
+                semantic_type=GraphDraftSemanticType.LINK_NOTE_TO_QUESTION,
+                target_entity_id=note_id,
+                status=GraphChangeOperationStatus.REJECTED,
+                error_metadata={REJECT_REASON_KEY: reason} if reason is not None else {},
+            )
+            for offset, reason in enumerate(rejected, start=1)
         ],
     )
     api.graph_drafts.records.save_graph_change_set(change_set)
@@ -307,7 +387,12 @@ def _assert_rows_join_operations_and_filter_since(api: LabTrackerAPI) -> None:
         project_id=other_project.project_id, raw_content="elsewhere", actor=ADMIN
     )
     early = _saved_change_set(
-        api, project_id=project.project_id, note_id=note.note_id, created_at=T0, operations=2
+        api,
+        project_id=project.project_id,
+        note_id=note.note_id,
+        created_at=T0,
+        operations=2,
+        rejected=(GraphOperationRejectReason.DUPLICATE_OF_EXISTING.value, None),
     )
     late = _saved_change_set(
         api,
@@ -330,14 +415,21 @@ def _assert_rows_join_operations_and_filter_since(api: LabTrackerAPI) -> None:
     assert [row.change_set_id for row in rows] == [
         early.change_set_id,
         early.change_set_id,
+        early.change_set_id,
+        early.change_set_id,
         late.change_set_id,
     ]
-    first, second, empty = rows
+    first, second, duplicate, reasonless, empty = rows
     assert first.operation_status == GraphChangeOperationStatus.ACCEPTED
     assert first.acceptance_mode == AcceptanceMode.HUMAN_SELECTED
     assert first.accepted_at == T0 + timedelta(seconds=1)
     assert first.edited_before_accept is True
+    assert first.reject_reason is None
     assert second.edited_before_accept is False
+    assert duplicate.operation_status == GraphChangeOperationStatus.REJECTED
+    assert duplicate.reject_reason == GraphOperationRejectReason.DUPLICATE_OF_EXISTING.value
+    assert reasonless.operation_status == GraphChangeOperationStatus.REJECTED
+    assert reasonless.reject_reason is None
     assert first.clarification_request_count == 1
     assert first.change_set_created_at == T0
     assert first.change_set_status == GraphChangeSetStatus.READY
@@ -348,6 +440,7 @@ def _assert_rows_join_operations_and_filter_since(api: LabTrackerAPI) -> None:
     assert empty.acceptance_mode is None
     assert empty.accepted_at is None
     assert empty.edited_before_accept is False
+    assert empty.reject_reason is None
     assert empty.clarification_request_count == 1
 
     since_rows = repository.query_draft_quality_rows(
@@ -411,6 +504,32 @@ def test_service_rejects_naive_since() -> None:
 
     with pytest.raises(ValidationError, match="timezone offset"):
         api.draft_quality_ledger(project.project_id, since=datetime(2026, 1, 1), actor=ADMIN)
+
+
+def test_service_counts_unrecognised_stored_reject_reason_under_its_raw_text() -> None:
+    # A reason the enum no longer knows (e.g. a removed member on a legacy row)
+    # must not fail the whole ledger read; it is counted as stored.
+    api = repository_backed_api()
+    project = api.create_project("Legacy reasons", actor=ADMIN)
+    note = api.create_note(project_id=project.project_id, raw_content="capture", actor=ADMIN)
+    _saved_change_set(
+        api,
+        project_id=project.project_id,
+        note_id=note.note_id,
+        created_at=T0,
+        operations=1,
+        rejected=("legacy_removed", GraphOperationRejectReason.WRONG_TARGET.value, None),
+    )
+
+    ledger = api.draft_quality_ledger(project.project_id, actor=ADMIN)
+
+    [cell] = ledger.cells
+    assert cell.rejected == 3
+    assert cell.reject_reason_counts == {
+        "legacy_removed": 1,
+        "unspecified": 1,
+        "wrong_target": 1,
+    }
 
 
 def test_service_returns_empty_ledger_for_project_without_drafts() -> None:
@@ -562,7 +681,13 @@ def _review_walkthrough(client: TestClient, headers: dict[str, str]) -> ReviewWa
             "status": "accepted",
         },
     )
-    _patch(client, headers, first_id, rejected, {"status": "rejected", "review_note": "dup"})
+    _patch(
+        client,
+        headers,
+        first_id,
+        rejected,
+        {"status": "rejected", "review_note": "dup", "reject_reason": "duplicate_of_existing"},
+    )
 
     note_c = _staged_note(client, headers, project_id, "Second day: lane 3.")
     note_d = _staged_note(client, headers, project_id, "Second day: lane 4.")
@@ -629,6 +754,7 @@ def test_draft_quality_route_reports_review_outcomes(
         "accepted_auto_accepted": 0,
         "edited_before_accept": 1,
         "rejected": 1,
+        "reject_reason_counts": {"duplicate_of_existing": 1},
         "left_proposed_at_commit": 0,
     }
     assert cells["suggest_new_question"] == {
@@ -643,6 +769,7 @@ def test_draft_quality_route_reports_review_outcomes(
         "accepted_auto_accepted": 0,
         "edited_before_accept": 0,
         "rejected": 0,
+        "reject_reason_counts": {},
         "left_proposed_at_commit": 1,
     }
     [group] = ledger["groups"]
@@ -757,4 +884,5 @@ def test_commit_preserves_edited_at_but_clears_other_operation_metadata(
     rejected = operations[walk.rejected_operation_id]
     assert rejected["status"] == "rejected"
     assert rejected["error_metadata"]["review_note"] == "dup"
+    assert rejected["error_metadata"]["reject_reason"] == "duplicate_of_existing"
     assert rejected["error_metadata"]["reviewed_at"]

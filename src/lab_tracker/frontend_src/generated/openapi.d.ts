@@ -775,6 +775,7 @@ export interface components {
       "prompt_version": string;
       "proposed"?: number;
       "provider": string;
+      "reject_reason_counts"?: Record<string, number>;
       "rejected"?: number;
       "semantic_type"?: (components["schemas"]["GraphDraftSemanticType"] | null);
     };

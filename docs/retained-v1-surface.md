@@ -519,7 +519,11 @@ research record:
   prompt_version x semantic type it reports proposed, accepted split by
   `human_selected`, `bulk_accepted`, and `auto_accepted`, edited-before-accept, rejected, and
   left-proposed-at-commit counts, plus per-group clarification counts and
-  median seconds to first accept and to review. It is a read of the review
+  median seconds to first accept and to review. Rejected counts are also
+  split by the reviewer's structured reject reason (`reject_reason_counts`;
+  rejections without a reason count as `unspecified`, and a stored reason
+  the current vocabulary no longer lists counts under its stored text), which commit leaves
+  in place because it rewrites only applied operations. It is a read of the review
   record, never a gate, and never auto-accepts anything. Commit keeps the
   `edited_at`/`edited_by` review-audit keys on applied operations so the
   edited-before-accept count survives commit; operations committed before
