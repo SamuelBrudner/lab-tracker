@@ -9,8 +9,10 @@ arithmetic is testable with hand-built rows.
 Counts are bucketed by provider x model x prompt version x semantic type so a
 prompt revision can be compared against its predecessor, and per-group
 change-set statistics (clarification counts, median seconds to first accept
-and to review) sit beside them. The ledger is a read of the review record,
-never a gate: it auto-accepts nothing and changes no status.
+and to review) sit beside them. Each cell also splits its rejections by the
+reviewer's structured reason, so a drafting change can target the failure
+that dominates. The ledger is a read of the review record, never a gate: it
+auto-accepts nothing and changes no status.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from uuid import UUID
 from lab_tracker.models import (
     EDITED_AT_KEY,
     EDITED_BY_KEY,
+    UNSPECIFIED_REJECT_REASON,
     AcceptanceMode,
     DraftQualityCell,
     DraftQualityGroupStats,
@@ -55,6 +58,11 @@ class DraftQualityRow:
     ``operation_status`` (and the other operation fields) are ``None`` when the
     LEFT JOIN produced a change set with no operations; such rows still count
     towards the change-set statistics but never towards a cell.
+
+    ``reject_reason`` is the stored reason text, not a parsed
+    ``GraphOperationRejectReason``: like ``GraphChangeSet.reject_reason_counts``,
+    the ledger counts a reason it does not recognise under its raw text rather
+    than failing the whole read over one legacy row.
     """
 
     change_set_id: UUID
@@ -70,6 +78,7 @@ class DraftQualityRow:
     acceptance_mode: AcceptanceMode | None
     accepted_at: datetime | None
     edited_before_accept: bool
+    reject_reason: str | None
 
     @property
     def group_key(self) -> GroupKey:
@@ -101,6 +110,7 @@ class _CellCounts:
     accepted_auto_accepted: int = 0
     edited_before_accept: int = 0
     rejected: int = 0
+    reject_reasons: dict[str, int] = field(default_factory=dict)
     left_proposed_at_commit: int = 0
 
     def add(self, row: DraftQualityRow) -> None:
@@ -117,6 +127,8 @@ class _CellCounts:
                 self.edited_before_accept += 1
         elif row.operation_status == GraphChangeOperationStatus.REJECTED:
             self.rejected += 1
+            reason = row.reject_reason or UNSPECIFIED_REJECT_REASON
+            self.reject_reasons[reason] = self.reject_reasons.get(reason, 0) + 1
         elif (
             row.operation_status == GraphChangeOperationStatus.PROPOSED
             and row.change_set_status == GraphChangeSetStatus.COMMITTED
@@ -227,6 +239,7 @@ def aggregate_draft_quality(
                 accepted_auto_accepted=counts.accepted_auto_accepted,
                 edited_before_accept=counts.edited_before_accept,
                 rejected=counts.rejected,
+                reject_reason_counts=dict(sorted(counts.reject_reasons.items())),
                 left_proposed_at_commit=counts.left_proposed_at_commit,
             )
             for key, counts in sorted(cells.items(), key=lambda item: _cell_sort_key(item[0]))

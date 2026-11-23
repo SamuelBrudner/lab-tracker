@@ -1829,6 +1829,10 @@ class DraftQualityCell(_DomainModel):
     accepted_auto_accepted: int = Field(default=0, ge=0)
     edited_before_accept: int = Field(default=0, ge=0)
     rejected: int = Field(default=0, ge=0)
+    # ``rejected`` split by structured reason, keys sorted, zero buckets omitted;
+    # a rejection without a reason counts as ``unspecified`` and an unrecognised
+    # stored reason counts under its stored text.
+    reject_reason_counts: dict[str, int] = Field(default_factory=dict)
     left_proposed_at_commit: int = Field(default=0, ge=0)
 
 

@@ -28,6 +28,7 @@ from lab_tracker.member_onboarding import ALIGNMENT_MODE_KEY
 from lab_tracker.models import (
     DEFERRED_AT_KEY,
     EDITED_AT_KEY,
+    REJECT_REASON_KEY,
     AcceptanceMode,
     EntityType,
     GraphChangeOp,
@@ -105,8 +106,10 @@ def _draft_quality_row_from_tuple(row: Row[Any]) -> DraftQualityRow:
     """Map one LEFT JOIN result tuple onto the ledger's typed row.
 
     Operation columns are ``None`` for a change set without operations; the
-    edited-before-accept flag is evaluated in Python on the fetched JSON so
-    the projection needs no dialect-specific JSON SQL.
+    edited-before-accept flag and the reject reason are read in Python from the
+    fetched JSON so the projection needs no dialect-specific JSON SQL. The
+    reason stays raw text, so a value the enum no longer knows is counted
+    rather than failing the ledger.
     """
 
     (
@@ -124,6 +127,8 @@ def _draft_quality_row_from_tuple(row: Row[Any]) -> DraftQualityRow:
         accepted_at,
         error_metadata,
     ) = row
+    metadata = _dict(error_metadata)
+    reject_reason = metadata.get(REJECT_REASON_KEY)
     return DraftQualityRow(
         change_set_id=ensure_uuid(change_set_id),
         provider=provider,
@@ -139,7 +144,8 @@ def _draft_quality_row_from_tuple(row: Row[Any]) -> DraftQualityRow:
         ),
         acceptance_mode=AcceptanceMode(acceptance_mode) if acceptance_mode else None,
         accepted_at=_as_utc_optional(accepted_at),
-        edited_before_accept=EDITED_AT_KEY in _dict(error_metadata),
+        edited_before_accept=EDITED_AT_KEY in metadata,
+        reject_reason=reject_reason if isinstance(reject_reason, str) else None,
     )
 
 
