@@ -316,8 +316,14 @@ class GraphDraftReviewCoordinator(BaseService):
                     if key in retained_keys and value is not None
                 }
             except ValidationError as exc:
+                # An invalid payload does not undo leaving the rejected state, so drop what
+                # the success path drops (a stale reject reason included) before the message.
                 operation.error_metadata = {
-                    **operation.error_metadata,
+                    **{
+                        key: value
+                        for key, value in operation.error_metadata.items()
+                        if key in retained_keys and value is not None
+                    },
                     "message": str(exc),
                 }
                 if operation.status == GraphChangeOperationStatus.ACCEPTED:
